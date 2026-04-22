@@ -4,6 +4,17 @@
 **"오늘 한 일 저장"** 요청 시 최신 날짜가 상단에 추가됩니다.
 
 ---
+## 📅 2026-04-22
+### GATv2 Training Smoke Test Binding 및 신규 스킬 제정
+
+- dataset_full_20260422_084243 successfully bound to train_gatv2.py
+- Samsung Galaxy Book 5 Pro CPU-based training smoke test PASS
+- 128 files / batch_size 1 / 3 epochs stability test PASS
+- node-level GATv2 forward, loss, backward, optimizer step verified
+- laptop is sufficient for pipeline validation, but full-scale training should be migrated to H200 server
+- **새 스킬 `gatv2_training_smoke_test_binding` 추가됨** (`05_training/skills/gatv2_training_smoke_test_binding.md`)
+
+---
 ## 📅 2026-04-21
 ### GATv2 전체 데이터셋 빌드 성공 및 파이프라인 승인 [APPROVED]
 
