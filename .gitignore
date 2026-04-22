@@ -1,0 +1,60 @@
+config/secrets.json
+
+# Temporary files and output logs
+*.txt
+*.log
+tmp_*.sql
+.tmp.drivedownload/
+.tmp.driveupload/
+
+# Data and large binary files
+data/
+*.zip
+*.pdf
+*.docx
+*.shp
+*.csv
+*.db
+*.sqlite
+
+# Agent generated artifacts and scratch
+artifacts/
+scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
