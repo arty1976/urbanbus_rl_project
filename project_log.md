@@ -5,49 +5,41 @@
 
 ---
 ## 📅 2026-04-24
-### Canonical KPI Aggregator 배선 완료 및 B0/B1/B2/[A] 4조건 Smoke Validation 통과
+### Canonical KPI Aggregator 배선 완료 및 B1 Replay-backed Rollout 성공 (Phase 1)
 
-오늘 작업에서는 B0 historical baseline(기준선), B1 No-op baseline(무개입 기준선), B2 rule-based baseline(규칙 기반 기준선), [A] pure MAPPO (Multi-Agent Proximal Policy Optimization=다중 에이전트 근접 정책 최적화) 조건이 모두 공통 KPI (Key Performance Indicator=핵심 성과 지표) 집계 경로에 연결되도록 canonical aggregator(표준 집계기)와 smoke용 window_rollup 스텁을 정비했다.
+오늘 작업에서는 B1 No-op baseline의 실행기를 스텁에서 실제 리플레이 기반으로 확장하고, B0/B1/B2/[A] 전 조건이 공통 KPI 집계 경로에 연결되도록 canonical aggregator 파이프라인을 정비했다. 특히 B1은 이제 단순 스텁이 아닌 어댑터 기반의 실제 롤아웃 데이터를 생성한다.
 
-#### 1. Simulator Adapter 인터페이스 확정 및 Phase 1 Smoke Validation 체계 구축
+#### 1. B1 No-op Rollout Writer 구현 및 실행 완료 (Phase 1)
+- **파일**: `05_training/run_b1_noop_rollout.py` 고도화 완료.
+- **기능**: `HistoricalReplayAdapter`를 로드하여 각 시나리오 윈도우에 대해 `reset()` -> `step()` 과정을 수행하고 실측 데이터를 모사한 아티팩트를 생성함.
+- **산출물**: 
+  - `raw_events.parquet`: 에이전트별 행동 및 보상 기록 (비인과 리플레이).
+  - `window_rollup.parquet`: 표준 집계기용 KPI 요약 데이터.
+  - `status.json` / `run_manifest.json`: 비인과성 경고 및 메타데이터 포함.
+- **검증**: Seed 001에 대해 128개 윈도우 롤아웃 실행 및 `canonical_kpi_aggregator.py` 통과 확인 (**Real-ish PASS**).
+
+#### 2. Simulator Adapter 인터페이스 확정 및 Phase 1 Smoke Validation 체계 구축
 - **Simulator Adapter 인터페이스 설계**: `05_training/simulator_adapter_interface.py` 정의. CTDE 기반 `ObsDict`, Multi-Agent `StepResult`, `GraphSkeleton` 확장 포함.
 - **HistoricalReplayAdapter 구현**: Phase 1 전용 비인과적(Non-causal) 리플레이 어댑터 구축 및 smoke validation 용도 제한 명시.
 - **MAPPO Runner 고도화**: 어댑터 동적 로드 및 `reset()`, `get_graph_skeleton()` 호출 실측 기능 보강.
 
-#### 2. canonical_kpi_aggregator.py 실파일 생성 및 실행 경로 정착
+#### 3. canonical_kpi_aggregator.py 실파일 생성 및 실행 경로 정착
 - 생성 파일: `05_training/evaluation/canonical_kpi_aggregator.py`
-- 실행 모드 2종을 실제 검증함:
-  - `legacy_b0_passthrough`
-  - `official_rollup`
-- 공통 출력 5종 생성 확인:
-  - `kpi_by_window.parquet`, `kpi_by_seed.parquet`, `kpi_by_time_band.parquet`, `kpi_overall.json`, `aggregation_manifest.json`
+- 실행 모드 2종 검증: `legacy_b0_passthrough`, `official_rollup`.
+- 공통 출력 5종(`kpi_by_window.parquet` 등) 생성 확인.
 
-#### 3. B0 historical baseline canonical bridge 통과
-- 입력: `artifacts/baseline_v1/B0_historical/kpi_by_window.parquet`
-- 출력: `artifacts/baseline_v1/B0_historical/canonical_eval/*`
-- 결과: `legacy_b0_passthrough` smoke PASS
-- 해석: 기존 B0 artifact가 canonical KPI 집계 체계에 정상 연결됨
+#### 4. 현재 판정 및 제약 사항
+- **상태**: 
+  - B0: **completed** (Legacy Pass)
+  - B1: **completed** (Real-ish Pass via Historical Replay)
+  - B2/A: **smoke PASS** (via Stub rollup)
+- **한계**: 현재 모든 PASS는 평가 계약 및 파일 경로 규약의 정합성 검증 성공을 의미하며, **비인과적 리플레이 기반**이므로 실제 성능 비교 자료로 사용 불가.
 
-#### 4. B1/B2/A Smoke용 window_rollup 스텁 생성 및 official_rollup 통과
-- **B1 No-op**: `generate_b1_window_rollup_stub.py`를 통해 `window_rollup.parquet` 생성 및 `official_rollup` smoke PASS.
-- **B2 Rule-based**: `generate_window_rollup_stub.py`를 통해 `window_rollup.parquet` 생성 및 `official_rollup` smoke PASS.
-- **[A] pure MAPPO**: experiment_A_v1 경로 내 `window_rollup.parquet` 생성 및 `official_rollup` smoke PASS.
-- **주의**: 현재는 시뮬레이터 기반 real rollout이 아니라 canonical aggregator 배선 검증용 stub 입력임.
-
-#### 5. 오늘 해결한 주요 구현 이슈
-- **의존성 해결**: `pandas.read_parquet()` 실행을 위한 `pyarrow` 엔진 설치 및 연동 확인.
-- **Fallback 로직 보정**: `canonical_kpi_aggregator.py`에서 `qwen_trigger_rate` 결측 시 DataFrame 길이에 맞는 Series로 기본값을 주입하도록 수정하여 브로드캐스팅 오류 해결.
-- **경로 표시 교정**: 콘솔 로그의 `canonical_nnonical_eval` 오타는 출력부의 단순 표시 문제임을 확인, 실제 파일 시스템 경로는 정상(`canonical_eval`)임을 교차 검증.
-
-#### 6. 현재 판정 및 제약 사항
-- **상태**: B0/B1/B2/[A] 전 조건 **smoke PASS**.
-- **한계**: 위 PASS는 평가 계약 및 파일 경로 규약의 정합성 검증 성공을 의미하며, **실제 인과적(Causal) 평가 결과가 아님**. 현재 시점에서 공식 성능 비교 자료로 사용 불가.
-
-#### 7. 다음 단계 (Next Steps)
-- `run_b1_noop_rollout.py`를 real `window_rollup.parquet` 출력으로 확장.
-- B2 rule-based real rollout 실행기(Runner) 작성.
+#### 5. 다음 단계 (Next Steps)
+- B2 rule-based real rollout 실행기(Runner) 작성 및 `HistoricalReplayAdapter` 연결.
 - [A] MAPPO runner가 실제 `window_rollup.parquet`를 생성하도록 어댑터 연결.
-- 이후 canonical aggregator를 재실행하여 stub PASS에서 **real PASS**로 승격.
+- 모든 조건이 리플레이 기반 실측 데이터를 생성하면 전체 파이프라인을 **Real-ish PASS**로 승격.
+- Phase 2 인과 시뮬레이터(Causal Simulator) 어댑터 준비.
 
 ---
 ## 📅 2026-04-23
@@ -341,7 +333,17 @@ MAT-5 의 `(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 가
 | **build_gatv2_dataset.py** | **smoke test PASSED** |
 | GATv2 model / train / eval | TODO |
 
-GATv2 학습 코드 작성으로 즉시 진행 가능.
+### RL Baseline & Rollout 진척도 (2026-04-24 기준)
+
+| 레이어 / 태스크 | 상태 |
+|-------|------|
+| simulator_adapter_interface | **APPROVED** |
+| HistoricalReplayAdapter | **APPROVED (Phase 1)** |
+| B0 Historical Baseline | **COMPLETED (Legacy Pass)** |
+| B1 No-op Baseline (Replay) | **COMPLETED (Real-ish Pass)** |
+| B2 Rule-based Baseline | Smoke PASS (Stub) |
+| [A] Pure MAPPO Baseline | Smoke PASS (Stub) |
+| Canonical KPI Aggregator | **APPROVED (official_rollup)** |
 
 ---
 ## 📅 2026-04-19
