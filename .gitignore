@@ -16,6 +16,8 @@ data/
 *.csv
 *.db
 *.sqlite
+*.parquet
+*.pt
 
 # Agent generated artifacts and scratch
 artifacts/

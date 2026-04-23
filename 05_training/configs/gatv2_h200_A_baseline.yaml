@@ -1,0 +1,27 @@
+﻿experiment:
+  project_name: urbanbus_rl_project
+  run_name: A_pure_mappo_baseline_linked
+  condition_id: A
+  condition_name: pure_mappo_baseline
+  description: "Phase-1 [A] linked to baseline_contract.json"
+  qwen:
+    enabled_train: false
+    enabled_inference: false
+
+paths:
+  baseline_contract_path: ./artifacts/baseline_v1/baseline_contract.json
+  experiment_contract_output_dir: ./artifacts/experiment_A_v1
+  train_manifest: ./data/manifests/train_manifest.txt
+  val_manifest: ./data/manifests/val_manifest.txt
+  test_manifest: ./data/manifests/test_manifest.txt
+
+evaluation:
+  use_baseline_contract: true
+  evaluation_horizon_minutes: 30
+  shared_kpis:
+    - cv_headway
+    - avg_wait_seconds
+    - bunching_rate
+    - on_time_rate
+    - intervention_rate
+    - energy_proxy

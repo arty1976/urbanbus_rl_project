@@ -4,6 +4,115 @@
 **"오늘 한 일 저장"** 요청 시 최신 날짜가 상단에 추가됩니다.
 
 ---
+## 📅 2026-04-23
+### B0/B1/B2 Baseline 완성 및 [A] MAPPO 학습 골격(Stub) 구축
+
+오늘 작업에서는 강화학습 시뮬레이션을 위한 기준선(Baseline) 프레임워크를 정립하고, B0(Historical) 지표를 데이터베이스 및 Parquet 형태로 확보했습니다. 더불어 시뮬레이터가 부재한 현재 상태를 반영해 B1(No-op) 및 B2(Rule-based)의 실행 전 메타데이터를 마련했으며, 최종적으로 [A] 순수 MAPPO 모델의 러너(Runner) 골격을 구성했습니다.
+
+#### 1. B0 Historical Baseline 완료
+- **생성 완료**: `public.baseline_b0_historical_kpi_by_window`, `public.baseline_b0_historical_kpi_metadata`
+- **6개 KPI 계약 컬럼 고정**: `cv_headway`, `avg_wait_seconds`, `bunching_rate`, `on_time_rate`, `intervention_rate`, `energy_proxy`
+- **데이터 상태**:
+  - 채워진 값: `avg_wait_seconds`, `intervention_rate`
+  - NULL 유지: `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy`
+- **검증 결과**:
+  - `row_count = 6570`
+  - `min_state_ts = 2023-01-01 05:00:00+09`
+  - `max_state_ts = 2023-12-31 22:00:00+09`
+  - `wait_filled_rows = 6570`
+  - `cv_headway_null_rows = 6570`
+  - `zero_intervention_rows = 6570`
+
+#### 2. B0 Artifact Export 완료
+- **생성 산출물**:
+  - `artifacts/baseline_v1/B0_historical/kpi_by_window.parquet`
+  - `artifacts/baseline_v1/B0_historical/metadata.json`
+
+#### 3. B1 No-op Baseline 준비 완료
+- **생성 산출물**:
+  - `artifacts/baseline_v1/B1_noop/scenario_index.parquet`
+  - `artifacts/baseline_v1/B1_noop/policy_config.json`
+  - `artifacts/baseline_v1/B1_noop/rollouts/seed_001` ~ `seed_003` (내부에 `run_manifest.json` 생성 완료)
+  - `run_b1_noop_rollout.py` 골격 생성 완료
+- **현재 상태**: `prepared_not_executed` (사유: replay simulator adapter 부재)
+
+#### 4. B2 Rule-based Baseline 준비 완료
+- **생성 산출물**:
+  - `artifacts/baseline_v1/B2_rulebased/scenario_index.parquet`
+  - `artifacts/baseline_v1/B2_rulebased/policy_config.json`
+  - `artifacts/baseline_v1/B2_rulebased/rollouts/seed_001` ~ `seed_003`
+- **현재 상태**: `prepared_not_executed` (사유: replay simulator adapter 부재)
+- **B2 Rule Params 확정**:
+  - `target_headway_seconds = 600`
+  - `low_headway_threshold_seconds = 360`
+  - `high_headway_threshold_seconds = 900`
+  - `max_hold_seconds = 120`
+  - `allow_skip = true`
+
+#### 5. baseline_contract.json 확정
+- **생성 산출물**: `artifacts/baseline_v1/baseline_contract.json`
+- **공통 계약**:
+  - `evaluation_horizon_minutes = 30`
+  - `seeds = [1, 2, 3]`
+  - `time_bands = [peak, offpeak, night]`
+  - `shared_kpis` = 6종 고정
+  - `fairness_constraints`:
+    - `same_initial_state = true`
+    - `same_exogenous_events = true`
+    - `same_eval_window = true`
+- **Baseline 상태 스냅샷**: `B0 = completed`, `B1 = prepared_not_executed`, `B2 = prepared_not_executed`
+
+#### 6. [A] pure_mappo_baseline 계약 연결 완료
+- **조건 명세**:
+  - `condition_id = A`
+  - `qwen_train = false`
+  - `qwen_inference = false`
+- **생성 산출물**: `experiment_A_contract.json`
+- **현재 상태**: `contract_linked_not_trained`
+
+#### 7. MAPPO 러너 골격(Stub) 생성 완료
+- **생성 파일**:
+  - `05_training/mappo_runner.py`
+  - `05_training/run_experiment_A_stub.py`
+  - `05_training/policies/mappo_policy_stub.py`
+- **Seed별 실행 디렉터리 및 산출물**:
+  - `artifacts/experiment_A_v1/runs/seed_001` ~ `seed_003` 생성 완료
+  - 각 seed별 `run_manifest.json`, `status.json`, `checkpoint_stub.json` 산출물 포함
+- **현재 상태**: `status: "adapter_missing"` (사유: simulator adapter 미구현이므로 정상 동작임)
+
+#### 8. MAPPO 러너 설계 체크리스트 확정
+- CTDE(Centralized Training Decentralized Execution=중앙집중 학습 분산 실행) 구조 분리
+- PyG(PyTorch Geometric=파이토치 지오메트릭) Batch.from_data_list 그래프 배치
+- 활성 버스 마스킹
+- edge_index 롤아웃 버퍼 제외
+- GAE(Generalized Advantage Estimation=일반화 이점 추정)에서 terminated / truncated 분리
+- 첨두 적응형 엔트로피 계수
+- grad_norm_clip = 0.5
+- rng_state 포함 체크포인트
+- qwen_trigger_rate 로깅, 단 [A]에서는 0.0 강제
+- shared_policy = true 기본값
+- GATv2 freeze → 점진 해제 3단계
+- reward normalization
+- KL divergence monitoring + early stopping
+- H200 multi-GPU는 현재 인터페이스만 설계, 본구현은 보류
+
+#### 9. Troubleshooting & Today Notes
+- **Windows PowerShell(PowerShell=마이크로소프트 명령행 셸) 붙여넣기형 patch workflow 정착**: 직접 수정 대신 스크립트를 통한 텍스트 조작 파이프라인 안착.
+- **psql.exe 탐색 및 PATH(Path=실행 경로 환경변수) 이슈 해결**: PATH 미인식 문제를 자동 탐색 스크립트로 해결하고, DB(Database=데이터베이스) 사용자 `ryujo` 인증 실패를 `PGUSER`/`PGPASSWORD` 환경변수 방식으로 복구.
+- **SQL 데이터 타입 오류 수정**: `integer` vs `boolean`의 `COALESCE` 오류 수정.
+- **인코딩 & 파일 시스템 이슈 회피**: 
+  - `preview.sql` UTF-8 BOM(Byte Order Mark=문자 인코딩 표시 바이트) 문제 확인 및 우회.
+  - config 디렉터리 없음으로 인한 YAML 생성 실패 복구.
+  - JSON UTF-8 BOM 에러 발생 시 `utf-8-sig` 읽기 옵션 적용.
+  - PowerShell 내 here-string 중첩 시 내부 파이썬/Bash 변수가 null 로 평가되는 문제 파악 및 회피.
+
+#### 10. 다음 단계 (Next Steps)
+- `simulator_adapter_interface.py` 골격 생성
+- replay simulator adapter 명세 확정
+- B1/B2 real rollout 실행기 연결
+- [A] 실제 MAPPO train/eval runner 확장
+
+---
 ## 📅 2026-04-22
 ### GATv2 Training Smoke Test Binding 및 신규 스킬 제정
 

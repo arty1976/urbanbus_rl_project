@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>urbanbus_rl_project — GATv2 → MAPPO → Qwen 파이프라인</title>
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --surface: #ffffff;
+    --surface-2: #f1f3f9;
+    --primary: #1e3a8a;
+    --primary-light: #3b82f6;
+    --accent: #0891b2;
+    --accent-2: #6366f1;
+    --success: #059669;
+    --warning: #d97706;
+    --text: #0f172a;
+    --text-muted: #475569;
+    --text-subtle: #64748b;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+    --mono: "JetBrains Mono", "Fira Code", "Menlo", "Consolas", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: "Pretendard", "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 32px 80px;
+  }
+
+  /* Header */
+  .hero {
+    border-left: 5px solid var(--primary);
+    padding: 4px 0 4px 20px;
+    margin-bottom: 40px;
+  }
+  .hero .eyebrow {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .hero h1 {
+    margin: 0 0 8px;
+    font-size: 30px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .hero .sub {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 15px;
+  }
+
+  /* Sections */
+  section { margin-bottom: 48px; }
+  section h2 {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    margin: 0 0 4px;
+  }
+  section .section-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 20px;
+    letter-spacing: -0.01em;
+  }
+
+  /* Status cards */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .status-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--success);
+    border-radius: 8px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    box-shadow: var(--shadow);
+  }
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--success);
+    margin-top: 7px;
+    flex-shrink: 0;
+  }
+  .status-card .label {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+  .status-card .desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* Pipeline */
+  .pipeline {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 16px;
+    align-items: stretch;
+  }
+  .pipeline-stage {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+  }
+  .pipeline-stage .stage-num {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+  }
+  .pipeline-stage .stage-name {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 4px 0 10px;
+  }
+  .pipeline-stage .stage-role {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    line-height: 1.5;
+    min-height: 60px;
+  }
+  .pipeline-stage .io-row {
+    font-size: 12px;
+    padding: 6px 0;
+    border-top: 1px dashed var(--border);
+    display: flex;
+    gap: 8px;
+  }
+  .pipeline-stage .io-key {
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 52px;
+  }
+  .pipeline-stage .io-val {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .pipeline-stage.current {
+    border: 2px solid var(--primary);
+    background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+  }
+  .pipeline-stage.current .stage-num { color: var(--primary); }
+
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--border-strong);
+    font-size: 28px;
+    font-weight: 300;
+  }
+
+  /* Module tree */
+  .tree {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.9;
+    color: var(--text);
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .tree .dir { color: var(--primary); font-weight: 600; }
+  .tree .file { color: var(--text); }
+  .tree .file.new { color: var(--accent); font-weight: 600; }
+  .tree .comment { color: var(--text-subtle); font-weight: normal; }
+
+  /* Two-col */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+
+  /* Callout */
+  .callout {
+    background: linear-gradient(135deg, #eef2ff, #e0f2fe);
+    border: 1px solid #c7d2fe;
+    border-left: 4px solid var(--accent-2);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 16px 0 0;
+  }
+  .callout .cl-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: var(--accent-2);
+    margin-bottom: 4px;
+  }
+  .callout .cl-body {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  /* Ladder (6 stages) */
+  .ladder {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+  }
+  .step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 12px;
+    box-shadow: var(--shadow);
+    position: relative;
+  }
+  .step .step-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+  }
+  .step .step-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 2px 0 8px;
+  }
+  .step .step-row {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .step .step-row strong { color: var(--text); font-weight: 600; }
+  .step.critical {
+    border: 2px solid var(--warning);
+    background: #fffbeb;
+  }
+  .step.critical .step-label { color: var(--warning); }
+
+  /* Table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    font-size: 13px;
+  }
+  th {
+    background: var(--surface-2);
+    padding: 12px 14px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  td strong { color: var(--text); font-weight: 600; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--text-muted);
+  }
+  .tag.mappo { background: #fef3c7; color: #92400e; font-weight: 600; }
+  .tag.valloss { background: #dbeafe; color: #1e40af; }
+
+  /* Open questions */
+  .q-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .q-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+  }
+  .q-card .q-num {
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    background: var(--primary);
+    color: white;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 22px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .q-card .q-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .q-card .q-body {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .q-card.priority {
+    border-left: 3px solid var(--warning);
+  }
+  .q-card.priority .q-num {
+    background: var(--warning);
+  }
+
+  /* Footer */
+  footer {
+    margin-top: 60px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-subtle);
+    text-align: center;
+  }
+
+  @media (max-width: 900px) {
+    .pipeline { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); padding: 4px 0; }
+    .ladder { grid-template-columns: repeat(2, 1fr); }
+    .two-col { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Hero -->
+<div class="hero">
+  <div class="eyebrow">urbanbus_rl_project · 2026-04-22</div>
+  <h1>GATv2 → MAPPO → Qwen 파이프라인</h1>
+  <p class="sub">데이터셋 빌드 완료 · 노트북 스모크 PASS · H200 본훈련 이관 설계</p>
+</div>
+
+<!-- 01 · Current state -->
+<section>
+  <h2>01 · 현재 확정 상태</h2>
+  <div class="section-title">지금까지 닫힌 마일스톤</div>
+  <div class="status-grid">
+    <div class="status-card">
+      <div class="status-dot"></div>
+      <div>
+        <div class="label">데이터셋 풀빌드</div>
+        <div class="desc">dataset_full_20260422_084243 · 6,570 스냅샷 · 4,116 노드 · 5,484 엣지</div>
+      </div>
+    </div>
+    <div class="status-card">
+      <div class="status-dot"></div>
+      <div>
+        <div class="label">Split 생성</div>
+        <div class="desc">train 5,476 / val 540 / test 554</div>
+      </div>
+    </div>
+    <div class="status-card">
+      <div class="status-dot"></div>
+      <div>
+        <div class="label">train_gatv2.py 바인딩</div>
+        <div class="desc">train split .pt 5,476개 인식 확인</div>
+      </div>
+    </div>
+    <div class="status-card">
+      <div class="status-dot"></div>
+      <div>
+        <div class="label">노트북 스모크 PASS</div>
+        <div class="desc">Galaxy Book 5 Pro · CPU · 128 files · batch=1 · 3 epochs</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 02 · Pipeline -->
+<section>
+  <h2>02 · 실험 파이프라인</h2>
+  <div class="section-title">세 단계, 하나의 계약</div>
+  <div class="pipeline">
+    <div class="pipeline-stage current">
+      <div class="stage-num">STAGE 1 · 진행 중</div>
+      <div class="stage-name">GATv2</div>
+      <div class="stage-role">노드 단위 지도학습. 정류장별 수요 예측 + 임베딩 생성.</div>
+      <div class="io-row">
+        <span class="io-key">INPUT</span>
+        <span class="io-val">snapshot .pt (x, edge_index, y)</span>
+      </div>
+      <div class="io-row">
+        <span class="io-key">OUTPUT</span>
+        <span class="io-val">embedding [N, D] + pred [N, 3]</span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-num">STAGE 2 · 예정</div>
+      <div class="stage-name">MAPPO</div>
+      <div class="stage-role">다중 에이전트 PPO. GATv2 임베딩을 관측으로 받아 의사결정 학습.</div>
+      <div class="io-row">
+        <span class="io-key">INPUT</span>
+        <span class="io-val">frozen embedding cache</span>
+      </div>
+      <div class="io-row">
+        <span class="io-key">OUTPUT</span>
+        <span class="io-val">policy π(a|s)</span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-num">STAGE 3 · 예정</div>
+      <div class="stage-name">Qwen</div>
+      <div class="stage-role">LLM 레이어. 설명 생성 / 상위 플래너 / 리워드 모델 중 역할 TBD.</div>
+      <div class="io-row">
+        <span class="io-key">INPUT</span>
+        <span class="io-val">state text + π action</span>
+      </div>
+      <div class="io-row">
+        <span class="io-key">OUTPUT</span>
+        <span class="io-val">TBD per role</span>
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <div class="cl-title">설계 원칙</div>
+    <div class="cl-body">GATv2 체크포인트는 val_loss가 아니라 <u>MAPPO 입력 계약</u>으로 평가한다.</div>
+  </div>
+</section>
+
+<!-- 03 · Module structure -->
+<section>
+  <h2>03 · H200용 모듈 구조</h2>
+  <div class="section-title">단일 스크립트 → 다운스트림 친화 패키지</div>
+  <div class="tree">05_training/
+├── <span class="dir">configs/</span>
+│   └── <span class="file">gatv2_base.yaml</span>             <span class="comment"># hparam · 경로 · 시드</span>
+├── <span class="dir">gatv2/</span>                           <span class="comment"># ← MAPPO에서 import할 패키지</span>
+│   ├── <span class="file">__init__.py</span>                 <span class="comment"># 공개 API: load_encoder, encode_snapshot</span>
+│   ├── <span class="file">model.py</span>                    <span class="comment"># forward(data) → (embedding, pred)</span>
+│   ├── <span class="file">dataset.py</span>                  <span class="comment"># SnapshotDataset (lazy, split-aware)</span>
+│   ├── <span class="file new">snapshot_index.py</span>           <span class="comment"># ★ state_ts ↔ path 매핑</span>
+│   ├── <span class="file">trainer.py</span>                  <span class="comment"># BF16 AMP · clip · scheduler</span>
+│   ├── <span class="file">evaluator.py</span>                <span class="comment"># val/test no-grad 평가</span>
+│   ├── <span class="file">metrics.py</span>                  <span class="comment"># MSE · MAE · R² + embedding collapse</span>
+│   ├── <span class="file">checkpoint.py</span>               <span class="comment"># best_valloss + best_mappo 두 종</span>
+│   ├── <span class="file new">export.py</span>                   <span class="comment"># ★ frozen encoder + 임베딩 캐시</span>
+│   └── <span class="file">logging_utils.py</span>            <span class="comment"># stdout · JSONL · (선택) TB</span>
+├── <span class="file">train.py</span>                        <span class="comment"># CLI: --mode {train, eval, export, cache}</span>
+└── <span class="dir">scripts/</span>
+    ├── <span class="file">run_smoke_h200.sh</span>
+    ├── <span class="file">run_full_h200.sh</span>
+    └── <span class="file new">run_export_h200.sh</span>          <span class="comment"># ★ MAPPO용 아티팩트 빌드</span></div>
+</section>
+
+<!-- 04 · Training loop -->
+<section>
+  <h2>04 · 학습 루프 & 평가 설계</h2>
+  <div class="section-title">두 개의 best, 그리고 임베딩 건강 지표</div>
+  <div class="two-col">
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>체크포인트</th>
+            <th>선정 기준</th>
+            <th>용도</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="tag">last.pt</span></td>
+            <td>최신</td>
+            <td>resume</td>
+          </tr>
+          <tr>
+            <td><span class="tag valloss">best_valloss.pt</span></td>
+            <td>val_loss 최소</td>
+            <td>지도학습 평가</td>
+          </tr>
+          <tr>
+            <td><span class="tag mappo">best_mappo.pt</span></td>
+            <td>val_loss 낮고<br>+ embedding 게이트 통과</td>
+            <td><strong>MAPPO 투입</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>평가 계층</th>
+            <th>지표</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>지도학습</strong></td>
+            <td>MSE · MAE · RMSE · R² (전체/타깃별)</td>
+          </tr>
+          <tr>
+            <td><strong>임베딩</strong></td>
+            <td>variance · rank proxy · 시간축 stability</td>
+          </tr>
+          <tr>
+            <td><strong>예측–타깃</strong></td>
+            <td>Pearson r per target</td>
+          </tr>
+          <tr>
+            <td><strong>런타임</strong></td>
+            <td>단일 스냅샷 inference latency p50/p95</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- 05 · Ladder -->
+<section>
+  <h2>05 · 6단계 실행 사다리</h2>
+  <div class="section-title">작게 시작해서 full run에서 터지지 않게</div>
+  <div class="ladder">
+    <div class="step">
+      <div class="step-label">STAGE S1</div>
+      <div class="step-title">환경 스모크</div>
+      <div class="step-row"><strong>128</strong> train</div>
+      <div class="step-row">batch=1 · 3 epoch</div>
+      <div class="step-row">CUDA init · OOM 체크</div>
+      <div class="step-row" style="color: var(--accent);">&lt; 5분</div>
+    </div>
+    <div class="step">
+      <div class="step-label">STAGE S2</div>
+      <div class="step-title">AMP 스모크</div>
+      <div class="step-row"><strong>512 / 100</strong></div>
+      <div class="step-row">BF16 · batch=8 · 5 epoch</div>
+      <div class="step-row">val · ckpt · resume</div>
+      <div class="step-row" style="color: var(--accent);">&lt; 15분</div>
+    </div>
+    <div class="step">
+      <div class="step-label">STAGE S3</div>
+      <div class="step-title">서브셋 E2E</div>
+      <div class="step-row"><strong>1000 / 200</strong></div>
+      <div class="step-row">batch=16 · 20 epoch</div>
+      <div class="step-row">scheduler · 2 best ckpt</div>
+      <div class="step-row" style="color: var(--accent);">&lt; 1시간</div>
+    </div>
+    <div class="step">
+      <div class="step-label">STAGE S4</div>
+      <div class="step-title">풀 데이터 쇼트</div>
+      <div class="step-row"><strong>전량</strong></div>
+      <div class="step-row">batch=32 · 5 epoch</div>
+      <div class="step-row">throughput · 병목 측정</div>
+      <div class="step-row" style="color: var(--accent);">측정 후 확정</div>
+    </div>
+    <div class="step">
+      <div class="step-label">STAGE S5</div>
+      <div class="step-title">본훈련</div>
+      <div class="step-row"><strong>전량</strong></div>
+      <div class="step-row">batch=32~64 · 100~200 epoch</div>
+      <div class="step-row">early stop · 최종 test</div>
+      <div class="step-row" style="color: var(--accent);">S4 × 에폭</div>
+    </div>
+    <div class="step critical">
+      <div class="step-label">STAGE S6 ★</div>
+      <div class="step-title">Export + 캐시</div>
+      <div class="step-row"><strong>6,570 전량</strong></div>
+      <div class="step-row">frozen · compile · BF16</div>
+      <div class="step-row">MAPPO 아티팩트 생성</div>
+      <div class="step-row" style="color: var(--warning);">10~30분</div>
+    </div>
+  </div>
+</section>
+
+<!-- 06 · Handoff artifact -->
+<section>
+  <h2>06 · MAPPO 이관 아티팩트</h2>
+  <div class="section-title">S6 산출 디렉토리 — MAPPO가 받을 유일한 입력</div>
+  <div class="tree">artifacts/<span class="dir">gatv2_v1/</span>
+├── <span class="file">model_config.yaml</span>
+├── <span class="file new">best_mappo.pt</span>                   <span class="comment"># 모델 state_dict + contract</span>
+├── <span class="dir">embeddings/</span>
+│   ├── <span class="dir">train/</span> &lt;state_ts&gt;.npy       <span class="comment"># shape: [4116, D]</span>
+│   ├── <span class="dir">val/</span>
+│   └── <span class="dir">test/</span>
+├── <span class="dir">predictions/</span>                    <span class="comment"># (선택) demand 예측값</span>
+├── <span class="file new">snapshot_index.parquet</span>          <span class="comment"># state_ts → path 매핑</span>
+├── <span class="file new">artifact_contract.json</span>          <span class="comment"># embedding_dim, pred_dim, node_count ...</span>
+└── <span class="file">MODEL_CARD.md</span>                   <span class="comment"># 성능 · 한계 · 재현 절차</span></div>
+</section>
+
+<!-- 07 · Open questions -->
+<section>
+  <h2>07 · 확정 필요</h2>
+  <div class="section-title">답변 주시면 즉시 스캐폴딩 시작 (★=우선)</div>
+  <div class="q-grid">
+    <div class="q-card priority">
+      <span class="q-num">1</span>
+      <span class="q-title">MAPPO에서 GATv2 역할 ★</span>
+      <div class="q-body">frozen encoder / demand predictor / 둘 다</div>
+    </div>
+    <div class="q-card priority">
+      <span class="q-num">2</span>
+      <span class="q-title">MAPPO agent 단위 ★</span>
+      <div class="q-body">정류장 / 노선 / 차량 — observation shape 결정</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">3</span>
+      <span class="q-title">액션 공간</span>
+      <div class="q-body">이산(배차 간격) / 연속(빈도) / 혼합</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">4</span>
+      <span class="q-title">Qwen 투입 지점</span>
+      <div class="q-body">distillation / 상위 플래너 / 리워드 / 설명 생성</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">5</span>
+      <span class="q-title">엣지 가변성</span>
+      <div class="q-body">스냅샷별 edge 변동 / 전 구간 static — 캐시 크기 결정</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">6</span>
+      <span class="q-title">3채널 y 의미 · 스케일</span>
+      <div class="q-body">타깃별 정규화/가중치 설계</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">7</span>
+      <span class="q-title">Embedding dim</span>
+      <div class="q-body">기본 32, 선호 16 / 32 / 64</div>
+    </div>
+    <div class="q-card">
+      <span class="q-num">8</span>
+      <span class="q-title">H200 서버 환경</span>
+      <div class="q-body">OS · torch · PyG · CUDA 버전 기완료 여부</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  urbanbus_rl_project · 2026-04-22 · GATv2 이관 설계안
+</footer>
+
+</div>
+</body>
+</html>
