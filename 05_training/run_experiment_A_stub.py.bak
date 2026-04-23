@@ -1,5 +1,5 @@
-﻿from pathlib import Path
-import argparse
+from pathlib import Path
+import json
 
 from mappo_runner import (
     DistributedConfig,
@@ -45,32 +45,39 @@ def build_or_load_contract(root: Path) -> Path:
 
 
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser(
-        description="Run experiment A stub (MAPPO baseline) - Phase 1 smoke validation only"
+        description="Run experiment A stub (MAPPO baseline) - Phase 1 Smoke Validation Only"
     )
     parser.add_argument(
         "--simulator-adapter",
         default="",
         help=(
             "Python import path for the simulator adapter class. "
-            "Example: adapters.historical_replay_adapter.HistoricalReplayAdapter. "
-            "Leave empty to get adapter_missing status. "
-            "Causal rollouts are forbidden here."
+            "Example: adapters.historical_replay_adapter.HistoricalReplayAdapter "
+            "Leave empty to get adapter_missing status (default). "
+            "Note: This stub only performs smoke validation. Causal rollouts are forbidden here."
         ),
-    )
     parser.add_argument(
         "--scenario-index",
         default="",
-        help=(
-            "Optional scenario index path for future extension. "
-            "Current stub does not require it."
-        ),
+        help="Optional path to scenario_index.parquet. Used to generate a stub scenario_config.",
     )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
     exp_contract_path = build_or_load_contract(root)
     contract = load_json_any_encoding(exp_contract_path)
+
+    if args.scenario_index:
+        contract["scenario_config"] = {
+            "window_id": None,
+            "state_ts": None,
+            "time_band": "offpeak",
+            "snapshot_path": args.scenario_index,
+            "effective_replay_step_minutes": 60
+        }
 
     runner = MAPPOExperimentRunner(
         RunnerConfig(
@@ -85,11 +92,7 @@ def main() -> None:
             grad_norm_clip=0.5,
             checkpoint_save_rng_state=True,
             qwen_trigger_rate_expected=0.0,
-            reward_norm=RewardNormConfig(
-                enabled=True,
-                window_size=1000,
-                clip_value=10.0,
-            ),
+            reward_norm=RewardNormConfig(enabled=True, window_size=1000, clip_value=10.0),
             freeze_schedule=FreezePhaseConfig(
                 phase_a_end_env_steps=20000,
                 phase_b_end_env_steps=50000,
@@ -108,16 +111,16 @@ def main() -> None:
         runner.run_seed(contract, int(seed))
 
     print("[OK] experiment A stub prepared")
+    print("[INFO] *** Phase 1 smoke validation only ***")
+    print("[INFO] *** Even with an adapter, causal evaluation is NOT performed in this phase ***")
     print(f"[OK] contract : {exp_contract_path}")
     print(f"[OK] run root : {root / 'artifacts' / 'experiment_A_v1' / 'runs'}")
-    print("[INFO] mode    : Phase 1 smoke validation only (not causal evaluation)")
     if args.simulator_adapter:
         print(f"[OK] adapter  : {args.simulator_adapter}")
     else:
         print("[INFO] no adapter configured; seeds will have status=adapter_missing")
-    if args.scenario_index:
-        print(f"[INFO] scenario-index: {args.scenario_index}")
 
 
 if __name__ == "__main__":
     main()
+

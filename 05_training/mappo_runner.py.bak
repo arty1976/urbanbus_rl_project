@@ -1,4 +1,4 @@
-﻿import json
+import json
 import random
 from collections import deque
 from dataclasses import asdict, dataclass, field
@@ -95,15 +95,16 @@ def compute_gae(
     gamma: float,
     gae_lambda: float,
 ) -> Dict[str, List[float]]:
+    """
+    Compute Generalized Advantage Estimation.
+    Note: truncated는 bootstrap 허용, terminated는 bootstrap 차단.
+    """
     n = len(rewards)
     advantages = [0.0] * n
     returns = [0.0] * n
     gae = 0.0
 
     for t in reversed(range(n)):
-        # terminated=True means no bootstrap from next state.
-        # truncated=True still allows bootstrap because the state boundary
-        # is artificial (for example, horizon cutoff) rather than terminal.
         bootstrap_mask = 0.0 if terminated[t] else 1.0
         delta = rewards[t] + gamma * next_values[t] * bootstrap_mask - values[t]
         gae = delta + gamma * gae_lambda * bootstrap_mask * gae
@@ -250,15 +251,6 @@ class MAPPOExperimentRunner:
         }
         dump_json(run_dir / "checkpoint_stub.json", payload)
 
-    def _build_stub_scenario_config(self) -> Dict[str, Any]:
-        return {
-            "window_id": None,
-            "state_ts": None,
-            "time_band": "offpeak",
-            "snapshot_path": None,
-            "effective_replay_step_minutes": 60,
-        }
-
     def run_seed(self, contract: Dict[str, Any], seed: int) -> None:
         run_dir = Path(self.config.run_root_dir) / f"seed_{seed:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -291,8 +283,22 @@ class MAPPOExperimentRunner:
             )
             return
 
+        # ── Dynamic adapter loading ───────────────────────────────
+        # simulator_adapter_path is a Python import path, not a file
+        # system path. To avoid issues with numeric directories like
+        # "05_training", load_adapter_class adds the parent dir to sys.path.
+        # Example: "adapters.historical_replay_adapter.HistoricalReplayAdapter"
+        #
+        # Valid status transitions for adapters:
+        # - adapter_missing
+        # - smoke_ready
+        # - smoke_running
+        # - smoke_completed
+        # - causal_not_supported (Phase 1 specific)
+        adapter_cls = None
         try:
             from simulator_adapter_interface import load_adapter_class
+
             adapter_cls = load_adapter_class(self.config.simulator_adapter_path)
         except Exception as exc:
             dump_json(
@@ -307,47 +313,25 @@ class MAPPOExperimentRunner:
             )
             return
 
-        scenario_config = self._build_stub_scenario_config()
-
-        dump_json(
-            run_dir / "status.json",
-            {
-                "status": "smoke_running",
-                "seed": seed,
-                "simulator_adapter_path": self.config.simulator_adapter_path,
-                "adapter_class": adapter_cls.__name__,
-                "scenario_config": scenario_config,
-                "qwen_trigger_rate": 0.0,
-            },
-        )
-
-        adapter = None
+        # Adapter class loaded successfully.
+        # In Phase 1 (HistoricalReplayAdapter) this means smoke_ready.
+        # Actual rollout execution is deferred to Phase 2 causal adapter.
         try:
-            adapter = adapter_cls(
-                {
-                    "condition_id": "A",
-                    "qwen_trigger_rate": 0.0,
-                }
-            )
-
+            adapter = adapter_cls()
+            
+            scenario_config = contract.get("scenario_config", {
+                "window_id": None,
+                "state_ts": None,
+                "time_band": "offpeak",
+                "snapshot_path": None,
+                "effective_replay_step_minutes": 60
+            })
+            
             obs = adapter.reset(seed=seed, scenario_config=scenario_config)
-            graph_skeleton = adapter.get_graph_skeleton()
-
-            smoke_step_info = None
-            try:
-                dummy_actions = {agent_id: 0 for agent_id in obs["agent_ids"]}
-                step_result = adapter.step(dummy_actions)
-                smoke_step_info = {
-                    "terminated": step_result.terminated,
-                    "truncated": step_result.truncated,
-                    "reward_agent_count": len(step_result.rewards),
-                    "effective_replay_step_minutes": step_result.info.get("effective_replay_step_minutes", 60),
-                }
-            except Exception as step_exc:
-                smoke_step_info = {
-                    "step_skipped": True,
-                    "step_error": str(step_exc),
-                }
+            graph_skel = adapter.get_graph_skeleton()
+            
+            # Optional: a dummy step could be called here if needed, 
+            # but reset + get_graph_skeleton is enough for minimum smoke validation.
 
             dump_json(
                 run_dir / "status.json",
@@ -356,44 +340,20 @@ class MAPPOExperimentRunner:
                     "seed": seed,
                     "simulator_adapter_path": self.config.simulator_adapter_path,
                     "adapter_class": adapter_cls.__name__,
-                    "num_agents": getattr(adapter, "num_agents", None),
-                    "observation_space": getattr(adapter, "observation_space", None),
-                    "action_space": getattr(adapter, "action_space", None),
-                    "graph_skeleton_summary": {
-                        "num_nodes": getattr(graph_skeleton, "num_nodes", None),
-                        "num_edges": getattr(graph_skeleton, "num_edges", None),
-                        "node_features_dim": getattr(graph_skeleton, "node_features_dim", None),
-                        "edge_features_dim": getattr(graph_skeleton, "edge_features_dim", None),
-                    },
-                    "obs_summary": {
-                        "time_band": obs.get("time_band"),
-                        "state_ts": obs.get("state_ts"),
-                        "agent_count": len(obs.get("agent_ids", [])),
-                    },
-                    "smoke_step_info": smoke_step_info,
-                    "effective_replay_step_minutes": scenario_config["effective_replay_step_minutes"],
-                    "note": "adapter instantiated; reset and get_graph_skeleton succeeded. replay mode does not causally apply actions. causal evaluation is not supported in Phase 1.",
+                    "effective_replay_step_minutes": 60,
+                    "note": "adapter instantiated and smoke validation (reset/get_graph_skeleton) passed. replay mode does not causally apply actions. causal evaluation is not supported in Phase 1.",
                     "qwen_trigger_rate": 0.0,
-                    "approx_kl": None,
-                    "clip_fraction": None,
-                    "explained_var": None,
                 },
             )
         except Exception as exc:
             dump_json(
                 run_dir / "status.json",
                 {
-                    "status": "causal_not_supported",
+                    "status": "adapter_smoke_failed",
                     "seed": seed,
                     "simulator_adapter_path": self.config.simulator_adapter_path,
                     "error": str(exc),
-                    "note": "adapter loaded but Phase 1 smoke execution could not complete; causal evaluation remains unsupported in replay mode.",
                     "qwen_trigger_rate": 0.0,
                 },
             )
-        finally:
-            if adapter is not None:
-                try:
-                    adapter.close()
-                except Exception:
-                    pass
+

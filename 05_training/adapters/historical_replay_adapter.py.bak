@@ -1,0 +1,136 @@
+from typing import Any, Dict, List, Optional
+from simulator_adapter_interface import (
+    GraphSkeleton,
+    ObsDict,
+    SimulatorAdapterInterface,
+    StepResult,
+)
+
+class HistoricalReplayAdapter(SimulatorAdapterInterface):
+    """
+    HistoricalReplayAdapter is valid for contract/smoke validation,
+    but not for causal performance comparison across B1/B2/A.
+    
+    [IMPORTANT] Phase 1 Limitation
+    This adapter replays historical snapshots. The actions taken by the RL agent
+    (or any baseline) DO NOT change the next state. It is strictly non-causal.
+    Proper 30-minute control granularity causal evaluation is deferred to Phase 2.
+    
+    [IMPORTANT] Canonical KPI Aggregation
+    This adapter provides a convenience compute_kpis() method, but canonical 
+    KPI aggregation must be performed by a shared aggregator across B0/B1/B2/A.
+    
+    Raw Event Schema for canonical aggregator should include:
+    - state_ts
+    - time_band
+    - agent_id
+    - action
+    - waiting_passenger_cnt
+    - intervention_applied
+    - terminated
+    - truncated
+    
+    [IMPORTANT] Proxy Reward
+    The reward returned by this adapter is a smoke validation proxy.
+    Default: reward = -mean(waiting_passenger_cnt_at_step)
+    Final causal comparisons will rely on shared_kpis, not this proxy reward.
+    """
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        # In replay mode, 1 snapshot = 1 env step.
+        # This causes a conflict with evaluation_horizon_minutes=30 since snapshots are 1-hour.
+        # This is a known blocker/pre-implementation decision for Phase 1.
+        self.effective_replay_step_minutes = 60
+        self.num_agents_val = 10  # Stub value
+        
+        # We recommend scenario_index.parquet contains:
+        # - window_id
+        # - state_ts
+        # - service_date
+        # - time_band
+        # - snapshot_path
+        # - split (optional)
+        # - effective_replay_step_minutes (optional)
+
+    @property
+    def num_agents(self) -> int:
+        return self.num_agents_val
+
+    @property
+    def observation_space(self) -> Any:
+        return None  # Stub
+
+    @property
+    def action_space(self) -> Any:
+        return None  # Stub
+
+    def _get_stub_obs(self) -> ObsDict:
+        import numpy as np
+        return {
+            "actor_obs": np.zeros((self.num_agents_val, 16)),
+            "critic_obs": np.zeros((1, 64)),
+            "edge_index": np.zeros((2, 100)),
+            "edge_attr": np.zeros((100, 4)),
+            "active_bus_mask": np.ones(self.num_agents_val),  # Bus-agent mask shape
+            "action_mask": np.ones((self.num_agents_val, 2)),
+            "time_band": "peak",
+            "state_ts": "2024-01-01T08:00:00Z",
+            "agent_ids": list(range(self.num_agents_val)),
+        }
+
+    def reset(self, seed: Optional[int] = None, scenario_config: Optional[dict] = None) -> ObsDict:
+        # Return stub obs
+        return self._get_stub_obs()
+
+    def step(self, actions: Dict[int, Any]) -> StepResult:
+        # Actions are ignored in this non-causal replay
+        obs = self._get_stub_obs()
+        
+        # Proxy reward: -mean(waiting_passenger_cnt_at_step)
+        # Here we just mock it for smoke validation
+        rewards = {agent_id: -1.0 for agent_id in obs["agent_ids"]}
+        
+        terminated = False
+        truncated = False
+        info = {
+            "agent_terminated_mask": [False] * self.num_agents_val,
+            "agent_truncated_mask": [False] * self.num_agents_val,
+            "effective_replay_step_minutes": self.effective_replay_step_minutes,
+        }
+        
+        return StepResult(
+            obs=obs,
+            rewards=rewards,
+            terminated=terminated,
+            truncated=truncated,
+            info=info
+        )
+
+    def get_graph_skeleton(self) -> GraphSkeleton:
+        import numpy as np
+        return GraphSkeleton(
+            num_nodes=4116,
+            num_edges=10000,
+            node_features_dim=16,
+            edge_features_dim=4,
+            edge_index=np.zeros((2, 10000)),
+            edge_attr=np.zeros((10000, 4))
+        )
+
+    def compute_kpis(self) -> Dict[str, float]:
+        """
+        Convenience proxy KPI calculation.
+        DO NOT use for official comparisons.
+        """
+        return {
+            "cv_headway": 0.5,
+            "avg_wait_seconds": 300.0,
+            "bunching_rate": 0.1,
+            "on_time_rate": 0.9,
+            "intervention_rate": 0.05,
+            "energy_proxy": 1000.0
+        }
+
+    def close(self) -> None:
+        pass

@@ -1,0 +1,146 @@
+import sys
+import importlib
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+try:
+    import torch
+except Exception:
+    torch = Any
+
+
+"""
+[IMPORTANT] 2-Phase Evaluation Structure
+
+- Phase 1: Contract/smoke validation via historical replay.
+  The HistoricalReplayAdapter operates in this phase. It is strictly a replay proxy.
+  Actions taken by the policy DO NOT change the next state (Not Causal).
+  
+- Phase 2: Causal policy evaluation via future simulator-backed adapter.
+  This is where true baseline vs. MAPPO comparisons occur.
+"""
+
+SHARED_KPIS = [
+    "cv_headway",
+    "avg_wait_seconds",
+    "bunching_rate",
+    "on_time_rate",
+    "intervention_rate",
+    "energy_proxy",
+]
+
+
+@dataclass
+class GraphSkeleton:
+    """
+    Structural definition of the transport graph.
+    """
+    num_nodes: int
+    num_edges: int
+    node_features_dim: int
+    edge_features_dim: int
+    edge_index: Any  # Tensor [2, num_edges]
+    edge_attr: Any   # Tensor [num_edges, edge_features_dim]
+
+
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
+
+class ObsDict(TypedDict):
+    """
+    Centralized Training Decentralized Execution (CTDE) Observation Structure.
+    
+    Why separate actor and critic?
+    - actor_obs: Local execution-time observations.
+    - critic_obs: Global state for centralized training value estimation.
+    """
+    actor_obs: Any            # Tensor [num_agents, actor_dim]
+    critic_obs: Any           # Tensor [num_agents, critic_dim] or [1, global_dim]
+    edge_index: Any           # Tensor [2, num_edges]
+    edge_attr: Any            # Tensor [num_edges, edge_dim]
+    active_bus_mask: Any      # Tensor [num_agents] or [MAX_BUSES]. Bus-agent mask, not node mask.
+    action_mask: Any          # Tensor [num_agents, action_dim]. Ensures invalid actions (e.g., skip/hold logic constraints) are masked.
+    time_band: str            # Current time band, e.g., 'peak', 'offpeak'
+    state_ts: str             # State timestamp
+    agent_ids: List[int]      # Identifies which agent maps to which row in actor_obs/rewards
+
+
+@dataclass
+class StepResult:
+    obs: ObsDict
+    rewards: Dict[int, float]  # Agent-level rewards (MAPPO standard)
+    terminated: bool           # Episode-level termination
+    truncated: bool            # Episode-level truncation
+    info: Dict[str, Any]       # Must contain 'agent_terminated_mask' and 'agent_truncated_mask'
+
+
+class SimulatorAdapterInterface(ABC):
+    """
+    Common interface for environment adapters.
+    
+    HistoricalReplayAdapter is valid for contract/smoke validation,
+    but not for causal performance comparison across B1/B2/A.
+    """
+    
+    @property
+    @abstractmethod
+    def num_agents(self) -> int:
+        pass
+
+    @property
+    @abstractmethod
+    def observation_space(self) -> Any:
+        pass
+
+    @property
+    @abstractmethod
+    def action_space(self) -> Any:
+        pass
+
+    @abstractmethod
+    def reset(self, seed: Optional[int] = None, scenario_config: Optional[dict] = None) -> ObsDict:
+        pass
+        
+    @abstractmethod
+    def step(self, actions: Dict[int, Any]) -> StepResult:
+        pass
+        
+    @abstractmethod
+    def get_graph_skeleton(self) -> GraphSkeleton:
+        pass
+        
+    @abstractmethod
+    def compute_kpis(self) -> Dict[str, float]:
+        """
+        Convenience method for calculating basic KPIs inside the adapter.
+        
+        [IMPORTANT]
+        The adapter may expose raw rollout events and a convenience KPI method,
+        but canonical KPI aggregation MUST be shared across B0/B1/B2/A via an external shared aggregator.
+        Do not use this method for official cross-baseline causal comparisons.
+        """
+        pass
+        
+    @abstractmethod
+    def close(self) -> None:
+        pass
+
+
+def load_adapter_class(import_path: str) -> type:
+    """
+    Loads an adapter class using a standard Python import path.
+    Since the current directory begins with '05_', we inject the parent path into sys.path
+    if needed to allow imports like:
+    'adapters.historical_replay_adapter.HistoricalReplayAdapter'
+    """
+    import os
+    parent_dir = os.path.dirname(os.path.abspath(__file__))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+        
+    module_path, class_name = import_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
