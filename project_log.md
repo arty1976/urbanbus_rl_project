@@ -4,6 +4,48 @@
 **"오늘 한 일 저장"** 요청 시 최신 날짜가 상단에 추가됩니다.
 
 ---
+## 📅 2026-04-24
+### Simulator Adapter 인터페이스 확정 및 Phase 1 Smoke Validation 체계 구축
+
+오늘 작업에서는 강화학습 에이전트와 시뮬레이터 간의 통신을 담당하는 공통 인터페이스를 설계하고, 이를 검증하기 위한 비인과적(Non-causal) 리플레이 어댑터를 구현했습니다. 이로써 실제 시뮬레이터 개발 전에도 러너(Runner)와 정책(Policy)의 데이터 계약(Contract) 및 입출력 형상을 실측할 수 있는 환경이 마련되었습니다.
+
+#### 1. Simulator Adapter 인터페이스 설계 완료
+- **생성 파일**: `05_training/simulator_adapter_interface.py`
+- **핵심 구조**:
+  - **CTDE(Centralized Training Decentralized Execution) 기반 ObsDict**: `actor_obs`와 `critic_obs`를 명시적으로 분리하고, `active_bus_mask`와 `action_mask`를 필수 필드로 포함.
+  - **Multi-Agent StepResult**: 보상을 `Dict[int, float]` 구조로 정의하여 MAPPO 모델의 에이전트별 이점 추정에 최적화.
+  - **GraphSkeleton 확장**: 노드/엣지 수 외에 `edge_index`와 `edge_attr`를 포함하여 GATv2 인코더가 즉시 수용 가능한 형태 확보.
+  - **Dynamic Loader 구현**: 숫자 기반 디렉터리명(`05_training`) 임포트 문제를 해결하기 위한 `sys.path` 자동 주입 유틸리티(`load_adapter_class`) 포함.
+
+#### 2. Phase 1 HistoricalReplayAdapter 구현
+- **생성 파일**: `05_training/adapters/historical_replay_adapter.py`
+- **역할**: 시뮬레이터가 없는 상황에서 과거 스냅샷 데이터를 리플레이하여 모델의 입출력 안정성을 검증하는 Smoke Test 전용 어댑터.
+- **제약 사항 명시**:
+  - **Non-causal**: 에이전트의 행동이 다음 상태에 영향을 주지 않음을 문서와 코드에 반복 명시 (Phase 1 전용).
+  - **Proxy Reward**: `-mean(waiting_passenger_cnt_at_step)`를 대리 보상으로 사용하여 배선 점검 수행.
+  - **Granularity**: 1시간 단위 스냅샷을 1 env step으로 매핑하여 30분 horizon 계약과의 충돌을 smoke 수준에서 허용.
+
+#### 3. MAPPO Runner 및 실행기(Stub) 고도화
+- **수정 파일**: `05_training/mappo_runner.py`, `05_training/run_experiment_A_stub.py`
+- **주요 개선**:
+  - **실질 Smoke Validation 수행**: 어댑터 임포트 확인에 그치지 않고, 실제 인스턴스 생성 및 `reset()`, `get_graph_skeleton()` 호출까지 수행하도록 확장.
+  - **상세 상태 로깅**: `smoke_completed`, `adapter_smoke_failed`, `causal_not_supported` 등 상태 메시지 세분화.
+  - **GAE 부트스트랩 주석**: `truncated`와 `terminated`의 부트스트랩 차단 기준 명시.
+  - **CLI 인자 추가**: `--scenario-index` 인자를 통해 `scenario_config`를 동적으로 주입하거나 stub로 생성하는 기능 보강.
+
+#### 4. 검증 결과 (Verification)
+- **Adapter Missing 케이스**: `status: "adapter_missing"` 및 사유 정상 기록 확인.
+- **HistoricalReplayAdapter 실행 케이스**: 
+  - 어댑터 동적 로드 성공.
+  - `reset()` 및 `get_graph_skeleton()` 정상 호출 완료.
+  - `status.json`에 `smoke_completed` 및 비인과적 실행에 대한 경고문 정상 반영 확인.
+
+#### 5. 다음 단계 (Next Steps)
+- **Canonical KPI Aggregator 구현**: B0/B1/B2/A가 공유하는 공통 KPI 취합 모듈 개발.
+- **Scenario Index 보강**: `snapshot_path`를 포함하는 `scenario_index.parquet` 생성 파이프라인 정비.
+- **Causal Simulator(Phase 2) 설계**: 실제 상태 전이가 발생하는 시뮬레이터 어댑터 구조 검토.
+
+---
 ## 📅 2026-04-23
 ### B0/B1/B2 Baseline 완성 및 [A] MAPPO 학습 골격(Stub) 구축
 
