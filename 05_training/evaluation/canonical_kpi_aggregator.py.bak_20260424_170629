@@ -82,14 +82,6 @@ def safe_std(series: pd.Series) -> Optional[float]:
     return float(s.std(ddof=1))
 
 
-def compute_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    num = pd.to_numeric(numerator, errors="coerce")
-    den = pd.to_numeric(denominator, errors="coerce")
-    out = num / den
-    out = out.where(den > 0)
-    return out
-
-
 def validate_contract(contract: Dict[str, Any]) -> None:
     shared = contract.get("shared_kpis", [])
     if shared != EXPECTED_SHARED_KPIS:
@@ -172,14 +164,9 @@ def aggregate_by_time_band(window_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["condition_id", "seed", "time_band"]).reset_index(drop=True)
 
 
-def aggregate_overall(
-    window_df: pd.DataFrame,
-    seed_df: pd.DataFrame,
-    mode: str,
-) -> Dict[str, Any]:
+def aggregate_overall(window_df: pd.DataFrame, seed_df: pd.DataFrame) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
-        "artifact_version": "canonical_kpi_aggregator_v1_step8",
-        "mode": mode,
+        "artifact_version": "canonical_kpi_aggregator_v1_step5",
         "condition_ids": sorted(window_df["condition_id"].astype(str).unique().tolist()),
         "n_condition_seed_pairs": int(seed_df[["condition_id", "seed"]].drop_duplicates().shape[0]),
         "n_windows_total": int(len(window_df)),
@@ -305,7 +292,7 @@ def run_legacy_b0_passthrough(
 
     seed_df = aggregate_by_seed(window_df)
     time_band_df = aggregate_by_time_band(window_df)
-    overall_payload = aggregate_overall(window_df, seed_df, mode="legacy_b0_passthrough")
+    overall_payload = aggregate_overall(window_df, seed_df)
 
     if smoke:
         if seed_df.empty:
@@ -329,7 +316,7 @@ def run_legacy_b0_passthrough(
     dump_json(overall_path, overall_payload)
 
     manifest = {
-        "artifact_version": "canonical_kpi_aggregator_v1_step8",
+        "artifact_version": "canonical_kpi_aggregator_v1_step5",
         "mode": "legacy_b0_passthrough",
         "input_root": str(input_root),
         "output_root": str(output_root),
@@ -459,6 +446,9 @@ def validate_official_input_df(
     if bool((pd.to_numeric(df["headway_mean_seconds"], errors="coerce") <= 0).any()):
         raise AggregationError("headway_mean_seconds must be > 0")
 
+    if bool((pd.to_numeric(df["headway_sample_count"], errors="coerce") < 0).any()):
+        raise AggregationError("headway_sample_count must be >= 0")
+
     if bool((pd.to_numeric(df["bunching_event_count"], errors="coerce") > pd.to_numeric(df["headway_event_count"], errors="coerce")).any()):
         raise AggregationError("bunching_event_count cannot exceed headway_event_count")
 
@@ -491,165 +481,7 @@ def validate_official_input_df(
     return summary
 
 
-def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
-    df = raw.copy()
-
-    df["condition_id"] = df["condition_id"].astype(str).str.upper()
-    df["seed"] = pd.to_numeric(df["seed"], errors="raise").astype(int)
-    df["state_ts"] = pd.to_datetime(df["state_ts"], errors="raise")
-    df["service_date"] = pd.to_datetime(df["service_date"], errors="coerce").dt.date.astype(str)
-    df["time_band"] = df["time_band"].astype(str).str.strip().str.lower()
-    df["evaluation_horizon_minutes"] = pd.to_numeric(
-        df["evaluation_horizon_minutes"], errors="raise"
-    ).astype(int)
-
-    df["cv_headway"] = compute_ratio(
-        df["headway_std_seconds"],
-        df["headway_mean_seconds"],
-    )
-
-    sample_count = pd.to_numeric(df["headway_sample_count"], errors="coerce")
-    df.loc[sample_count < 2, "cv_headway"] = pd.NA
-
-    df["avg_wait_seconds"] = compute_ratio(
-        df["wait_total_passenger_seconds"],
-        df["wait_passenger_count"],
-    )
-
-    df["bunching_rate"] = compute_ratio(
-        df["bunching_event_count"],
-        df["headway_event_count"],
-    )
-
-    df["on_time_rate"] = compute_ratio(
-        df["ontime_event_count"],
-        df["schedulable_arrival_count"],
-    )
-
-    df["intervention_rate"] = compute_ratio(
-        df["intervention_count"],
-        df["decision_step_count"],
-    )
-
-    df["energy_proxy"] = pd.to_numeric(df["energy_proxy_total"], errors="coerce")
-
-    df["strict_canonical"] = True
-    df["computation_mode"] = "official_rollup"
-
-    source_lower = df["source_mode"].astype(str).str.lower()
-    non_causal_pattern = "historical|legacy|stub|replay|smoke|non_causal|non-causal"
-    df["causal_comparison_allowed"] = ~source_lower.str.contains(
-        non_causal_pattern,
-        regex=True,
-        na=False,
-    )
-
-    if "qwen_trigger_rate" not in df.columns:
-        df["qwen_trigger_rate"] = 0.0
-    df["qwen_trigger_rate"] = pd.to_numeric(
-        df["qwen_trigger_rate"],
-        errors="coerce",
-    ).fillna(0.0)
-
-    if "effective_replay_step_minutes" not in df.columns:
-        df["effective_replay_step_minutes"] = pd.NA
-    df["effective_replay_step_minutes"] = pd.to_numeric(
-        df["effective_replay_step_minutes"],
-        errors="coerce",
-    )
-
-    out_cols = [
-        "condition_id",
-        "seed",
-        "window_id",
-        "state_ts",
-        "service_date",
-        "time_band",
-        "evaluation_horizon_minutes",
-        *EXPECTED_SHARED_KPIS,
-        "strict_canonical",
-        "computation_mode",
-        "causal_comparison_allowed",
-        "source_mode",
-        "qwen_trigger_rate",
-        "effective_replay_step_minutes",
-        "headway_mean_seconds",
-        "headway_std_seconds",
-        "headway_sample_count",
-        "bunching_event_count",
-        "headway_event_count",
-        "wait_total_passenger_seconds",
-        "wait_passenger_count",
-        "ontime_event_count",
-        "schedulable_arrival_count",
-        "intervention_count",
-        "decision_step_count",
-        "energy_proxy_total",
-        "input_source_path",
-    ]
-
-    return df[out_cols].copy()
-
-
-def validate_official_window_smoke(window_df: pd.DataFrame) -> None:
-    if window_df.empty:
-        raise AggregationError("smoke failed: official kpi_by_window is empty")
-
-    if not bool((window_df["evaluation_horizon_minutes"] == 30).all()):
-        raise AggregationError("smoke failed: evaluation_horizon_minutes must be 30")
-
-    observed_time_bands = set(window_df["time_band"].astype(str).unique())
-    if not observed_time_bands.issubset(VALID_TIME_BANDS):
-        raise AggregationError(f"smoke failed: invalid time_band values: {sorted(observed_time_bands)}")
-
-    dup_mask = window_df.duplicated(["condition_id", "seed", "window_id"], keep=False)
-    if bool(dup_mask.any()):
-        dup = window_df.loc[dup_mask, ["condition_id", "seed", "window_id"]].head(10)
-        raise AggregationError(
-            f"smoke failed: duplicate condition/seed/window rows found: {dup.to_dict('records')}"
-        )
-
-    for kpi in EXPECTED_SHARED_KPIS:
-        s = pd.to_numeric(window_df[kpi], errors="coerce")
-        if int(s.notna().sum()) == 0:
-            raise AggregationError(f"smoke failed: {kpi} has no valid values")
-
-    for bounded in ["bunching_rate", "on_time_rate", "intervention_rate"]:
-        s = pd.to_numeric(window_df[bounded], errors="coerce").dropna()
-        if bool((s < 0).any()) or bool((s > 1).any()):
-            raise AggregationError(f"smoke failed: {bounded} must be between 0 and 1")
-
-
-def build_scenario_summary(scenario_index_path: Optional[Path]) -> Dict[str, Any]:
-    scenario_summary: Dict[str, Any] = {
-        "provided": scenario_index_path is not None,
-        "path": str(scenario_index_path) if scenario_index_path else None,
-    }
-
-    if not scenario_index_path:
-        return scenario_summary
-
-    if not scenario_index_path.exists():
-        raise AggregationError(f"scenario_index not found: {scenario_index_path}")
-
-    scenario_df = pd.read_parquet(scenario_index_path)
-    scenario_required = ["window_id", "state_ts", "service_date", "time_band"]
-    missing = [c for c in scenario_required if c not in scenario_df.columns]
-    if missing:
-        raise AggregationError(f"scenario_index missing columns: {missing}")
-
-    scenario_summary.update({
-        "rows": int(len(scenario_df)),
-        "window_count": int(scenario_df["window_id"].nunique()),
-        "time_bands": sorted(
-            scenario_df["time_band"].astype(str).str.strip().str.lower().unique().tolist()
-        ),
-    })
-
-    return scenario_summary
-
-
-def run_official_rollup(
+def run_official_rollup_input_validation(
     contract: Dict[str, Any],
     input_root: Path,
     output_root: Path,
@@ -678,33 +510,44 @@ def run_official_rollup(
     raw = pd.concat(frames, ignore_index=True)
 
     validation_summary = validate_official_input_df(raw, contract)
-    scenario_summary = build_scenario_summary(scenario_index_path)
 
-    window_df = compute_official_kpi_by_window(raw)
-    seed_df = aggregate_by_seed(window_df)
-    time_band_df = aggregate_by_time_band(window_df)
-    overall_payload = aggregate_overall(window_df, seed_df, mode="official_rollup")
+    scenario_summary: Dict[str, Any] = {
+        "provided": scenario_index_path is not None,
+        "path": str(scenario_index_path) if scenario_index_path else None,
+    }
+
+    if scenario_index_path:
+        if not scenario_index_path.exists():
+            raise AggregationError(f"scenario_index not found: {scenario_index_path}")
+
+        scenario_df = pd.read_parquet(scenario_index_path)
+        scenario_required = ["window_id", "state_ts", "service_date", "time_band"]
+        missing = [c for c in scenario_required if c not in scenario_df.columns]
+        if missing:
+            raise AggregationError(f"scenario_index missing columns: {missing}")
+
+        scenario_summary.update({
+            "rows": int(len(scenario_df)),
+            "window_count": int(scenario_df["window_id"].nunique()),
+            "time_bands": sorted(
+                scenario_df["time_band"].astype(str).str.strip().str.lower().unique().tolist()
+            ),
+        })
 
     if smoke:
-        validate_official_window_smoke(window_df)
-        if seed_df.empty:
-            raise AggregationError("smoke failed: kpi_by_seed is empty")
-        if time_band_df.empty:
-            raise AggregationError("smoke failed: kpi_by_time_band is empty")
-        if overall_payload["n_windows_total"] != int(len(window_df)):
-            raise AggregationError("smoke failed: overall window count mismatch")
+        if validation_summary["row_count"] <= 0:
+            raise AggregationError("smoke failed: official input row_count must be > 0")
+        if len(validation_summary["condition_ids"]) != 1:
+            raise AggregationError("smoke failed: expected one condition_id per official input root")
+        if not set(validation_summary["time_bands"]).issubset(VALID_TIME_BANDS):
+            raise AggregationError("smoke failed: invalid time_band domain")
 
     output_root.mkdir(parents=True, exist_ok=True)
 
     validation_path = output_root / "official_rollup_input_validation.json"
-    window_path = output_root / "kpi_by_window.parquet"
-    seed_path = output_root / "kpi_by_seed.parquet"
-    time_band_path = output_root / "kpi_by_time_band.parquet"
-    overall_path = output_root / "kpi_overall.json"
-    manifest_path = output_root / "aggregation_manifest.json"
 
-    validation_payload = {
-        "artifact_version": "canonical_kpi_aggregator_v1_step8",
+    payload = {
+        "artifact_version": "canonical_kpi_aggregator_v1_step5",
         "mode": "official_rollup_input_validation",
         "input_root": str(input_root),
         "output_root": str(output_root),
@@ -716,77 +559,24 @@ def run_official_rollup(
             "enabled": bool(smoke),
             "passed": True,
         },
+        "note": (
+            "This step only validates official_rollup inputs. "
+            "It does not compute canonical KPI outputs yet."
+        ),
     }
 
-    dump_json(validation_path, validation_payload)
+    dump_json(validation_path, payload)
 
-    window_df.to_parquet(window_path, index=False)
-    seed_df.to_parquet(seed_path, index=False)
-    time_band_df.to_parquet(time_band_path, index=False)
-    dump_json(overall_path, overall_payload)
-
-    warnings = []
-    if not bool(window_df["causal_comparison_allowed"].all()):
-        warnings.append({
-            "code": "non_causal_or_smoke_source",
-            "message": (
-                "At least one source_mode indicates historical, replay, stub, smoke, or non-causal data. "
-                "These KPI outputs are valid for contract/smoke validation, not causal performance comparison."
-            ),
-        })
-
-    manifest = {
-        "artifact_version": "canonical_kpi_aggregator_v1_step8",
-        "mode": "official_rollup",
-        "input_root": str(input_root),
-        "output_root": str(output_root),
-        "scenario_index_path": str(scenario_index_path) if scenario_index_path else None,
-        "window_rollup_file_count": int(len(input_paths)),
-        "window_rollup_files": per_file_rows,
-        "output_files": {
-            "official_rollup_input_validation": str(validation_path),
-            "kpi_by_window": str(window_path),
-            "kpi_by_seed": str(seed_path),
-            "kpi_by_time_band": str(time_band_path),
-            "kpi_overall": str(overall_path),
-            "aggregation_manifest": str(manifest_path),
-        },
-        "row_counts": {
-            "kpi_by_window": int(len(window_df)),
-            "kpi_by_seed": int(len(seed_df)),
-            "kpi_by_time_band": int(len(time_band_df)),
-        },
-        "validation_summary": validation_summary,
-        "scenario_index_summary": scenario_summary,
-        "causal_comparison_allowed": bool(window_df["causal_comparison_allowed"].all()),
-        "strict_canonical": True,
-        "warnings": warnings,
-        "smoke": {
-            "enabled": bool(smoke),
-            "passed": True,
-        },
-    }
-
-    dump_json(manifest_path, manifest)
-
-    print("[OK] official_rollup completed")
+    print("[OK] official_rollup input validation completed")
     print(f"[OK] input_root        : {input_root}")
     print(f"[OK] output_root       : {output_root}")
     print(f"[OK] validation_json   : {validation_path}")
-    print(f"[OK] kpi_by_window     : {window_path}")
-    print(f"[OK] kpi_by_seed       : {seed_path}")
-    print(f"[OK] kpi_by_time_band  : {time_band_path}")
-    print(f"[OK] kpi_overall       : {overall_path}")
-    print(f"[OK] manifest          : {manifest_path}")
     print(f"[OK] files_found       : {len(input_paths)}")
-    print(f"[OK] window_rows       : {len(window_df)}")
-    print(f"[OK] seed_rows         : {len(seed_df)}")
-    print(f"[OK] time_band_rows    : {len(time_band_df)}")
+    print(f"[OK] rows              : {validation_summary['row_count']}")
     print(f"[OK] condition_ids     : {validation_summary['condition_ids']}")
     print(f"[OK] seeds             : {validation_summary['seed_values']}")
     print(f"[OK] windows           : {validation_summary['window_count']}")
     print(f"[OK] time_bands        : {validation_summary['time_bands']}")
-    print(f"[OK] causal_allowed    : {bool(window_df['causal_comparison_allowed'].all())}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -852,7 +642,7 @@ def main() -> None:
             smoke=bool(args.smoke),
         )
     elif args.mode == "official_rollup":
-        run_official_rollup(
+        run_official_rollup_input_validation(
             contract=contract,
             input_root=input_root,
             output_root=output_root,

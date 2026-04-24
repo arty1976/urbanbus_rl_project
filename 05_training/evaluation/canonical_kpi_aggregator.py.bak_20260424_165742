@@ -1,0 +1,418 @@
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+
+
+EXPECTED_SHARED_KPIS = [
+    "cv_headway",
+    "avg_wait_seconds",
+    "bunching_rate",
+    "on_time_rate",
+    "intervention_rate",
+    "energy_proxy",
+]
+
+VALID_TIME_BANDS = {"peak", "offpeak", "night"}
+
+
+class AggregationError(RuntimeError):
+    pass
+
+
+def load_json_any_encoding(path: Path) -> Dict[str, Any]:
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return json.load(f)
+        except UnicodeDecodeError:
+            continue
+    raise AggregationError(f"failed to read json: {path}")
+
+
+def dump_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def first_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
+        if p.exists():
+            return p
+    return None
+
+
+def safe_mean(series: pd.Series) -> Optional[float]:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return None
+    return float(s.mean())
+
+
+def safe_std(series: pd.Series) -> Optional[float]:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if len(s) < 2:
+        return None
+    return float(s.std(ddof=1))
+
+
+def validate_contract(contract: Dict[str, Any]) -> None:
+    shared = contract.get("shared_kpis", [])
+    if shared != EXPECTED_SHARED_KPIS:
+        raise AggregationError(
+            f"shared_kpis mismatch. expected={EXPECTED_SHARED_KPIS}, got={shared}"
+        )
+
+    horizon = int(contract.get("evaluation_horizon_minutes", -1))
+    if horizon != 30:
+        raise AggregationError(
+            f"evaluation_horizon_minutes must be 30, got {horizon}"
+        )
+
+    time_bands = set(str(x).strip().lower() for x in contract.get("time_bands", []))
+    if time_bands != VALID_TIME_BANDS:
+        raise AggregationError(
+            f"time_bands mismatch. expected={sorted(VALID_TIME_BANDS)}, got={sorted(time_bands)}"
+        )
+
+    fairness = contract.get("fairness_constraints", {})
+    for key in ("same_initial_state", "same_exogenous_events", "same_eval_window"):
+        if not fairness.get(key, False):
+            raise AggregationError(f"fairness_constraints.{key} must be true")
+
+    if contract.get("condition_id") == "A":
+        if bool(contract.get("qwen_train", False)):
+            raise AggregationError("Experiment A contract must have qwen_train=false")
+        if bool(contract.get("qwen_inference", False)):
+            raise AggregationError("Experiment A contract must have qwen_inference=false")
+
+
+def aggregate_by_seed(window_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+
+    for (condition_id, seed), grp in window_df.groupby(["condition_id", "seed"], dropna=False):
+        row: Dict[str, Any] = {
+            "condition_id": condition_id,
+            "seed": int(seed),
+            "window_count": int(len(grp)),
+            "time_band_count": int(grp["time_band"].nunique()),
+            "causal_comparison_allowed": bool(grp["causal_comparison_allowed"].all()),
+        }
+
+        for kpi in EXPECTED_SHARED_KPIS:
+            s = pd.to_numeric(grp[kpi], errors="coerce")
+            row[f"{kpi}_mean"] = safe_mean(s)
+            row[f"{kpi}_std"] = safe_std(s)
+            row[f"{kpi}_valid_window_count"] = int(s.notna().sum())
+            row[f"{kpi}_null_window_count"] = int(s.isna().sum())
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values(["condition_id", "seed"]).reset_index(drop=True)
+
+
+def aggregate_by_time_band(window_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+
+    for (condition_id, seed, time_band), grp in window_df.groupby(
+        ["condition_id", "seed", "time_band"],
+        dropna=False,
+    ):
+        row: Dict[str, Any] = {
+            "condition_id": condition_id,
+            "seed": int(seed),
+            "time_band": str(time_band),
+            "window_count": int(len(grp)),
+            "causal_comparison_allowed": bool(grp["causal_comparison_allowed"].all()),
+        }
+
+        for kpi in EXPECTED_SHARED_KPIS:
+            s = pd.to_numeric(grp[kpi], errors="coerce")
+            row[f"{kpi}_mean"] = safe_mean(s)
+            row[f"{kpi}_std"] = safe_std(s)
+            row[f"{kpi}_valid_window_count"] = int(s.notna().sum())
+            row[f"{kpi}_null_window_count"] = int(s.isna().sum())
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values(["condition_id", "seed", "time_band"]).reset_index(drop=True)
+
+
+def aggregate_overall(window_df: pd.DataFrame, seed_df: pd.DataFrame) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "artifact_version": "canonical_kpi_aggregator_v1_step4",
+        "condition_ids": sorted(window_df["condition_id"].astype(str).unique().tolist()),
+        "n_condition_seed_pairs": int(seed_df[["condition_id", "seed"]].drop_duplicates().shape[0]),
+        "n_windows_total": int(len(window_df)),
+        "causal_comparison_allowed": bool(window_df["causal_comparison_allowed"].all()),
+        "kpis": {},
+    }
+
+    for kpi in EXPECTED_SHARED_KPIS:
+        s = pd.to_numeric(window_df[kpi], errors="coerce")
+        payload["kpis"][kpi] = {
+            "mean": safe_mean(s),
+            "std": safe_std(s),
+            "valid_window_count": int(s.notna().sum()),
+            "null_window_count": int(s.isna().sum()),
+        }
+
+    return payload
+
+
+def validate_b0_window_smoke(out: pd.DataFrame) -> None:
+    if out.empty:
+        raise AggregationError("smoke failed: B0 canonical window output is empty")
+
+    if not bool((out["evaluation_horizon_minutes"] == 30).all()):
+        raise AggregationError("smoke failed: evaluation_horizon_minutes must be 30")
+
+    dup_mask = out.duplicated(["condition_id", "seed", "window_id"], keep=False)
+    if bool(dup_mask.any()):
+        dup = out.loc[dup_mask, ["condition_id", "seed", "window_id"]].head(10)
+        raise AggregationError(
+            f"smoke failed: duplicate condition/seed/window rows found: {dup.to_dict('records')}"
+        )
+
+    if int(out["avg_wait_seconds"].notna().sum()) == 0:
+        raise AggregationError("smoke failed: avg_wait_seconds has no valid values")
+
+    if int(out["intervention_rate"].notna().sum()) == 0:
+        raise AggregationError("smoke failed: intervention_rate has no valid values")
+
+
+def run_legacy_b0_passthrough(
+    contract: Dict[str, Any],
+    input_root: Path,
+    output_root: Path,
+    smoke: bool,
+) -> None:
+    legacy_path = first_existing([
+        input_root / "kpi_by_window.parquet",
+        input_root / "canonical_eval" / "kpi_by_window.parquet",
+    ])
+
+    if legacy_path is None:
+        raise AggregationError(
+            f"legacy B0 kpi_by_window.parquet not found under input_root: {input_root}"
+        )
+
+    df = pd.read_parquet(legacy_path).copy()
+
+    required = ["state_ts", "avg_wait_seconds", "intervention_rate"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise AggregationError(f"legacy B0 file missing columns: {missing}")
+
+    if "condition_id" not in df.columns:
+        df["condition_id"] = "B0"
+
+    if "seed" not in df.columns:
+        df["seed"] = 0
+
+    if "window_id" not in df.columns:
+        df["window_id"] = range(1, len(df) + 1)
+
+    if "time_band" not in df.columns:
+        df["time_band"] = "offpeak"
+
+    if "service_date" not in df.columns:
+        df["service_date"] = pd.to_datetime(df["state_ts"], errors="raise").dt.date.astype(str)
+
+    if "evaluation_horizon_minutes" not in df.columns:
+        df["evaluation_horizon_minutes"] = int(contract["evaluation_horizon_minutes"])
+
+    for kpi in EXPECTED_SHARED_KPIS:
+        if kpi not in df.columns:
+            df[kpi] = pd.NA
+
+    df["strict_canonical"] = False
+    df["computation_mode"] = "legacy_b0_passthrough"
+    df["causal_comparison_allowed"] = False
+
+    if "source_mode" not in df.columns:
+        df["source_mode"] = "historical"
+
+    if "qwen_trigger_rate" not in df.columns:
+        df["qwen_trigger_rate"] = 0.0
+
+    if "effective_replay_step_minutes" not in df.columns:
+        df["effective_replay_step_minutes"] = 60
+
+    df["input_source_path"] = str(legacy_path)
+
+    out_cols = [
+        "condition_id",
+        "seed",
+        "window_id",
+        "state_ts",
+        "service_date",
+        "time_band",
+        "evaluation_horizon_minutes",
+        *EXPECTED_SHARED_KPIS,
+        "strict_canonical",
+        "computation_mode",
+        "causal_comparison_allowed",
+        "source_mode",
+        "qwen_trigger_rate",
+        "effective_replay_step_minutes",
+        "input_source_path",
+    ]
+
+    window_df = df[out_cols].copy()
+
+    if smoke:
+        validate_b0_window_smoke(window_df)
+
+    seed_df = aggregate_by_seed(window_df)
+    time_band_df = aggregate_by_time_band(window_df)
+    overall_payload = aggregate_overall(window_df, seed_df)
+
+    if smoke:
+        if seed_df.empty:
+            raise AggregationError("smoke failed: kpi_by_seed is empty")
+        if time_band_df.empty:
+            raise AggregationError("smoke failed: kpi_by_time_band is empty")
+        if overall_payload["n_windows_total"] != int(len(window_df)):
+            raise AggregationError("smoke failed: overall window count mismatch")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    window_path = output_root / "kpi_by_window.parquet"
+    seed_path = output_root / "kpi_by_seed.parquet"
+    time_band_path = output_root / "kpi_by_time_band.parquet"
+    overall_path = output_root / "kpi_overall.json"
+    manifest_path = output_root / "aggregation_manifest.json"
+
+    window_df.to_parquet(window_path, index=False)
+    seed_df.to_parquet(seed_path, index=False)
+    time_band_df.to_parquet(time_band_path, index=False)
+    dump_json(overall_path, overall_payload)
+
+    manifest = {
+        "artifact_version": "canonical_kpi_aggregator_v1_step4",
+        "mode": "legacy_b0_passthrough",
+        "input_root": str(input_root),
+        "output_root": str(output_root),
+        "input_source_path": str(legacy_path),
+        "output_files": {
+            "kpi_by_window": str(window_path),
+            "kpi_by_seed": str(seed_path),
+            "kpi_by_time_band": str(time_band_path),
+            "kpi_overall": str(overall_path),
+            "aggregation_manifest": str(manifest_path),
+        },
+        "row_counts": {
+            "kpi_by_window": int(len(window_df)),
+            "kpi_by_seed": int(len(seed_df)),
+            "kpi_by_time_band": int(len(time_band_df)),
+        },
+        "causal_comparison_allowed": False,
+        "strict_canonical": False,
+        "warnings": [
+            {
+                "code": "legacy_b0_passthrough",
+                "message": (
+                    "B0 historical baseline was passed through into canonical schema. "
+                    "This step does not recompute strict official rollout KPIs."
+                ),
+            }
+        ],
+        "smoke": {
+            "enabled": bool(smoke),
+            "passed": True,
+        },
+    }
+
+    dump_json(manifest_path, manifest)
+
+    print("[OK] B0 legacy passthrough completed")
+    print(f"[OK] input             : {legacy_path}")
+    print(f"[OK] kpi_by_window     : {window_path}")
+    print(f"[OK] kpi_by_seed       : {seed_path}")
+    print(f"[OK] kpi_by_time_band  : {time_band_path}")
+    print(f"[OK] kpi_overall       : {overall_path}")
+    print(f"[OK] manifest          : {manifest_path}")
+    print(f"[OK] window_rows       : {len(window_df)}")
+    print(f"[OK] seed_rows         : {len(seed_df)}")
+    print(f"[OK] time_band_rows    : {len(time_band_df)}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Canonical KPI aggregator for B0/B1/B2/A"
+    )
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["legacy_b0_passthrough", "official_rollup"],
+        help="Aggregation mode",
+    )
+    parser.add_argument(
+        "--contract",
+        required=True,
+        help="Path to baseline or experiment contract JSON",
+    )
+    parser.add_argument(
+        "--input-root",
+        required=True,
+        help="Root directory for input artifacts",
+    )
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        help="Directory where canonical outputs will be written",
+    )
+    parser.add_argument(
+        "--scenario-index",
+        default="",
+        help="Optional scenario_index.parquet path",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Enable smoke validation",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    contract_path = Path(args.contract)
+    input_root = Path(args.input_root)
+    output_root = Path(args.output_root)
+
+    if not contract_path.exists():
+        raise SystemExit(f"[STOP] contract not found: {contract_path}")
+
+    if not input_root.exists():
+        raise SystemExit(f"[STOP] input_root not found: {input_root}")
+
+    contract = load_json_any_encoding(contract_path)
+    validate_contract(contract)
+
+    if args.mode == "legacy_b0_passthrough":
+        run_legacy_b0_passthrough(
+            contract=contract,
+            input_root=input_root,
+            output_root=output_root,
+            smoke=bool(args.smoke),
+        )
+    elif args.mode == "official_rollup":
+        raise SystemExit("[STOP] official_rollup is not implemented yet. Next step will add it.")
+    else:
+        raise SystemExit(f"[STOP] unsupported mode: {args.mode}")
+
+    print("[OK] shared_kpis       : validated")
+    print("[OK] horizon           : 30")
+    print("[OK] time_bands        : peak/offpeak/night")
+    print("[OK] fairness          : validated")
+    print("SMOKE PASS" if args.smoke else "DONE")
+
+
+if __name__ == "__main__":
+    main()

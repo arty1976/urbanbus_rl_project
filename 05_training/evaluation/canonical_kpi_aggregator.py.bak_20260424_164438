@@ -1,0 +1,134 @@
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+EXPECTED_SHARED_KPIS = [
+    "cv_headway",
+    "avg_wait_seconds",
+    "bunching_rate",
+    "on_time_rate",
+    "intervention_rate",
+    "energy_proxy",
+]
+
+VALID_TIME_BANDS = {"peak", "offpeak", "night"}
+
+
+class AggregationError(RuntimeError):
+    pass
+
+
+def load_json_any_encoding(path: Path) -> Dict[str, Any]:
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return json.load(f)
+        except UnicodeDecodeError:
+            continue
+    raise AggregationError(f"failed to read json: {path}")
+
+
+def validate_contract(contract: Dict[str, Any]) -> None:
+    shared = contract.get("shared_kpis", [])
+    if shared != EXPECTED_SHARED_KPIS:
+        raise AggregationError(
+            f"shared_kpis mismatch. expected={EXPECTED_SHARED_KPIS}, got={shared}"
+        )
+
+    horizon = int(contract.get("evaluation_horizon_minutes", -1))
+    if horizon != 30:
+        raise AggregationError(
+            f"evaluation_horizon_minutes must be 30, got {horizon}"
+        )
+
+    time_bands = set(str(x).strip().lower() for x in contract.get("time_bands", []))
+    if time_bands != VALID_TIME_BANDS:
+        raise AggregationError(
+            f"time_bands mismatch. expected={sorted(VALID_TIME_BANDS)}, got={sorted(time_bands)}"
+        )
+
+    fairness = contract.get("fairness_constraints", {})
+    for key in ("same_initial_state", "same_exogenous_events", "same_eval_window"):
+        if not fairness.get(key, False):
+            raise AggregationError(f"fairness_constraints.{key} must be true")
+
+    if contract.get("condition_id") == "A":
+        if bool(contract.get("qwen_train", False)):
+            raise AggregationError("Experiment A contract must have qwen_train=false")
+        if bool(contract.get("qwen_inference", False)):
+            raise AggregationError("Experiment A contract must have qwen_inference=false")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Canonical KPI aggregator for B0/B1/B2/A"
+    )
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["legacy_b0_passthrough", "official_rollup"],
+        help="Aggregation mode",
+    )
+    parser.add_argument(
+        "--contract",
+        required=True,
+        help="Path to baseline or experiment contract JSON",
+    )
+    parser.add_argument(
+        "--input-root",
+        required=True,
+        help="Root directory for input artifacts",
+    )
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        help="Directory where canonical outputs will be written",
+    )
+    parser.add_argument(
+        "--scenario-index",
+        default="",
+        help="Optional scenario_index.parquet path",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Enable smoke validation",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    contract_path = Path(args.contract)
+    input_root = Path(args.input_root)
+    output_root = Path(args.output_root)
+
+    if not contract_path.exists():
+        raise SystemExit(f"[STOP] contract not found: {contract_path}")
+
+    if not input_root.exists():
+        raise SystemExit(f"[STOP] input_root not found: {input_root}")
+
+    contract = load_json_any_encoding(contract_path)
+    validate_contract(contract)
+
+    print("[OK] canonical_kpi_aggregator.py contract validation loaded")
+    print(f"[OK] mode              : {args.mode}")
+    print(f"[OK] contract          : {contract_path}")
+    print(f"[OK] input_root        : {input_root}")
+    print(f"[OK] output_root       : {output_root}")
+    if args.scenario_index:
+        print(f"[OK] scenario_index    : {args.scenario_index}")
+
+    print("[OK] shared_kpis       : validated")
+    print("[OK] horizon           : 30")
+    print("[OK] time_bands        : peak/offpeak/night")
+    print("[OK] fairness          : validated")
+    print("SMOKE PASS" if args.smoke else "DONE")
+
+
+if __name__ == "__main__":
+    main()

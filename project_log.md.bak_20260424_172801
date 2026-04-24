@@ -1,0 +1,1166 @@
+
+---
+
+### Canonical KPI Aggregator 단계별 구축 및 입력 검증 완료
+
+이번 작업에서는 B0/B1/B2/[A] 공통 평가 체계를 만들기 위한 `canonical_kpi_aggregator.py`를 단계적으로 구축하고, 각 baseline 및 [A] pure MAPPO 실험군의 입력 검증을 완료했다.
+
+#### 1. 작업 원칙
+- 한 번에 하나의 기능만 추가하는 방식으로 진행했다.
+- Windows PowerShell(PowerShell=마이크로소프트 명령행 셸) 붙여넣기형 workflow로 각 단계를 검증했다.
+- 기존 파일을 직접 덮어쓰기 전에 `.bak_YYYYMMDD_HHMMSS` 백업을 생성하도록 했다.
+- 현재 `HistoricalReplayAdapter`는 non-causal(비인과적=행동이 다음 상태를 바꾸지 않음)이므로, 이번 결과는 성능 비교가 아니라 contract/smoke validation(계약·스모크 검증) 전용으로 해석한다.
+
+#### 2. 생성/수정 파일
+- `05_training/evaluation/canonical_kpi_aggregator.py`
+  - CLI(Command Line Interface=명령행 인터페이스) scaffold 생성
+  - contract JSON(JavaScript Object Notation=자바스크립트 객체 표기법) 로더 추가
+  - baseline contract 검증 추가
+  - B0 `legacy_b0_passthrough` 출력 생성 기능 추가
+  - B1/B2/[A] `official_rollup` 입력 검증 기능 추가
+
+#### 3. B0 historical baseline canonical export 완료
+B0 historical baseline에 대해 `legacy_b0_passthrough` 모드를 실행하여 canonical 출력 5종을 생성했다.
+
+생성 위치:
+- `artifacts/baseline_v1/B0_historical/canonical_eval/aggregation_manifest.json`
+- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_seed.parquet`
+- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_time_band.parquet`
+- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_window.parquet`
+- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_overall.json`
+
+검증 결과:
+- `window_rows = 6570`
+- `seed_rows = 1`
+- `time_band_rows = 3`
+- `SMOKE PASS`
+
+해석:
+- B0 원본 `kpi_by_window.parquet`에는 이미 `time_band` 컬럼이 존재했으며, `peak/offpeak/night` 세 시간대가 유지되었다.
+- 따라서 B0도 시간대별 집계가 가능하다.
+- 단, B0는 legacy passthrough이므로 `strict_canonical = false`, `causal_comparison_allowed = false`로 기록한다.
+
+#### 4. B1 No-op baseline official_rollup 입력 검증 완료
+B1 No-op baseline의 seed별 `window_rollup.parquet` 입력 검증을 완료했다.
+
+검증 항목:
+- 필수 official rollup 컬럼 존재 확인
+- `condition_id = B1` 확인
+- `seed = 1, 2, 3` 확인
+- `evaluation_horizon_minutes = 30` 확인
+- `time_band ∈ {peak, offpeak, night}` 확인
+- `(condition_id, seed, window_id)` 중복 없음 확인
+- 음수 값 및 불가능한 비율 구조 없음 확인
+
+생성 파일:
+- `artifacts/baseline_v1/B1_noop/canonical_eval/official_rollup_input_validation.json`
+
+검증 결과:
+- `SMOKE PASS`
+
+#### 5. B2 rule-based baseline official_rollup 입력 검증 완료
+B2 rule-based baseline의 seed별 `window_rollup.parquet` 입력 검증을 완료했다.
+
+검증 항목:
+- 필수 official rollup 컬럼 존재 확인
+- `condition_id = B2` 확인
+- `seed = 1, 2, 3` 확인
+- `evaluation_horizon_minutes = 30` 확인
+- `time_band ∈ {peak, offpeak, night}` 확인
+- 중복 및 음수 구조 오류 없음 확인
+
+생성 파일:
+- `artifacts/baseline_v1/B2_rulebased/canonical_eval/official_rollup_input_validation.json`
+
+검증 결과:
+- `SMOKE PASS`
+
+#### 6. [A] pure MAPPO baseline official_rollup 입력 검증 완료
+[A] pure MAPPO(Multi-Agent Proximal Policy Optimization=다중 에이전트 근접 정책 최적화) 실험군의 seed별 `window_rollup.parquet` 입력 검증을 완료했다.
+
+검증 항목:
+- 필수 official rollup 컬럼 존재 확인
+- `condition_id = A` 확인
+- `seed = 1, 2, 3` 확인
+- `qwen_train = false` 확인
+- `qwen_inference = false` 확인
+- `qwen_trigger_rate = 0.0` 확인
+- `evaluation_horizon_minutes = 30` 확인
+- `time_band ∈ {peak, offpeak, night}` 확인
+
+생성 파일:
+- `artifacts/experiment_A_v1/canonical_eval/official_rollup_input_validation.json`
+
+검증 결과:
+- `SMOKE PASS`
+
+#### 7. 현재 판정
+현재까지의 의미는 다음과 같다.
+
+- B0는 canonical 출력 5종 생성 완료
+- B1/B2/[A]는 official rollup 입력 검증 완료
+- B1/B2/[A]의 KPI 6종 공식 재계산 및 canonical 출력 5종 생성은 아직 다음 단계
+- 현재 replay 기반 결과는 non-causal smoke validation 전용이며, 실제 성능 비교 자료로 사용하지 않는다
+
+#### 8. 다음 작업
+다음 단계는 `official_rollup` 실제 KPI 계산 기능을 추가하는 것이다.
+
+구체적으로는 B1/B2/[A]의 `window_rollup.parquet`에서 아래 KPI 6종을 동일 수식으로 재계산한다.
+
+- `cv_headway = headway_std_seconds / headway_mean_seconds`
+- `avg_wait_seconds = wait_total_passenger_seconds / wait_passenger_count`
+- `bunching_rate = bunching_event_count / headway_event_count`
+- `on_time_rate = ontime_event_count / schedulable_arrival_count`
+- `intervention_rate = intervention_count / decision_step_count`
+- `energy_proxy = energy_proxy_total`
+
+목표 산출물:
+- `kpi_by_window.parquet`
+- `kpi_by_seed.parquet`
+- `kpi_by_time_band.parquet`
+- `kpi_overall.json`
+- `aggregation_manifest.json`
+
+# ?쉶 UrbanBus RL Project - ?묒뾽 ?쇱? (Project Journal)
+
+??臾몄꽌???꾨줈?앺듃??吏꾪뻾 ?곹솴???쇱옄蹂꾨줈 湲곕줉?섎뒗 ?듯빀 濡쒓렇?낅땲??  
+**"?ㅻ뒛 ???????** ?붿껌 ??理쒖떊 ?좎쭨媛 ?곷떒??異붽??⑸땲??
+
+---
+## ?뱟 2026-04-24
+### Canonical KPI Aggregator 諛곗꽑 ?꾨즺 諛?B1 Replay-backed Rollout ?깃났 (Phase 1)
+
+?ㅻ뒛 ?묒뾽?먯꽌??B1 No-op baseline???ㅽ뻾湲곕? ?ㅽ뀅?먯꽌 ?ㅼ젣 由ы뵆?덉씠 湲곕컲?쇰줈 ?뺤옣?섍퀬, B0/B1/B2/[A] ??議곌굔??怨듯넻 KPI 吏묎퀎 寃쎈줈???곌껐?섎룄濡?canonical aggregator ?뚯씠?꾨씪?몄쓣 ?뺣퉬?덈떎. ?뱁엳 B1? ?댁젣 ?⑥닚 ?ㅽ뀅???꾨땶 ?대뙌??湲곕컲???ㅼ젣 濡ㅼ븘???곗씠?곕? ?앹꽦?쒕떎.
+
+#### 1. B1 No-op Rollout Writer 援ы쁽 諛??ㅽ뻾 ?꾨즺 (Phase 1)
+- **?뚯씪**: `05_training/run_b1_noop_rollout.py` 怨좊룄???꾨즺.
+- **湲곕뒫**: `HistoricalReplayAdapter`瑜?濡쒕뱶?섏뿬 媛??쒕굹由ъ삤 ?덈룄?곗뿉 ???`reset()` -> `step()` 怨쇱젙???섑뻾?섍퀬 ?ㅼ륫 ?곗씠?곕? 紐⑥궗???꾪떚?⑺듃瑜??앹꽦??
+- **?곗텧臾?*: 
+  - `raw_events.parquet`: ?먯씠?꾪듃蹂??됰룞 諛?蹂댁긽 湲곕줉 (鍮꾩씤怨?由ы뵆?덉씠).
+  - `window_rollup.parquet`: ?쒖? 吏묎퀎湲곗슜 KPI ?붿빟 ?곗씠??
+  - `status.json` / `run_manifest.json`: 鍮꾩씤怨쇱꽦 寃쎄퀬 諛?硫뷀??곗씠???ы븿.
+- **寃利?*: Seed 001?????128媛??덈룄??濡ㅼ븘???ㅽ뻾 諛?`canonical_kpi_aggregator.py` ?듦낵 ?뺤씤 (**Real-ish PASS**).
+
+#### 2. Simulator Adapter ?명꽣?섏씠???뺤젙 諛?Phase 1 Smoke Validation 泥닿퀎 援ъ텞
+- **Simulator Adapter ?명꽣?섏씠???ㅺ퀎**: `05_training/simulator_adapter_interface.py` ?뺤쓽. CTDE 湲곕컲 `ObsDict`, Multi-Agent `StepResult`, `GraphSkeleton` ?뺤옣 ?ы븿.
+- **HistoricalReplayAdapter 援ы쁽**: Phase 1 ?꾩슜 鍮꾩씤怨쇱쟻(Non-causal) 由ы뵆?덉씠 ?대뙌??援ъ텞 諛?smoke validation ?⑸룄 ?쒗븳 紐낆떆.
+- **MAPPO Runner 怨좊룄??*: ?대뙌???숈쟻 濡쒕뱶 諛?`reset()`, `get_graph_skeleton()` ?몄텧 ?ㅼ륫 湲곕뒫 蹂닿컯.
+
+#### 3. canonical_kpi_aggregator.py ?ㅽ뙆???앹꽦 諛??ㅽ뻾 寃쎈줈 ?뺤갑
+- ?앹꽦 ?뚯씪: `05_training/evaluation/canonical_kpi_aggregator.py`
+- ?ㅽ뻾 紐⑤뱶 2醫?寃利? `legacy_b0_passthrough`, `official_rollup`.
+- 怨듯넻 異쒕젰 5醫?`kpi_by_window.parquet` ?? ?앹꽦 ?뺤씤.
+
+#### 4. ?꾩옱 ?먯젙 諛??쒖빟 ?ы빆
+- **?곹깭**: 
+  - B0: **completed** (Legacy Pass)
+  - B1: **completed** (Real-ish Pass via Historical Replay)
+  - B2/A: **smoke PASS** (via Stub rollup)
+- **?쒓퀎**: ?꾩옱 紐⑤뱺 PASS???됯? 怨꾩빟 諛??뚯씪 寃쎈줈 洹쒖빟???뺥빀??寃利??깃났???섎??섎ŉ, **鍮꾩씤怨쇱쟻 由ы뵆?덉씠 湲곕컲**?대?濡??ㅼ젣 ?깅뒫 鍮꾧탳 ?먮즺濡??ъ슜 遺덇?.
+
+#### 5. ?ㅼ쓬 ?④퀎 (Next Steps)
+- B2 rule-based real rollout ?ㅽ뻾湲?Runner) ?묒꽦 諛?`HistoricalReplayAdapter` ?곌껐.
+- [A] MAPPO runner媛 ?ㅼ젣 `window_rollup.parquet`瑜??앹꽦?섎룄濡??대뙌???곌껐.
+- 紐⑤뱺 議곌굔??由ы뵆?덉씠 湲곕컲 ?ㅼ륫 ?곗씠?곕? ?앹꽦?섎㈃ ?꾩껜 ?뚯씠?꾨씪?몄쓣 **Real-ish PASS**濡??밴꺽.
+- Phase 2 ?멸낵 ?쒕??덉씠??Causal Simulator) ?대뙌??以鍮?
+
+---
+## ?뱟 2026-04-23
+### B0/B1/B2 Baseline ?꾩꽦 諛?[A] MAPPO ?숈뒿 怨④꺽(Stub) 援ъ텞
+
+?ㅻ뒛 ?묒뾽?먯꽌??媛뺥솕?숈뒿 ?쒕??덉씠?섏쓣 ?꾪븳 湲곗???Baseline) ?꾨젅?꾩썙?щ? ?뺣┰?섍퀬, B0(Historical) 吏?쒕? ?곗씠?곕쿋?댁뒪 諛?Parquet ?뺥깭濡??뺣낫?덉뒿?덈떎. ?붾텋???쒕??덉씠?곌? 遺?ы븳 ?꾩옱 ?곹깭瑜?諛섏쁺??B1(No-op) 諛?B2(Rule-based)???ㅽ뻾 ??硫뷀??곗씠?곕? 留덈젴?덉쑝硫? 理쒖쥌?곸쑝濡?[A] ?쒖닔 MAPPO 紐⑤뜽???щ꼫(Runner) 怨④꺽??援ъ꽦?덉뒿?덈떎.
+
+#### 1. B0 Historical Baseline ?꾨즺
+- **?앹꽦 ?꾨즺**: `public.baseline_b0_historical_kpi_by_window`, `public.baseline_b0_historical_kpi_metadata`
+- **6媛?KPI 怨꾩빟 而щ읆 怨좎젙**: `cv_headway`, `avg_wait_seconds`, `bunching_rate`, `on_time_rate`, `intervention_rate`, `energy_proxy`
+- **?곗씠???곹깭**:
+  - 梨꾩썙吏?媛? `avg_wait_seconds`, `intervention_rate`
+  - NULL ?좎?: `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy`
+- **寃利?寃곌낵**:
+  - `row_count = 6570`
+  - `min_state_ts = 2023-01-01 05:00:00+09`
+  - `max_state_ts = 2023-12-31 22:00:00+09`
+  - `wait_filled_rows = 6570`
+  - `cv_headway_null_rows = 6570`
+  - `zero_intervention_rows = 6570`
+
+#### 2. B0 Artifact Export ?꾨즺
+- **?앹꽦 ?곗텧臾?*:
+  - `artifacts/baseline_v1/B0_historical/kpi_by_window.parquet`
+  - `artifacts/baseline_v1/B0_historical/metadata.json`
+
+#### 3. B1 No-op Baseline 以鍮??꾨즺
+- **?앹꽦 ?곗텧臾?*:
+  - `artifacts/baseline_v1/B1_noop/scenario_index.parquet`
+  - `artifacts/baseline_v1/B1_noop/policy_config.json`
+  - `artifacts/baseline_v1/B1_noop/rollouts/seed_001` ~ `seed_003` (?대???`run_manifest.json` ?앹꽦 ?꾨즺)
+  - `run_b1_noop_rollout.py` 怨④꺽 ?앹꽦 ?꾨즺
+- **?꾩옱 ?곹깭**: `prepared_not_executed` (?ъ쑀: replay simulator adapter 遺??
+
+#### 4. B2 Rule-based Baseline 以鍮??꾨즺
+- **?앹꽦 ?곗텧臾?*:
+  - `artifacts/baseline_v1/B2_rulebased/scenario_index.parquet`
+  - `artifacts/baseline_v1/B2_rulebased/policy_config.json`
+  - `artifacts/baseline_v1/B2_rulebased/rollouts/seed_001` ~ `seed_003`
+- **?꾩옱 ?곹깭**: `prepared_not_executed` (?ъ쑀: replay simulator adapter 遺??
+- **B2 Rule Params ?뺤젙**:
+  - `target_headway_seconds = 600`
+  - `low_headway_threshold_seconds = 360`
+  - `high_headway_threshold_seconds = 900`
+  - `max_hold_seconds = 120`
+  - `allow_skip = true`
+
+#### 5. baseline_contract.json ?뺤젙
+- **?앹꽦 ?곗텧臾?*: `artifacts/baseline_v1/baseline_contract.json`
+- **怨듯넻 怨꾩빟**:
+  - `evaluation_horizon_minutes = 30`
+  - `seeds = [1, 2, 3]`
+  - `time_bands = [peak, offpeak, night]`
+  - `shared_kpis` = 6醫?怨좎젙
+  - `fairness_constraints`:
+    - `same_initial_state = true`
+    - `same_exogenous_events = true`
+    - `same_eval_window = true`
+- **Baseline ?곹깭 ?ㅻ깄??*: `B0 = completed`, `B1 = prepared_not_executed`, `B2 = prepared_not_executed`
+
+#### 6. [A] pure_mappo_baseline 怨꾩빟 ?곌껐 ?꾨즺
+- **議곌굔 紐낆꽭**:
+  - `condition_id = A`
+  - `qwen_train = false`
+  - `qwen_inference = false`
+- **?앹꽦 ?곗텧臾?*: `experiment_A_contract.json`
+- **?꾩옱 ?곹깭**: `contract_linked_not_trained`
+
+#### 7. MAPPO ?щ꼫 怨④꺽(Stub) ?앹꽦 ?꾨즺
+- **?앹꽦 ?뚯씪**:
+  - `05_training/mappo_runner.py`
+  - `05_training/run_experiment_A_stub.py`
+  - `05_training/policies/mappo_policy_stub.py`
+- **Seed蹂??ㅽ뻾 ?붾젆?곕━ 諛??곗텧臾?*:
+  - `artifacts/experiment_A_v1/runs/seed_001` ~ `seed_003` ?앹꽦 ?꾨즺
+  - 媛?seed蹂?`run_manifest.json`, `status.json`, `checkpoint_stub.json` ?곗텧臾??ы븿
+- **?꾩옱 ?곹깭**: `status: "adapter_missing"` (?ъ쑀: simulator adapter 誘멸뎄?꾩씠誘濡??뺤긽 ?숈옉??
+
+#### 8. MAPPO ?щ꼫 ?ㅺ퀎 泥댄겕由ъ뒪???뺤젙
+- CTDE(Centralized Training Decentralized Execution=以묒븰吏묒쨷 ?숈뒿 遺꾩궛 ?ㅽ뻾) 援ъ“ 遺꾨━
+- PyG(PyTorch Geometric=?뚯씠?좎튂 吏?ㅻ찓?몃┃) Batch.from_data_list 洹몃옒??諛곗튂
+- ?쒖꽦 踰꾩뒪 留덉뒪??- edge_index 濡ㅼ븘??踰꾪띁 ?쒖쇅
+- GAE(Generalized Advantage Estimation=?쇰컲???댁젏 異붿젙)?먯꽌 terminated / truncated 遺꾨━
+- 泥⑤몢 ?곸쓳???뷀듃濡쒗뵾 怨꾩닔
+- grad_norm_clip = 0.5
+- rng_state ?ы븿 泥댄겕?ъ씤??- qwen_trigger_rate 濡쒓퉭, ??[A]?먯꽌??0.0 媛뺤젣
+- shared_policy = true 湲곕낯媛?- GATv2 freeze ???먯쭊 ?댁젣 3?④퀎
+- reward normalization
+- KL divergence monitoring + early stopping
+- H200 multi-GPU???꾩옱 ?명꽣?섏씠?ㅻ쭔 ?ㅺ퀎, 蹂멸뎄?꾩? 蹂대쪟
+
+#### 9. Troubleshooting & Today Notes
+- **Windows PowerShell(PowerShell=留덉씠?щ줈?뚰봽??紐낅졊???? 遺숈뿬?ｊ린??patch workflow ?뺤갑**: 吏곸젒 ?섏젙 ????ㅽ겕由쏀듃瑜??듯븳 ?띿뒪??議곗옉 ?뚯씠?꾨씪???덉갑.
+- **psql.exe ?먯깋 諛?PATH(Path=?ㅽ뻾 寃쎈줈 ?섍꼍蹂?? ?댁뒋 ?닿껐**: PATH 誘몄씤??臾몄젣瑜??먮룞 ?먯깋 ?ㅽ겕由쏀듃濡??닿껐?섍퀬, DB(Database=?곗씠?곕쿋?댁뒪) ?ъ슜??`ryujo` ?몄쬆 ?ㅽ뙣瑜?`PGUSER`/`PGPASSWORD` ?섍꼍蹂??諛⑹떇?쇰줈 蹂듦뎄.
+- **SQL ?곗씠??????ㅻ쪟 ?섏젙**: `integer` vs `boolean`??`COALESCE` ?ㅻ쪟 ?섏젙.
+- **?몄퐫??& ?뚯씪 ?쒖뒪???댁뒋 ?뚰뵾**: 
+  - `preview.sql` UTF-8 BOM(Byte Order Mark=臾몄옄 ?몄퐫???쒖떆 諛붿씠?? 臾몄젣 ?뺤씤 諛??고쉶.
+  - config ?붾젆?곕━ ?놁쓬?쇰줈 ?명븳 YAML ?앹꽦 ?ㅽ뙣 蹂듦뎄.
+  - JSON UTF-8 BOM ?먮윭 諛쒖깮 ??`utf-8-sig` ?쎄린 ?듭뀡 ?곸슜.
+  - PowerShell ??here-string 以묒꺽 ???대? ?뚯씠??Bash 蹂?섍? null 濡??됯??섎뒗 臾몄젣 ?뚯븙 諛??뚰뵾.
+
+#### 10. ?ㅼ쓬 ?④퀎 (Next Steps)
+- `simulator_adapter_interface.py` 怨④꺽 ?앹꽦
+- replay simulator adapter 紐낆꽭 ?뺤젙
+- B1/B2 real rollout ?ㅽ뻾湲??곌껐
+- [A] ?ㅼ젣 MAPPO train/eval runner ?뺤옣
+
+---
+## ?뱟 2026-04-22
+### GATv2 Training Smoke Test Binding 諛??좉퇋 ?ㅽ궗 ?쒖젙
+
+- dataset_full_20260422_084243 successfully bound to train_gatv2.py
+- Samsung Galaxy Book 5 Pro CPU-based training smoke test PASS
+- 128 files / batch_size 1 / 3 epochs stability test PASS
+- node-level GATv2 forward, loss, backward, optimizer step verified
+- laptop is sufficient for pipeline validation, but full-scale training should be migrated to H200 server
+- **???ㅽ궗 `gatv2_training_smoke_test_binding` 異붽???* (`05_training/skills/gatv2_training_smoke_test_binding.md`)
+
+---
+## ?뱟 2026-04-21
+### GATv2 ?꾩껜 ?곗씠?곗뀑 鍮뚮뱶 ?깃났 諛??뚯씠?꾨씪???뱀씤 [APPROVED]
+
+GATv2 ?숈뒿???꾪븳 1??移?2023?? ?꾩닔 ?곗씠?곗뀑 鍮뚮뱶瑜??꾨즺?섍퀬, ?앹꽦???꾪떚?⑺듃??臾닿껐?깆쓣 理쒖쥌 ?뱀씤??
+
+#### 1. 二쇱슂 ?깃낵
+- **run_build_dataset.ps1** full dataset save PASS
+- **snap 6570/6570** completed (1??移??꾩껜 ??꾩뒳?쇱씠??蹂???꾨즺)
+- **build_report.json** generated successfully
+- **full dataset build** completed in 4470.9s (74m 31s)
+- **end-to-end artifact generation pipeline** approved
+
+#### 2. ?ㅼ쓬 ?④퀎 (Next Step)
+- `dataset_full` 異쒕젰??`train_gatv2.py`??諛붿씤?⑺븯怨??숈뒿 smoke test ?ㅽ뻾
+
+---
+## ?뱟 2026-04-20
+### ?숈뒿 酉?materialize + PyG dataset 鍮뚮뜑 ???섍꼍/諛곗꽑 紐⑤몢 ?듦낵 [APPROVED]
+
+?꾨궇 ?뺤젙??5媛?view ?꾩뿉 ??媛쒖쓽 ?뚯씠?꾨씪???④퀎瑜??뷀빐 GATv2 ?숈뒿 吏곸쟾源뚯???寃쎈줈瑜??앷퉴吏 諛곗꽑 ?꾨즺. ?щ줈??酉???踰덉쓣 留ㅽ듃由ъ뼹?쇱씠利덈뱶 ?뚯씠釉붾줈 怨좎젙?섍퀬,
+PyG `Data` 鍮뚮뜑瑜??묒꽦?섏뿬 smoke test ?먯꽌 invariant 8醫낆씠 紐⑤몢 ?듦낵?⑥쓣 ?뺤씤.
+
+#### 1. ?앹꽦/?섏젙 ?뚯씪
+
+| ?뚯씪 | ??븷 |
+|------|------|
+| `04_model_inputs/materialize_gatv2_training_table.sql` [NEW] | view ???뚯씠釉?蹂??+ 3媛??몃뜳??+ VACUUM ANALYZE + parity check |
+| `04_model_inputs/run_materialize.ps1` [NEW] | psql ?щ꼫. ASCII-only (PS 5.1 CP949 ?덉쟾), `$LASTEXITCODE` ?먯젙 |
+| `05_training/build_gatv2_dataset.py` [NEW] | PyG `Data` 媛앹껜 鍮뚮뜑. mat-table ?먮룞 媛먯?, time-based split, invariant C1~C8 assert |
+| `05_training/run_build_dataset.ps1` [NEW] | venv 遺?몄뒪?몃옪 + torch CPU ??+ 鍮뚮뜑 ?ㅽ뻾 + 濡쒓렇 |
+| `05_training/requirements.txt` [NEW] | torch / torch_geometric / pandas / sqlalchemy / psycopg2 |
+
+#### 2. Materialization ?ㅼ륫 (?꾩껜 13,803.4 s ??3h 50m)
+
+| ?④퀎 | ?쒓컙 | 硫붾え |
+|------|------|------|
+| MAT-0 drop (IF EXISTS) | 0.01 s | 泥??ㅽ뻾?대씪 NOTICE skip |
+| **MAT-1 CTAS (20.29M rows)** | **5,549.8 s (1h 32m 29s)** | ?ъ쟾 異붿젙 ~2h 蹂대떎 鍮좊쫫 |
+| MAT-2 row count | 1,404.3 s (23m 24s) | cold cache full scan |
+| MAT-3 idx (state_ts, node_index) | 484.9 s (8m 4s) | ?숈뒿 hot path 蹂듯빀 ?몃뜳??|
+| MAT-3 idx (service_date) | 306.6 s (5m 6s) | split ?꾪꽣??|
+| MAT-3 idx (node_index) | 285.2 s (4m 45s) | per-node 遺꾩꽍??|
+| MAT-4 VACUUM ANALYZE | 900.4 s (15m) | planner ?듦퀎 |
+| MAT-5 parity check | 4,872.1 s (1h 21m 12s) | view 痢?荑쇰━媛 ?ъ쟾媛?(짠5 諛쒓껄) |
+
+**parity_check 寃곌낵**:
+
+```
+ mat_rows | view_total_rows | mat_snapshots | view_snapshots | parity_check
+----------+-----------------+---------------+----------------+--------------
+ 20289600 |        20289600 |          6570 |           6570 | OK
+```
+
+?꾨궇 readiness ??V4/V5 ?섏튂 (`total_training_rows=20,289,600`, `distinct_snapshots=6,570`)
+? **?뺥솗???쇱튂**. ??酉?(`gatv2_snapshot_summary` ??mat table) 媛??뺥빀 ?뺤씤.
+
+#### 3. ?몃뜳???ㅺ퀎
+
+?숈뒿 ??PyG DataLoader 媛 snapshot ?⑥쐞濡??쎈뒗 ?⑦꽩 (`WHERE state_ts = ?`) ??留욎떠 `(state_ts, node_index)` 蹂듯빀 ?몃뜳?ㅻ? hot path 濡?吏?? 遺?섏쟻?쇰줈
+`service_date` (split ?꾪꽣), `node_index` (per-node 遺꾩꽍) 蹂댁“ ?몃뜳??異붽?.
+?댄썑 紐⑤뱺 ?숈뒿 荑쇰━??btree seek 濡?利됰떟 (?섎갚 ms ?대궡 ?덉긽).
+
+#### 4. PyG Dataset Builder ?ㅺ퀎 ??`build_gatv2_dataset.py`
+
+contract `pytorch_geometric_dataset_contract.md` 짠10 invariant C1~C8 ??肄붾뱶
+?덈꺼?먯꽌 `assert` 濡?媛뺤젣. 二쇱슂 ?⑥닔:
+
+| ?⑥닔 | ??븷 |
+|------|------|
+| `_resolve_training_source(engine, prefer_mat)` | `_mat` ?뚯씠釉?議댁옱 ???먮룞 ?좏깮, ?놁쑝硫?view fallback |
+| `load_static_graph(engine)` | (num_nodes, edge_index, edge_attr, nodes_df) 諛섑솚. C3/C4 assert |
+| `load_snapshot_list(engine, source, cfg)` | state_ts 洹몃９?? `--max-snapshots` smoke cap 吏??|
+| `load_snapshot_rows(engine, source, state_ts)` | snapshot ?⑥쐞 dataframe |
+| `build_snapshot_data(df_ts, num_nodes, state_ts)` | x/y/node_mask ?⑤뵫 + C5/C8 assert |
+| `_split(service_date, cfg)` | train (01-10) / val (11) / test (12) date 湲곕컲 ?쇱슦??|
+| `run_build(cfg)` | 硫붿씤 猷⑦봽. 30珥덈쭏??吏꾪뻾 濡쒓렇, `.pt` 4媛?+ `build_report.json` ???|
+
+CLI: `--db-url`, `--out-dir`, `--no-mat`, `--max-snapshots N`, `--dry-run`.
+DB URL 湲곕낯媛믪? `PG*` ?섍꼍蹂?섏뿉??議곕┰.
+
+#### 5. Smoke Test 寃곌낵 ???섍꼍 + ?곗씠??寃쎈줈 紐⑤몢 OK
+
+```
+[env ] torch 2.5.1+cpu / pyg 2.6.1 / pandas 2.3.3
+[cfg]  use_materialized=True, max_snapshots=8, dry_run=True
+[db]   snapshot_summary: distinct_snapshots=6570, total_training_rows=20,289,600
+[db]   edge_summary    : num_nodes=4116, num_edges=5484
+[graph] num_nodes=4116  num_edges=5484
+[DONE] dataset build  (1665.4s)
+```
+
+| 寃利???ぉ | 痢≪젙媛?| 湲곕? | ?먯젙 |
+|----------|-------|-----|------|
+| torch ?ㅼ튂 | 2.5.1+cpu | ??.1 | ??|
+| torch_geometric ?ㅼ튂 | 2.6.1 | ??.4 | ??|
+| pandas ?ㅼ튂 | 2.3.3 | ??.0 | ??|
+| sqlalchemy/psycopg2 import | OK | OK | ??|
+| mat table ?먮룞 媛먯? | True | True | ??|
+| num_nodes (graph) | 4116 | 4116 | ??|
+| num_edges (graph) | 5484 | 5484 | ??|
+| C1 x.shape == (4116, 10) | OK | OK | ??|
+| C2 y.shape == (4116, 3) | OK | OK | ??|
+| C3 edge_index.max() == 4115 | OK | OK | ??|
+| C4 edge_attr.shape[1] == 4 | OK | OK | ??|
+| C5 node_mask.sum() == rows | OK | OK | ??|
+| C8 isfinite(x) / isfinite(y) | OK | OK | ??|
+
+1,665.4 s 以??遺遺꾩? **venv 遺?몄뒪?몃옪 + torch CPU ???ㅼ슫濡쒕뱶** ?쇳쉶??鍮꾩슜.
+?댄썑 ?ㅽ뻾遺?곕뒗 venv ?ъ궗?⑹쑝濡?利됱떆 ?쒖옉.
+
+#### 6. ?⑥? 諛쒓껄
+
+##### 짠6-A. PostgreSQL 18 + PowerShell 5.1 NOTICE ?쒖떆 ?≪쓬
+
+psql 18.3 ??`DROP TABLE IF EXISTS` NOTICE 媛 PS 5.1 肄섏넄?먯꽌 `NativeCommandError`
+鍮④컙 釉붾줉?쇰줈 ?뚮뜑留곷맖. `$ErrorActionPreference = "Continue"` 媛 嫄몃젮 ?덉뼱
+**?ㅽ뻾? 怨꾩냽??* (?ㅼ륫: MAT-0 NOTICE 諛쒖깮 ??MAT-1 CTAS 1h 32m ?뺤긽 ?섑뻾 ??MAT-5 parity OK 源뚯? ?먮룞 ?꾨즺). 肄섏넄 鍮④컙??= ?쒓컖???≪쓬, 濡쒓렇 ?뚯씪?먮뒗
+?뺤긽 ?띿뒪?몃줈 ??λ맖. ?ν썑 ?숈씪 ?⑦꽩 諛쒖깮 ??臾댁떆 媛??
+
+##### 짠6-B. parity check 媛 1h 21m 嫄몃┛ ?댁쑀
+
+MAT-5 ??`(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 媛
+**?먮낯 view chain ???ъ쟾媛?* ?섏뿬 20.29M row CTE 瑜??ㅼ떆 ?뚮┝. mat table
+吏곸젒 荑쇰━???몃뜳?ㅻ줈 利됰떟?댁?留? 鍮꾧탳 ??곸씠 view 痢≪씠????踰?????ㅼ틪.
+**?숈뒿 寃쎈줈?먯꽌??諛쒖깮?섏? ?딆쓬** ??`build_gatv2_dataset.py` ??mat table 留?李몄“??
+
+##### 짠6-C. PowerShell 5.1 CP949 vs UTF-8 ?명솚
+
+?꾨궇 ASCII-only 濡??뺣퉬??PS1 ??媛?(`run_materialize.ps1`, `run_build_dataset.ps1`)
+媛 ?몄퐫???댁뒋 ?놁씠 ?ㅽ뻾?? ?ν썑 `05_training/` ??紐⑤뱺 PS1 ? ASCII-only ?뺤콉
+?좎?. ?쒓? 硫붿떆吏??`.md` / `.sql` (UTF-8 泥섎━ 媛?? ?먯꽌留??ъ슜.
+
+#### 7. ?ㅼ쓬 ?④퀎 ??? 鍮뚮뱶 ??GATv2 ?숈뒿 肄붾뱶
+
+| # | 怨쇱젣 | 鍮꾩슜 | 釉붾줈?? |
+|---|------|------|---------|
+| 1 | `run_build_dataset.ps1` ? ?ㅽ뻾 (smoke ?몄옄 ?쒓굅) | ?덉긽 ~1-2h | YES (?숈뒿??.pt 4媛??앹꽦) |
+| 2 | `build_report.json` 寃利?(C6/C7 ?⑹궛 ?쇱튂 ?뺤씤) | 利됱떆 | YES |
+| 3 | `05_training/gatv2_model.py` GATv2 ?몄퐫???뺤쓽 | - | NO |
+| 4 | `05_training/train_gatv2.py` ?숈뒿 猷⑦봽 (MSE in log space) | - | NO |
+| 5 | `05_training/eval_gatv2.py` ?됯? (expm1 蹂듭썝 + RMSE/MAE) | - | NO |
+
+#### 8. 遺?곕Ъ / ?뺣━
+
+- materialize SQL / runner ????`DROP TABLE IF EXISTS` ?쒖옉?대씪 **?ъ떎??  ?꾩쟾 ?덉쟾** (idempotent). ???ъ떎??????~3h 50m ?뚯슂.
+- `05_training/.venv/` 媛 ?앹꽦?? `.gitignore` 誘명룷????異붽? 沅뚯옣 (??⑸웾 venv).
+- `05_training/data/gatv2_dataset/` ?붾젆?곕━ (out-dir) ??鍮뚮뱶 ???먮룞 ?앹꽦.
+  `.pt` ?뚯씪?ㅻ룄 `.gitignore` 沅뚯옣 (?섎갚 MB ?⑥쐞 ?덉긽).
+- snapshot 蹂?吏꾪뻾? `logs_build_<timestamp>/build.log` ??30珥덈쭏??湲곕줉?섎?濡?  以묎컙 ?ㅽ뙣 ???대뒓 state_ts ?먯꽌 硫덉톬?붿? 利됱떆 ?뚯븙 媛??
+
+---
+
+### ?꾩쟻 吏꾩쿃 留ㅽ듃由?뒪 媛깆떊 (2026-04-20 23:59 湲곗?)
+
+| ?덉씠??| ?곹깭 |
+|-------|------|
+| graph_state_timeslice | APPROVED |
+| rl_state_training_base | APPROVED |
+| rl_stop_transition_features | APPROVED |
+| graph_edge_master STOP_TO_STOP v2 | APPROVED |
+| GATv2 5-view layer | APPROVED |
+| **gatv2_snapshot_stop_features_train_mat** | **APPROVED (parity OK)** |
+| **build_gatv2_dataset.py** | **smoke test PASSED** |
+| GATv2 model / train / eval | TODO |
+
+### RL Baseline & Rollout 吏꾩쿃??(2026-04-24 湲곗?)
+
+| ?덉씠??/ ?쒖뒪??| ?곹깭 |
+|-------|------|
+| simulator_adapter_interface | **APPROVED** |
+| HistoricalReplayAdapter | **APPROVED (Phase 1)** |
+| B0 Historical Baseline | **COMPLETED (Legacy Pass)** |
+| B1 No-op Baseline (Replay) | **COMPLETED (Real-ish Pass)** |
+| B2 Rule-based Baseline | Smoke PASS (Stub) |
+| [A] Pure MAPPO Baseline | Smoke PASS (Stub) |
+| Canonical KPI Aggregator | **APPROVED (official_rollup)** |
+
+---
+## ?뱟 2026-04-19
+### graph_edge_master STOP_TO_STOP 蹂듭썝 ??leg-aggregation ?꾩엯
+
+`graph_edge_master` ??`STOP_TO_STOP` ?ｌ?瑜?`route_link_sequence` + `dim_stop`
+濡쒕????ъ깮?깊븯???⑦궎吏 (`graph_edge_master_pkg/`) 瑜?v2 濡?怨좊룄?뷀븯??
+coverage 22.84% ??**99.91%** (leg 湲곗?) 濡?蹂듦뎄.
+
+#### 1. v1 愿李???珥덇린 22.84% 而ㅻ쾭由ъ? ([?섏슜 遺덇?])
+- `01_alter_graph_edge_master.sql` / `02_load_...sql` / `03_..._readiness.sql`
+  3-?④퀎 ?뚯씠?꾨씪?몄쓣 first pass 濡??ㅽ뻾.
+- 援ъ“ 吏??R3~R6) ???꾨? 0 ?쇰줈 源⑤걮?덉쑝??**R10 coverage_pct = 22.84%**.
+- ?숈떆??R5 ?먯꽌 `ON CONFLICT DO UPDATE` 瑜?媛숈? edge_uid 濡???踰?嫄대뱶??  `21000` ?먮윭 ??STAGE 4.5 `tmp_edge_dedup (row_number() over edge_uid)` 異붽?濡??닿껐.
+- ???쒖젏??coverage ??섎? "dim_stop 留ㅽ븨 遺?? 濡?媛?뺥븿.
+
+#### 2. 吏꾨떒 3?④퀎 (D1 / D2 / D3) ??媛??A, B 湲곌컖 ??媛??D ?뺤젙
+- **D1** (`D_diagnose_stop_id_mapping.sql`): missing_id 1,482媛? ?꾨? 湲몄씠 10,
+  ?レ옄 prefix `15xxx / 30007xxx / 73611xxx?? 濡?遺꾪룷. `dim_stop` ? 7媛?而щ읆
+  肉먯씠??alt-key 留ㅽ븨 ?ъ? ?놁쓬 ??**媛??A (?ㅻⅨ ???ъ슜) 湲곌컖**.
+- **D2** (`D2_probe_mapping_tables.sql`): 5媛??꾨낫 釉뚮━吏/staging ?뚯씠釉?  (`stop_link_mapping_master`, `stg_daegu_stops_geo`, `bs_20250903`,
+  `graph_node_master`, `err_daegu_stop_usage_mapping_failed`) 횞 紐⑤뱺 text/numeric
+  而щ읆?????dynamic `EXECUTE` 濡?留ㅼ묶 ??痢≪젙 ??**?꾨? 0 留ㅼ튂**. 釉뚮━吏
+  ?뚯씠釉?媛??B ?꾩쟾 湲곌컖.
+- **D3** (`D3_link_vs_stop_hypothesis.sql`): ?レ뒪???몄꽑 `7361109008:dir=1`
+  ??link ?쒗?ㅻ? `S??, -?뭆, S??, -??` ?⑦꽩?쇰줈 ?쒓렇?대낫??**援먯감 ?⑦꽩** ?좊챸.
+  ?꾩껜 遺꾪룷 `S?뭆 32.41% / S?? 32.39% / -?뭆 23.01% / -?? 12.19%`.
+  ?몄꽑??`links_per_stop = 1.84` (avg) / 理쒕? ?????⑥쐞. ??**媛??D
+  (route_link_sequence ??stop + ?꾨줈/援먯감濡?intermediate node ?쇳빀 ?쒗??
+  ?뺤젙.**
+
+#### 3. 02_load v2 ??leg-aggregation ?뚭퀬由ъ쬁
+媛??D ??留욎떠 `02_load_...sql` ??9-stage ?뚯씠?꾨씪?몄쑝濡??꾨㈃ ?ъ옉??
+
+```
+STAGE 1  tmp_rls_tagged    : link 留덈떎 (st_is_stop, ed_is_stop) ?뚮옒洹?STAGE 2  tmp_rls_legged    : st_is_stop=TRUE 留덈떎 leg_id 利앷? (window sum)
+STAGE 3  tmp_leg_edges     : leg ?⑥쐞 src/dst stop, cum_gis_dist 吏묎퀎
+STAGE 4  tmp_edge_src      : dim_stop.geom_5187 join, distance_m/time_sec 怨꾩궛
+STAGE 5  tmp_edge_dedup    : edge_uid ?⑥쐞 媛???대Ⅸ leg 1嫄대쭔 ?좎?
+STAGE 6  tmp_edge_ranked   : (src,dst) ?⑥쐞 edge_rank (distance_m ASC)
+STAGE 7  INSERT ... ON CONFLICT DO UPDATE
+STAGE 8  UPDATE ... SET is_active=false  (stale 泥섎━, DELETE ?꾨떂)
+STAGE 9  AFTER ?ㅻ깄??NOTICE
+```
+
+- **?듭떖**: leg = "??stop 異쒕컻 ~ ?ㅼ쓬 stop ?꾩갑 吏곸쟾" 源뚯???紐⑤뱺 link.
+  以묎컙 intermediate node ??`graph_edge_master` ????ν븯吏 ?딆쓬 (stop-to-stop
+  directed edge only ?먯튃 ?좎?).
+- **嫄곕━ 怨꾩궛**: `coalesce(nullif(cum_gis_dist,0), ST_Distance(geom_5187))` ??  ?꾩쟻 ?ㅼ젣 留곹겕 嫄곕━ ?곗꽑, 0/NULL ?대㈃ 吏곸꽑嫄곕━ fallback.
+- **?쒓컙 怨꾩궛**: `distance_m / 1000.0 / 20.0 * 3600.0` (?됯퇏 20 km/h 媛??.
+
+#### 4. 03_readiness ?섎?濡??섏젙
+- **R10** 遺꾨え瑜?"source link rows" ??"leg-aggregation distinct legs" 濡?蹂寃?
+  `source_legs_total / source_legs_valid / source_legs_distinct / loaded_edges /
+  missing / coverage_pct` 6-而щ읆 異쒕젰.
+- **R11** ?섎?瑜?"留ㅼ묶 ?ㅽ뙣 stop_id" ??"route_link_sequence ??non-stop
+  node_id ?섑뵆 (?섎룄??intermediate node ??`dim_stop` ???녿뒗 寃??뺤긽)" ?쇰줈 ?섏젙.
+
+#### 5. v2 Readiness 寃곌낵 ([APPROVED])
+
+| ID | 吏??| 痢≪젙媛?| ?먯젙 |
+|---|---|---|---|
+| R0 | stop_to_stop_total | **21,466** | ??|
+| R0 | primary_edges | 5,484 | ??|
+| R0 | inactive_edges | 0 | ??|
+| R3 | self_loop_cnt | **0** | ??|
+| R4 | orphan_src / orphan_dst | **0 / 0** | ??|
+| R5 | duplicate_primary_cnt | **0** | ??|
+| R6 | null_distance / null_time / zero_distance | **0 / 0 / 0** | ??|
+| R7 | min_dist_m / max_dist_m | 6.88 / 17,438.65 | ??(< 20 km) |
+| R7 | avg_dist_m / p50 / p95 | 494.7 / 381.7 / 1,234.9 | ??|
+| R7 | over_5km / over_20km | 27 / 0 | ??|
+| R8 | avg_time_sec / p50_time_sec | 89.0 / 68.7 | ??(1.48 min / 1.15 min) |
+| R10 | **source_legs_distinct** | **21,485** | |
+| R10 | **loaded_edges** | **21,466** | |
+| R10 | **coverage_pct** | **99.91%** | ??|
+
+- v1 22.84% ??v2 **99.91%** ??4.37횞 ?곸듅.
+- 誘몄쟻??19嫄?(99.91% ??100%) ? `tmp_edge_src` STAGE 4 ??`dim_stop.geom_5187
+  is not null` inner-join 議곌굔?먯꽌 ?덈씫??吏?ㅻ찓?몃━-寃곗륫 stop ?쇰줈 異붿젙 (珥?  21,485 legs 湲곗? 0.09%). 蹂꾨룄 ?곗씠???덉쭏 ?곗폆?쇰줈 遺꾨━??異붿쟻.
+- R11 ?섑뵆???꾨? `1500xxx` prefix ???덉긽?濡??꾨줈/援먯감濡?node (?援ъ떆 `link` /
+  `node` Shapefile 怨꾩뿴). ???댁긽 "留ㅼ묶 ?ㅽ뙣" 濡?痍④툒?섏? ?딆쓬.
+
+#### 6. 遺?곕Ъ / ?뺣━
+- **?좎?**: `graph_edge_master` ?ㅽ궎留?(`distance_m`, `time_sec`,
+  `is_primary_edge`, `edge_rank`) ?꾪? 蹂寃??놁쓬. GATv2 static graph ?쒖???  源⑥? ?딆쓬.
+- **異붽???臾몄꽌**: `graph_edge_master_pkg/D_diagnose_stop_id_mapping.sql`,
+  `D2_probe_mapping_tables.sql`, `D3_link_vs_stop_hypothesis.sql`,
+  `run_diagnose.ps1`.
+- **README 짠7 changelog** ??"02_load v2 諛고룷" ??ぉ 湲곕줉.
+- PowerShell NativeCommandError (`psql` ??RAISE NOTICE 媛 stderr 濡??섏?
+  `$ErrorActionPreference=Stop` ?뺤콉?먯꽌 ?꾩껜 ?ㅽ겕由쏀듃 以묐떒) ???щ꼫
+  (`run_graph_edge_master.ps1`, `run_diagnose.ps1`) ??`$ErrorActionPreference =
+  "Continue"` 怨좎젙 + `$LASTEXITCODE` 濡??깊뙣 ?먯젙?쇰줈 援먯젙.
+
+#### 7. ?ㅼ쓬 ?④퀎 (釉붾줈???댁젣??
+- `graph_state_timeslice` ??`node_uid = 'STOP:<stop_id>'` 湲곗? state features
+  二쇱엯 ???대쾲??蹂듭썝??STOP_TO_STOP ?ｌ?媛 GATv2 message-passing 援ъ“??  static skeleton ?쇰줈 ?ъ슜??
+- 19嫄?吏?ㅻ찓?몃━-寃곗륫 stop ? `dim_stop` ?곗씠???덉쭏 ?꾩냽 ?곗폆?쇰줈.
+- ?ш린源뚯? ?꾨즺?섎㈃ 鍮꾨줈??**GATv2 紐⑤뜽 肄붾뱶 ?묒꽦 ?④퀎** 濡??댄뻾.
+
+### GATv2 ?낅젰 ?덉씠??援ъ꽦 ??5媛?view + PyG dataset contract [APPROVED]
+
+`graph_edge_master STOP_TO_STOP v2` 媛 ?뱀씤??吏곹썑, GATv2 ?숈뒿 ?뚯씠?꾨씪??(PyTorch Geometric) ???쎌쓣 **DB 酉?5醫?* 怨?**dataset 怨꾩빟 臾몄꽌** 瑜??뺤젙?섏뿬,
+**"static graph skeleton + per-snapshot node features"** ?쇰뒗 dual layer 瑜?DB ?덈꺼?먯꽌 怨좎젙?덈떎. readiness ??2026-04-19 21:51 ~ 23:58 (7,664.4 s) ??嫄몄퀜 ?ㅽ뻾?섏뼱 紐⑤뱺 hard gate 瑜??듦낵?덈떎.
+
+#### 1. ?앹꽦/?섏젙 ?뚯씪
+
+| ?뚯씪 | ??븷 |
+|------|------|
+| `04_model_inputs/create_gatv2_training_views.sql` [NEW] | 5媛?view ?앹꽦 + 8媛?readiness 泥댄겕 (single-file idempotent) |
+| `04_model_inputs/run_gatv2_views.ps1` [NEW] | psql ?щ꼫. ASCII-only (PS 5.1 CP949 ?덉쟾), `$LASTEXITCODE` ?먯젙 |
+| `05_training/pytorch_geometric_dataset_contract.md` [NEW] | PyG `Data` 媛앹껜 而щ읆 ?쒖꽌, split 洹쒖튃, invariant C1~C8 |
+
+#### 2. ?앹꽦??view 5醫?
+| View | ??븷 | PyG ???|
+|------|-----|---------|
+| `public.gatv2_node_master_active` | primary+active STOP_TO_STOP ?ｌ? 李몄뿬 STOP ?몃뱶. 0-based dense `node_index` | `num_nodes`, **x** ???쒖꽌 |
+| `public.gatv2_edge_primary_active` | edge_index ?щ즺 + `distance_km/time_min/*_log` (F_e=4) | **edge_index**, **edge_attr** |
+| `public.gatv2_snapshot_stop_features_train` | per-(state_ts, node) ?숈뒿 row. overnight/terminal ?꾩씠 ?쒖쇅 | **x** (F_x=10) + **y** (F_y=3) |
+| `public.gatv2_snapshot_summary` | snapshot ??/ ?쒓컙 踰붿쐞 / rows 遺꾪룷 | 濡쒕뜑 硫뷀? / split 湲곗? |
+| `public.gatv2_edge_summary` | 洹몃옒???ㅼ펷?덊넠 ?듦퀎 | shape sanity |
+
+#### 3. 二쇱슂 ?ㅺ퀎 ?먯튃
+
+- **?몃뱶 紐⑥쭛??*: primary+active STOP_TO_STOP ?ｌ? 李몄뿬 STOP 留? 怨좊┰/terminal-only stop ?쒖쇅.
+- **?ｌ? 紐⑥쭛??*: `edge_type='STOP_TO_STOP' AND is_primary_edge AND is_active`.
+- **node_index**: `node_uid` ?ㅻ쫫李⑥닚 `row_number()-1`. node_uid set 遺덈??대㈃ ?몄뀡 媛?怨좎젙.
+- **?숈뒿 ?쒖쇅 洹쒖튃**: `is_overnight_gap=1 OR is_terminal_transition=1` ?꾨웾 而?
+- **Target 蹂??*: `next_*_recent` ??`log1p` ?숈떆 ?몄텧 ??MSE in log space, ?됯???`expm1` 蹂듭썝.
+- **edge_attr**: `distance_km`, `time_min`, `distance_m_log`, `time_sec_log` 4?? Scaling ? 酉??꾨떂.
+- **諛⑺뼢??*: `is_bidirectional=false` ?좎?. ??갑???ｌ???紐⑤뜽 ?대??먯꽌 泥섎━.
+- **踰붿쐞 諛?*: dynamic traffic edge / heterogeneous graph / RL policy ??紐⑤몢 ?대쾲 ?④퀎 ?꾨떂.
+
+#### 4. Readiness ?ㅼ륫 寃곌낵 ([APPROVED])
+
+| ID | 吏??| 痢≪젙媛?| 湲곗? | ?먯젙 |
+|----|------|-------|------|------|
+| V1 | num_nodes | **4,116** | ??5,705 (graph_node_master STOP seed) | ??|
+| V1 | index_gap_check_zero_ok | **0** | = 0 | ??|
+| V2 | num_edges | **5,484** | = graph_edge_master v2 primary_edges | ??|
+| V2 | distinct_src / distinct_dst | 4,096 / 4,089 | < num_nodes | ??|
+| V2 | orphan_index_cnt / self_loop_cnt | **0 / 0** | = 0 | ??|
+| V2 | rank1_cnt / non_rank1_cnt | **5,484 / 0** | 100% primary | ??|
+| V3 | distinct_route_dirs | 301 | ??| 蹂닿퀬 |
+| V3 | distance (min/avg/p50/p95/max) m | 6.88 / 571.4 / 404.2 / 1,475.8 / 17,438.65 | ?援?諛섍꼍 17km 湲??뺤긽 | ??|
+| V3 | time_sec (min/avg/max) | 1.24 / 102.86 / 3,138.96 | ?뺤긽 (17km @ 20km/h ??3060s) | ??|
+| V4 | **total_training_rows** | **20,289,600** | ??20,490,432 (overnight/terminal ?쒖쇅) | ??|
+| V4 | orphan_node_index_cnt | **0** | = 0 | ??|
+| V4 | overnight_leak_cnt / terminal_leak_cnt | **0 / 0** | = 0 | ??|
+| V4 | non_stop_leak_cnt | **0** | = 0 | ??|
+| V5 | distinct_snapshots | **6,570** | ??6,935 | ??|
+| V5 | min_state_ts / max_state_ts | 2023-01-01 05:00 / 2023-12-31 22:00 | 2023 ?꾧뎄媛?| ??|
+| V5 | rows_per_snapshot (min/avg/max) | 2,848 / 3,088.22 / 3,157 | 洹좎씪 遺꾪룷 | ??|
+| V6 | nodes_with_training_rows | 3,333 | ?몃뱶 紐⑥쭛??4,116 以?81% | 蹂닿퀬 |
+| V6 | rows_per_node (min/avg/max) | 18 / 6,087.49 / 6,570 | max=distinct_snapshots ?쇱튂 | ??|
+| V7 | nodes_without_any_training_row | **783** | ??| ?좑툘 (짠4-A 李멸퀬) |
+| V8 | negative_target_cnt | **0** | = 0 | ??|
+| V8 | next_boardings (min/max/avg) | 0 / 750 / 8.83 | ??| 蹂닿퀬 |
+| V8 | max_next_waiting | 674 | ??| 蹂닿퀬 |
+
+**?곗닠 ?議?*: `avg_rows_per_snapshot 횞 distinct_snapshots`
+= 3,088.22 횞 6,570 = 20,289,605 ??**20,289,600** (total_training_rows). ??酉?媛??뺥빀 ??
+##### 짠4-A.  V7 = 783 ?몃뱶 ?댁꽍
+
+4,116媛??몃뱶 以?783媛?(??9%) ??洹몃옒???좏뤃濡쒖?(?ｌ? ?묐걹)?먮뒗 議댁옱?섏?留?2023??365???숈븞 ?뱁븯李?湲곕줉??0 ?댁뼱??`rl_stop_transition_features` ?????됰룄 ?녿떎.
+?대뒗 怨좊┰(isolated) ???꾨땲??**passenger-activity-zero stop** ?대떎. ?援??멸낸
+/ ?쒖쫵??/ 2023??以?媛쒖꽕???뺣쪟???⑦꽩怨?遺?? PyG `Data` ?먯꽌 `node_mask`
+= False 濡??먮룞 泥섎━?섎?濡?異붽? 議곗튂 遺덊븘????dataset contract 짠1.2 ???대? 紐낆꽭??
+
+#### 5. ?⑥? 諛쒓껄 ??酉?荑쇰━ 吏??2?쒓컙 7遺?
+`create_views.log` 珥??ㅽ뻾 7,664.4s. ?먯씤? `rl_stop_transition_features` ?먯껜媛
+**酉?* ?닿퀬, 洹??꾩쓽 `gatv2_snapshot_stop_features_train` ??酉곗씠湲??뚮Ц??留?荑쇰━留덈떎 21.6M row CTE 媛 ?ъ쟾媛쒕맂?? ?숈뒿 ??PyG DataLoader 媛 ??酉곕?
+諛섎났 ?ㅼ틪?섎㈃ I/O 蹂묐ぉ. **?ㅼ쓬 ?④퀎 吏꾪뻾 ??materialization 寃곗젙 ?꾩슂**:
+
+- **?듭뀡 A (沅뚯옣)**: `CREATE TABLE gatv2_snapshot_stop_features_train_mat AS SELECT * FROM gatv2_snapshot_stop_features_train;`
+  ??`(state_ts, node_index)` 蹂듯빀 ?몃뜳?? ??踰?~2?쒓컙 嫄몃━吏留??댄썑??O(1) 議고쉶.
+- **?듭뀡 B**: ?좎쭨 湲곕컲 ?쒓컙 ?덈룄?곕줈 ?섎씪 ?쎈뒗 ?뚯씠??濡쒕뜑.
+
+#### 6. ?ㅼ쓬 ?④퀎 ??`05_training/build_gatv2_dataset.py` 吏꾪뻾 媛???щ?
+
+**YES ??釉붾줈???댁젣**. ???좉껐 怨쇱젣 1 嫄?沅뚯옣:
+
+| # | 怨쇱젣 | 鍮꾩슜 | 釉붾줈?? |
+|---|------|-----|---------|
+| 1 | `gatv2_snapshot_stop_features_train` materialize (짠5 ?듭뀡 A) | ~2h (1?? | **沅뚯옣** (?깅뒫 臾몄젣濡??숈뒿 紐??뚮㈃ ?댁감???댁빞 ?? |
+| 2 | `build_gatv2_dataset.py` ?ㅼ펷?덊넠 (contract 짠9) | - | ?놁쓬 |
+| 3 | invariant C1~C8 assert | - | ?놁쓬 |
+| 4 | ?쒓컙異?split (train 01-10 / val 11 / test 12) | - | ?놁쓬 |
+
+#### 7. 遺?곕Ъ / ?뺣━
+
+- 酉?DDL ? `CREATE OR REPLACE VIEW` idempotent. ?ъ떎???덉쟾.
+- 酉??앹꽦 ?먯껜????珥덉?留? readiness 泥댄겕 (R1~R8) 媛 20M row 諛섎났 吏묎퀎???쒓컙 ?遺遺?李⑥?.
+- `05_training/` ?붾젆?곕━ ?좉퇋 ?꾩엯. ?욎쑝濡?`build_gatv2_dataset.py`, `train_gatv2.py`,
+  `eval_gatv2.py`, `gatv2_model.py` 媛 ???대뜑 ?덉뿉 ?먮━?≪쓣 ?덉젙.
+- `run_gatv2_views.ps1` ? ASCII-only 濡??ъ젙鍮?(PS 5.1 CP949 ?댁뒋濡?珥덇린 ?쒓? 踰꾩쟾??  ?뚯떛 ?ㅽ뙣 ???곷Ц?쇰줈 移섑솚, ?몄퐫??怨듦꺽硫??쒓굅).
+
+
+## ?뱟 2026-04-18
+### RL ?곹깭 ?꾩씠 ?뱀꽦(Stop Transition Features) 諛?SAR 紐낆꽭 ?뺤젙
+
+?꾨줈?앺듃??Phase 5??臾쇰━???곗씠??t, t+1 ?섏뼱留?瑜??섏뼱?? ?ㅼ젣 媛뺥솕?숈뒿 紐⑤뜽??二쇱엯??**?곹깭(State), ?됰룞(Action), 蹂댁긽(Reward) 紐낆꽭**瑜?怨좎젙?섍퀬 ?대? ?앹꽦?섎뒗 ?뚯씠?꾨씪?몄쓣 援ъ텞?섏???
+
+#### 1. SAR 紐낆꽭 怨좎젙 (`rl_sar_spec.md` [NEW])
+- **?곹깭(State)**: ?뺣쪟???⑥쐞 ?섏슂 臾몃㎘?쇰줈 ?뺤쓽. `waiting_passenger_cnt`瑜?媛??以묒슂???댁쁺 ?뺣젰 ?좏샇(Primary Pressure Signal)濡??ㅼ젙.
+- **?됰룞(Action)**: 踰꾩뒪 ?먯씠?꾪듃??李④린 紐⑺몴 ?뺣쪟???좏깮(Target node selection)?쇰줈 媛쒕뀗 怨좎젙.
+- **蹂댁긽(Reward)**: ?湲??밴컼 ?⑤꼸?곕? 媛뺥솕???由?蹂댁긽(Proxy Reward) ?ㅺ퀎.
+- **?숈뒿 ?④퀎**: ?꾩옱瑜?'Graph-ready transition learning stage'濡?洹쒖젙 (?꾩씠 紐⑤뜽留?湲곕컲).
+
+#### 2. 紐⑤뜽???쇱쿂 酉??앹꽦 (`02_ingest_jobs/create_rl_stop_transition_features.sql` [NEW])
+- **?곗씠??蹂??*: ?섏슂 ?곗씠?곗쓽 濡쒓렇 蹂??`ln(1+x)`), ?쒓컙/?붿씪???쒗솚 ?몄퐫??sin/cos) ?곸슜.
+- **RL ?먰뵾?뚮뱶 愿由?*: ?쇨컙 怨듬갚(4?쒓컙 ?댁긽)???몄??섏뿬 `is_terminal_transition` 諛?`is_overnight_gap` ?뚮옒洹?二쇱엯.
+- **?좏슚 ?쒓컙 媛꾧꺽**: ?쇨컙 怨듬갚???쒖쇅???ㅼ젣 ?댁쁺 ?꾩씠 ?쒓컙(`delta_t_hr_effective`) ?곗텧.
+
+#### 3. ?쇱쿂 臾닿껐??寃利?諛??ㅽ뻾 (`03_validation_queries/rl_stop_transition_features_readiness.sql` [NEW])
+- **理쒖쥌 ?먯젙**: `final_decision = APPROVED` / `rl_stop_transition_features_ready = YES`
+- **寃利???ぉ**: Null safety, ?뚯닔 ?섏슂 李⑤떒, ?쒓컙 ??쟾 媛먯?, ?꾩씠 ?쇨???泥댄겕.
+- **?ㅽ뻾 諛??쒖젙 ?ы빆 (Remediation)**:
+    - **?몄퐫?????*: ?덈룄??`psql` ?섍꼍??UTF8 ?몄퐫??誘몄뒪留ㅼ튂 ?닿껐 (`SET client_encoding`).
+    - **???罹먯뒪??*: `is_peak` (boolean) ??낃낵 ?뺤닔 鍮꾧탳 異⑸룎???닿껐?섍린 ?꾪븳 紐낆떆??罹먯뒪???곸슜.
+    - **寃쎄퀎 議곌굔 泥섎━**: 2023-12-31(理쒖쥌????留덉?留?踰꾪궥???뚯뒪 ?곹깭濡?議댁옱?섏? ?딆븘 諛쒖깮?섎뒗 踰꾪궥 ??遺議?18 vs 19) ?꾩긽???쒖뒪??寃쎄퀎 議곌굔?쇰줈 ?댁꽍?섏뿬, 留덉?留??좎뿉 ?쒗빐 `n-1` 踰꾪궥???덉슜?섎룄濡?寃利?濡쒖쭅 蹂댁셿.
+
+#### 4. ?꾩옱 ?곗씠???곹깭
+- `row_count`: **21,612,482**
+- `rl_usable_row_count`: **20,490,432** (?쇨컙 怨듬갚 諛??곕????꾩씠 ?쒖쇅 媛???곗씠??
+- `active_days`: 365??- `final_status`: **APPROVED**
+
+---
+
+## ?뱟 2026-04-15
+### Phase 4 蹂듦뎄 ?꾨즺 쨌 Phase 5 ?낅젰 洹쒓꺽 ?뺤젙 ?꾨즺 ???대젰 ?뺣━
+
+????ぉ? 2026-04-14 ?묒뾽 ?몄뀡?먯꽌 ?ъ꽦??Phase 4 / Phase 5 ?깃낵瑜?**?ъ떎 湲곕컲?쇰줈 ?곸꽭 湲곕줉**??蹂댁셿 濡쒓렇?대떎.
+
+#### ?꾩옱 ?꾨줈?앺듃 ?곹깭 ?붿빟
+
+Phase 4(`graph_state_timeslice` ?곸옱)? Phase 5(`rl_state_training_base` ?앹꽦) 紐⑤몢 理쒖쥌 APPROVED瑜??ъ꽦?섏???
+?援?2023 observed 湲곕컲 ?쒓퀎???곹깭 ?덉씠??21.6M??? ?ㅼ쓬 愿痢??쒖젏 湲곕컲 ?숈뒿 踰좎씠??21.6M??媛 ?뺣낫?섏뿀?쇰ŉ,
+?꾨줈?앺듃???곗씠??蹂듦뎄쨌?곸옱 ?④퀎瑜?議몄뾽?섍퀬 **紐⑤뜽留??④퀎**濡?吏꾩엯?섏???
+
+?ㅼ쓬 ?④퀎???꾨옒? 媛숇떎.
+
+1. ?곹깭(State)쨌?됰룞(Action)쨌蹂댁긽(Reward) 紐낆꽭 怨좎젙
+2. PyTorch ?낅젰 ?곗씠?곗뀑 ?곌껐
+3. 洹몃옒??援ъ“(edge) 蹂듦뎄 諛?GAT/RL ?숈뒿 ?뚯씠?꾨씪???뺤옣
+
+---
+
+## ?뱟 2026-04-14
+### Phase 4 `graph_state_timeslice` 蹂듦뎄 ?꾨즺 (APPROVED)
+
+#### 寃곗젙?ы빆 ???ㅽ궎留?諛???援먰썕
+
+| ??ぉ | ?뺤씤 寃곌낵 |
+| --- | --- |
+| `fact_stop_usage_hourly` ?ㅼ젣 ?ㅽ궎留?| `service_date(date)`, `service_hour(integer)`, `stop_id`, `boardings`, `alightings` |
+| `service_hour` ???| **?뺤닔 ?쒓컙?**(0??3), timestamp ?꾨떂 |
+| `state_ts` ?앹꽦 洹쒖튃 | `service_date + service_hour` 議고빀?쇰줈 timestamp ?뚯깮 |
+| ?몃뱶 留덉뒪??| `graph_node` ?뚯씠釉붿? 議댁옱?섏? ?딆쓬 ???ㅼ젣 留덉뒪?곕뒗 `graph_node_master` |
+| 媛꾩꽑 留덉뒪??| `graph_edge_master` ???꾩옱 0????edge 湲곕컲 蹂듦뎄 遺덇? |
+| STOP ?몃뱶 ?쒕뱶 | `dim_stop` 湲곗??쇰줈 `graph_node_master` ??`STOP` ?몃뱶 **5,705嫄?* ?쒕뱶 ?꾨즺 |
+
+#### ?ㅽ뻾寃곌낵 ??`graph_state_timeslice` ?곸옱 寃利?
+| 吏??| 媛?|
+| --- | --- |
+| `row_cnt` | **21,615,863** |
+| `distinct_time_buckets` | 6,935 |
+| `min_ts` | `2023-01-01 05:00:00+09` |
+| `max_ts` | `2023-12-31 23:00:00+09` |
+| `buckets_per_day` | 19 |
+| `active_days` | 365 |
+| `orphan_cnt` | 0 |
+| `negative_boardings` | 0 |
+| `invalid_hour` | 0 |
+
+**Readiness 理쒖쥌 ?먯젙**: `APPROVED` / `gat_rl_input_ready = YES`
+
+#### Phase 4 ?섏젙/?뺤젙 ?뚯씪
+
+| ?뚯씪 | ?듭떖 ?섏젙 ?ъ씤??|
+| --- | --- |
+| `02_ingest_jobs/create_graph_state_timeslice.sql` | UTF-8 ?뺣━, `graph_node_master` 李몄“, `state_ts = service_date + service_hour` |
+| `02_ingest_jobs/load_graph_state_timeslice_initial.sql` | `boardings/alightings` ?ㅼ젣 而щ읆紐?諛섏쁺, 2023 observed only ?꾪꽣 |
+| `03_validation_queries/graph_state_timeslice_readiness.sql` | 0遺꾨え 諛⑹뼱(division-by-zero guard) 異붽? |
+
+---
+
+### Phase 5 ?낅젰 洹쒓꺽 ?뺤젙 ?꾨즺 (APPROVED)
+
+#### 寃곗젙?ы빆 ???쇱쿂 遺꾨쪟
+
+`graph_state_timeslice` 湲곗??쇰줈 RL ?낅젰 ?뱀꽦(feature) 遺꾨쪟瑜??꾨즺?섏???
+
+#### 利됱떆 ?ъ슜 媛???듭떖 ?낅젰 (Core Features)
+
+| ?쇱쿂 | 鍮꾧퀬 |
+| --- | --- |
+| `boardings_recent` | ?꾩옱 ?쒖젏 ?뱀감 |
+| `alightings_recent` | ?꾩옱 ?쒖젏 ?섏감 |
+| `waiting_passenger_cnt` | ?湲??밴컼 ??|
+| `hour_of_day` | ?쒓컙? (0??3) |
+| `day_of_week` | ?붿씪 (0??) |
+| `is_peak` | 泥⑤몢???щ? |
+
+#### ?꾩냽 ?뺤옣 蹂대쪟 而щ읆
+
+| ?쇱쿂 | 蹂대쪟 ?ъ쑀 |
+| --- | --- |
+| `predicted_demand_10m` | ?덉륫 紐⑤뜽 誘멸뎄異?|
+| `predicted_demand_30m` | ?덉륫 紐⑤뜽 誘멸뎄異?|
+| `nearest_bus_eta_sec` | ?ㅼ떆媛??꾩튂 ?먯쿇 ?놁쓬 |
+| `active_bus_cnt_nearby` | ?ㅼ떆媛??꾩튂 ?먯쿇 ?놁쓬 |
+| `link_travel_time_sec` | `graph_edge_master` 0??|
+| `link_speed_kmh` | `graph_edge_master` 0??|
+| `link_congestion_index` | `graph_edge_master` 0??|
+| `link_flow_proxy` | `graph_edge_master` 0??|
+| `incident_flag` | ?ш퀬 ?먯쿇 ?놁쓬 |
+
+#### Phase 5 ?좉퇋 ?곗텧臾?
+| ?뚯씪 | ??븷 |
+| --- | --- |
+| `04_model_inputs/graph_state_feature_spec.md` | RL ?곹깭 怨듦컙 ?쇱쿂 紐낆꽭??|
+| `02_ingest_jobs/create_rl_state_training_base.sql` | ?숈뒿 踰좎씠??DDL + `LEAD()` 湲곕컲 (t, t+1) ?섏뼱留?|
+| `03_validation_queries/rl_state_training_base_readiness.sql` | ?숈뒿 踰좎씠??臾닿껐??寃利??섑듃 |
+
+#### ?ㅽ뻾寃곌낵 ??`rl_state_training_base` ?앹꽦 諛?寃利?
+| 吏??| 媛?|
+| --- | --- |
+| `row_count` | **21,612,482** |
+
+#### ?뺤젙 而щ읆 援ъ“
+
+| 而щ읆 | ?ㅻ챸 |
+| --- | --- |
+| `state_ts` | ?꾩옱 愿痢??쒓컖 |
+| `next_state_ts` | ?ㅼ쓬 愿痢??쒓컖 (next observed, strict +1h ?꾨떂) |
+| `node_uid` | ?몃뱶 怨좎쑀 ID |
+| `node_type` | ?몃뱶 ?좏삎 |
+| `boardings_recent` | ?꾩옱 ?뱀감 |
+| `alightings_recent` | ?꾩옱 ?섏감 |
+| `waiting_passenger_cnt` | ?꾩옱 ?湲??밴컼 |
+| `hour_of_day` | ?쒓컙? |
+| `day_of_week` | ?붿씪 |
+| `is_peak` | 泥⑤몢??|
+| `next_boardings_recent` | ?ㅼ쓬 ?쒖젏 ?뱀감 |
+| `next_alightings_recent` | ?ㅼ쓬 ?쒖젏 ?섏감 |
+| `next_waiting_passenger_cnt` | ?ㅼ쓬 ?쒖젏 ?湲??밴컼 |
+
+> **?댁꽍**: `next_state_ts`??strict one-hour future媛 ?꾨땲??**next observed timestamp**(?ㅼ쓬 愿痢??쒓컖)?대떎.  
+> ?섎（ 19媛??댁쁺 踰꾪궥(05~23?? 湲곗??쇰줈 ?쇨컙 怨듬갚??議댁옱?????덈떎.
+
+#### Phase 5 Readiness 寃利?寃곌낵
+
+| 寃????ぉ | 寃곌낵 |
+| --- | --- |
+| `time_inversion_cnt` | 0 |
+| `null_next_state_ts_cnt` | 0 |
+| `null_next_boardings_cnt` | 0 |
+| `null_next_alightings_cnt` | 0 |
+| `null_next_waiting_cnt` | 0 |
+| 紐⑤뱺 ?뚯닔 寃??| 0 |
+| `invalid_hour_cnt` | 0 |
+
+**理쒖쥌 ?먯젙**: `final_decision = APPROVED` / `rl_training_base_ready = YES`
+
+---
+
+### ?뺣낫 愿由?諛??ㅽ궗(Agent Skill) ?먯궛 理쒖떊??
+- **?좉퇋 ?섏쭛 ?ㅼ??ㅽ듃?덉씠???ㅽ궗 ?쒖젙**: ?몄꽑 留곹겕 ?꾩껜 ?섏쭛 ?먮룞?붾? 吏?섑븯??`bus_route_link_bulk_collect_orchestrator` ?ㅽ궗 臾몄꽌(.agents/skills) ?좉퇋 ?쒖젙.
+  - 湲곗〈 ?⑥씪 ?몄꽑 ?곸옱 蹂댄샇 ?μ튂(`bus_route_link_ingest_guard`)? 泥좎?????븷??遺꾨━?섏뿬, API 猷⑦봽 ?쒖뼱, Manifest 濡쒓퉭 (?섏쭛/?곸옱 遺꾨━), Missing Route ?곗텧???꾨떞?섎룄濡??ㅺ퀎.
+- **?먯쿇 臾몄꽌 諛??ㅽ럺 寃利?*: NotebookLM???곕룞?섏뿬 ?꾨줈?앺듃 ?ㅺ퀎??諛?愿???곌뎄 臾몄꽌瑜?援먯감 寃利앺븯怨? 湲곗〈 UrbanBus RL 愿???먮즺瑜??꾨줈?앺듃 而⑦뀓?ㅽ듃???숆린??
+- **?꾨줈?앺듃 吏諛곌뎄議?Governance) 媛뺥솕**: `project_log.md`瑜?理쒖떊?뷀븯??吏??48?쒓컙??湲곗닠??寃곗젙 ?ы빆 諛??묒뾽 ?깃낵瑜??듯빀 湲곕줉.
+- **?묒뾽 ?꾪솴 ?숆린??*: `02_ingest_jobs`? `03_validation_queries`???좉퇋 ?뚯씪 諛??쒖뒪???곹깭瑜??먭??섍퀬 ?곗꽑?쒖쐞 ?ъ젙??
+
+### ?뚯씠?꾨씪???덉쟾留?Guard/Orchestrator) ?ㅽ궗 ?꾨㈃ 遺꾪븷 (COMPLETED)
+
+- **4? ?듭떖 ?먯씠?꾪듃 ?ㅽ궗 ?좉퇋 ?쒖젙**: ?곗씠???뚯씠?꾨씪??媛??꾪솚 ?④퀎??蹂묐ぉ怨?臾닿껐???꾪삊??留됯린 ?꾪빐 4媛쒖쓽 ?뱀닔 ?ㅽ궗??遺꾪븷 ?좎꽕.
+  - `route_link_promotion_guard`: Staging ??Sequence ?밴꺽 ??蹂듯빀??異⑸룎 諛?Sequence ?⑥젅 諛⑹뼱.
+  - `spatial_graph_mapping_guard`: 150m-500m Fallback 湲곕컲 STOP-LINK 怨듦컙 留ㅽ븨, `geom_5187` ?먯쿇 醫뚰몴怨??곸슜 ?섎Т??
+  - `fact_usage_promotion_orchestrator`: ?꾩껜 ?듯뻾 珥앺빀 ???Reconciliation) 諛??뚯깮 ?곗궛 以??뚯닔 ?섏슂(Negative) ?댁긽移??좎엯 李⑤떒.
+  - `graph_state_timeslice_bulk_loader`: ?섏쿇留?嫄??섏?????⑸웾 IO ?몃옖??뀡 留덈퉬(Locking)瑜?留됯린 ?꾪븳 ?꾪궎?띿쿂(TRUNCATE+?몃뜳??吏???앹꽦) 媛?대뱶.
+
+### ?곸옱 ?깅뒫 珥덇퀬?꾪솕 (COMPLETED)
+
+- ?⑥씪 ?몃옖??뀡(`BEGIN`~`COMMIT`) ?댁뿉??`TRUNCATE` ???몃뜳??PK ?쇱떆 ?쒓굅 ??????쎌엯(Bulk Insert) ???몃뜳??PK ?ъ깮??援ъ“瑜??곸슜?섏뿬, 2,160留?嫄댁쓽 ?곹깭 ?곗씠?곕? `DataFileExtend` IO 蹂묐ぉ 諛?Lock 吏???놁씠 怨좎냽 ?곸옱 ?곸슜?붿뿉 ?깃났.
+
+---
+
+## ?뱟 2026-04-13 - ?援?踰꾩뒪 ?댁슜???뚯씠?꾨씪???덉젙??
+### ?援?踰꾩뒪 ?댁슜??Usage) ?곗씠???뚯씠?꾨씪???덉젙??
+- **?댁슜???곗씠???곸옱 ?꾨즺**:
+  - ?援?踰꾩뒪 ?댁슜 ?ㅼ쟻 ?곗씠??2023???꾩껜 諛?2025???붾퀎 ?곗씠????Staging ?곸옱 ?뚯씠?꾨씪??援ъ텞.
+  - ?덈룄???몄퐫??UHC/EUC-KR) 泥섎━ 諛?SQL ?ㅽ뻾 ?섍꼍(PowerShell ?섍꼍 蹂???? 理쒖쟻?붾? ?듯빐 ?곸옱 ?덉젙???뺣낫.
+- **Staging Gate 寃利??듦낵**:
+  - `stg_daegu_stop_usage_*` ?뚯씠釉붿뿉 ????곗씠????? ?꾩닔媛? 以묐났 泥댄겕 ?꾨줈?몄뒪 媛??
+- **Fact ?뚯씠釉??밴꺽 諛?吏묎퀎**:
+  - `promote_fact_stop_usage_hourly_from_2023_file.sql` ?깆쓣 ?듯빐 ?먯쿇 ?듯뻾 ?곗씠?곕? 1?쒓컙 ?⑥쐞 ?뺣쪟?λ퀎 ?뱁븯李⑤웾 ?곗씠?곕줈 蹂???곸옱.
+- **?곗씠???뺥빀??寃利?Reconciliation)**:
+  - `reconcile_usage_sums_2023.sql` 諛?`reconcile_usage_sums_2025_monthly.sql`??援ы쁽?섏뿬 Staging 珥앺빀怨?Fact 珥앺빀 媛꾩쓽 遺덉씪移??щ?瑜?0嫄댁쑝濡?寃利?
+
+---
+
+## ?뱟 2026-04-10 - Graph State Timeslice ?ㅺ퀎
+
+### Integrated Graph Master Phase 4 ??Graph State Timeslice ?ㅺ퀎 諛?援ъ텞
+
+#### ?곹깭 ?뚯씠釉??ㅺ퀎
+
+- `public.graph_state_timeslice` ?쒖? ?ㅽ궎留??뺤젙.
+  - (state_ts, node_uid) 蹂듯빀 PK 泥닿퀎 諛?10遺??⑥쐞 ?쒓컙 ?댁긽??梨꾪깮.
+  - STOP(?섏슂)怨?LINK(?뚰넻) ?몃뱶 ?듯빀 愿由щ? ?꾪븳 ?⑥씪 ?곹깭 ?뚯씠釉?援ъ“.
+
+#### Hourly Allocation ?꾨왂
+
+- 1?쒓컙 ?⑥쐞 ?섏슂 ?곗씠??`fact_stop_usage_hourly`)瑜?10遺??⑥쐞 ?뚯깮 踰꾪궥?쇰줈 諛곕텇?섎뒗 濡쒖쭅 援ы쁽.
+- `boardings_recent`, `alightings_recent` 吏?쒖뿉 ???1/6 ?좊떦 ?곸슜.
+
+#### ?좉퇋 ?뚯씪 ?앹꽦
+
+- `01_data_contracts/graph_state_timeslice_spec.md`: ?곹깭 而щ읆 ?뺤쓽 諛??댁꽍 媛?대뱶.
+- `02_ingest_jobs/create_graph_state_timeslice.sql`: ?곹깭 ?뚯씠釉?DDL.
+- `02_ingest_jobs/load_graph_state_timeslice_initial.sql`: 理쒖떊 媛?⑹씪(service_date) 湲곗? 珥덇린 ?곸옱 ?ㅽ겕由쏀듃.
+- `03_validation_queries/graph_state_timeslice_readiness.sql`: ?곸옱 ?뺥빀??諛?寃곗륫移?寃利??섑듃.
+
+#### ?듭떖 寃곗젙 ?ы빆
+
+- LINK ?몃뱶???ㅼ떆媛??곹깭媛??띾룄, ETA ??? ?꾩옱 ?뚯뒪 遺?щ줈 ?명빐 `NULL + TODO` 泥섎━?섎ŉ ?ν썑 ?뚯씠?꾨씪???곌퀎 ?덉젙.
+- ?붿씪(`day_of_week`), 泥⑤몢?쒓컙(`is_peak`) ??AI ?숈뒿???쇱쿂 而щ읆 湲곕낯 ?ы븿.
+
+---
+
+## ?뱟 2026-04-11 - Integrated Graph Master Bootstrap & Phase 4 Status Report
+
+### ?꾨즺 ?ы빆
+- **?듯빀 遺?몄뒪?몃옪 ?ㅽ뻾**: `bootstrap_graph_master.ps1`???듯븳 Phase 1~4 ?쇨큵 援ъ텞 ?쒕룄.
+- **DB 怨꾩젙 諛??묒냽 理쒖쟻??*: `ryujo` -> `postgres` ?ъ슜???꾪솚 諛?`urbanbus` DB ?寃잜똿 ?덉젙??
+- **Phase 1~3 APPROVED**: ?몃뱶/媛꾩꽑/留ㅽ븨 ?덉씠?댁쓽 紐⑤뱺 寃利?寃뚯씠???듦낵 諛?援ъ텞 ?꾨즺.
+- **Phase 4 HOLD**: `fact_stop_usage_hourly` ?곗씠??遺??0嫄?濡??명븳 ?쒓퀎???곹깭 ?곸옱 ?좊낫.
+
+### ?꾩옱 ?곗씠?곕쿋?댁뒪 ?곹깭
+- `graph_node_master`: ?곸옱 ?꾨즺
+- `graph_edge_master`: ?곸옱 ?꾨즺
+- `stop_link_mapping_master`: 2李??뺣? 蹂댁젙源뚯? ?꾨즺
+- `fact_stop_usage_hourly`: ?뚯씠釉??앹꽦 ?꾨즺 (?곗씠???湲?以?
+
+### 湲곗닠 寃곗젙 ?ы빆
+- **Single Session Auth**: psql???명꽣?숉떚釉??몄쬆 ?댁뒋 ?닿껐???꾪븳 `PGPASSWORD` ?섍꼍 蹂??湲곕컲 ?⑥씪 ?몄뀡 ?ㅽ겕由쏀듃 梨꾪깮.
+- **Conditional Load**: ?먯쿇 ?곗씠??遺????遺꾩꽍 ?뚯씠釉??앹꽦??嫄대꼫?곕뒗 ?곗씠??湲곕컲 ?쒖뼱 濡쒖쭅 ?뺣┰.
+
+### ?ν썑 ?묒뾽
+- `fact_stop_usage_hourly` ?곗씠???곸옱 ?뚯씠?꾨씪??媛??
+- ?곗씠???곸옱 ??Phase 4 ?⑤룆 ?ㅽ뻾 諛?理쒖쥌 ?뱀씤.
+- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 留ㅽ븨 ?좏삎 ?뺤옣 諛섏쁺
+- ?듯빀 洹몃옒???ㅺ퀎 臾몄꽌 `integrated_graph_master_spec.md` 瑜?Phase 2~3 湲곗??쇰줈 媛쒖젙 ?꾨즺
+
+#### ?좉퇋/?섏젙 ?뚯씪
+- ?좉퇋: `02_ingest_jobs/prepare_source_spatial_columns.sql`
+
+---
+
+## ?뱟 2026-04-11 - Trip-level Synthetic Card Data Pipeline Redesign [COMPLETED]
+
+### ?꾨즺 ?ы빆
+- **Ingestion ?꾨왂 ?섏젙 ?꾨즺**: ?⑹꽦 ?곗씠??API媛 媛쒕퀎 ?듯뻾(Trip-level) ?곗씠?곗엫???뺤씤?섍퀬 2?④퀎 ?곸옱 泥닿퀎 援ъ텞.
+- **Deduplication 硫붿빱?덉쬁**: `record_hash` (SHA256) 湲곕컲??Staging 以묐났 諛⑹? 濡쒖쭅 ?곸슜.
+- **Cross-Layer 寃利??ㅺ퀎**: Staging??`UTZTN_NOPE` 珥앺빀怨?Fact???뱁븯李⑤웾 珥앺빀 ?쇱튂 ?щ?瑜?寃利앺븯??Readiness SQL 援ы쁽.
+- **Unmapped ID 愿由?*: 留ㅽ븨 ?ㅽ뙣???뺣쪟??ID 紐⑸줉??蹂꾨룄濡?異붿텧?????덈뒗 荑쇰━ ?ы븿.
+
+### ?앹꽦/?섏젙 ?뚯씪 紐⑸줉
+- `01_data_contracts/daegu_transport_card_synth_trip_api_spec.md` [NEW]
+- `01_data_contracts/fact_stop_usage_hourly_spec.md` [NEW]
+- `02_ingest_jobs/create_stg_daegu_transport_card_usage_synth_trip.sql` [NEW]
+- `02_ingest_jobs/load_daegu_transport_card_usage_synth_trip.ps1` [NEW]
+- `02_ingest_jobs/create_fact_stop_usage_hourly.sql` [MODIFY]
+- `02_ingest_jobs/load_fact_stop_usage_hourly_from_synth_trip.sql` [NEW]
+- `03_validation_queries/daegu_transport_card_synth_trip_readiness.sql` [NEW]
+- `03_validation_queries/fact_stop_usage_hourly_from_synth_trip_readiness.sql` [NEW]
+
+### ?듭떖 ?ㅺ퀎 寃곗젙
+- **UTZTN_NOPE 吏묎퀎**: ?쒓컙?蹂?吏묎퀎 ???몄썝???꾨뱶瑜?媛以묒튂濡??⑹궛?섏뿬 ?섏슂 ?뺥빀???뺣낫.
+- **Source-Agnostic ?⑺듃**: `source_system`??PK???ы븿?섏뿬 ?ㅼ뼇???먯쿇 ?곗씠???⑹꽦/?ㅼ륫)??蹂묓뻾 愿由ш? 媛?ν븯?꾨줉 ?ㅺ퀎.
+
+---
+
+## ?뱟 2026-04-10 - Integrated Graph Master Phase 2~3 ?ㅺ퀎 諛?諛섏쁺
+
+#### ?꾨즺 ?ы빆
+- Integrated Graph Master Phase 2 李⑹닔 諛?諛섏쁺 以鍮??꾨즺
+- ?먯쿇 ?뚯씠釉붿쓽 怨듦컙 而щ읆 吏곸젒 ?ъ슜 ?먯튃???댁쁺 湲곗??쇰줈 ?뺤젙
+- `geom_5187` ?곴뎄 而щ읆 湲곕컲 嫄곕━ 怨꾩궛 ?먯튃 梨꾪깮
+- ?먯쿇 以鍮??④퀎? 洹몃옒???곸옱 ?④퀎瑜?遺꾨━???뚯씠?꾨씪?몄쑝濡??뺣━
+- STOP(?뺣쪟?? ?몃뱶 ?곸옱 諛??뺣쪟??留곹겕 1李?怨듦컙 留ㅽ븨 濡쒖쭅 ?ㅺ퀎 ?꾨즺
+- `150m` 1李??먯깋 + `500m` fallback (fallback=?泥?蹂댁셿 寃쎈줈) ?꾨왂 梨꾪깮
+- `row_number()` 湲곕컲 ?뺣쪟?λ퀎 ?⑥씪 primary(primary=二쇰ℓ?? 留곹겕 ?좏깮 湲곗? ?뺤젙
+- `STOP_TO_LINK`, `LINK_TO_STOP` ?쒕퉬??媛꾩꽑 ?앹꽦 湲곗? ?뺤젙
+- ?뺣쪟??留곹겕 2李??뺣? 留ㅽ븨 Phase 3 珥덉븞 ?묒꽦 ?꾨즺
+- `route_id + move_dir_code + sequence(sequence=?쒖꽌)` 湲곕컲 route-aware(route-aware=?몄꽑 ?몄??? 蹂댁젙 濡쒖쭅 珥덉븞 ?묒꽦 ?꾨즺
+- 湲곗〈 `SNAP_NEAREST` 1李?留ㅽ븨 蹂댁〈 ?먯튃 ?뺤젙
+- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 留ㅽ븨 ?좏삎 ?뺤옣 諛섏쁺
+- ?듯빀 洹몃옒???ㅺ퀎 臾몄꽌 `integrated_graph_master_spec.md` 瑜?Phase 2~3 湲곗??쇰줈 媛쒖젙 ?꾨즺
+
+#### ?좉퇋/?섏젙 ?뚯씪
+- ?좉퇋: `02_ingest_jobs/prepare_source_spatial_columns.sql`
+- ?섏젙: `02_ingest_jobs/load_graph_master_phase_2.sql`
+- ?좉퇋: `03_validation_queries/graph_mapping_quality_check.sql`
+- ?좉퇋: `02_ingest_jobs/refine_stop_link_mapping_phase_3.sql`
+- ?좉퇋: `03_validation_queries/stop_link_mapping_phase_3_quality_check.sql`
+- ?섏젙: `01_data_contracts/integrated_graph_master_spec.md`
+
+#### ?듭떖 ?ㅺ퀎 寃곗젙
+1. 嫄곕━ 怨꾩궛? view ?대? ?꾩떆 `ST_Transform` ???꾨땲????λ맂 `geom_5187` 吏곸젒 ?ъ슜???먯튃?쇰줈 ?쒕떎.
+2. `geom_5187` 媛 ?먯쿇 ?뚯씠釉붿뿉 ?놁쓣 寃쎌슦, 癒쇱? ?곴뎄 而щ읆 異붽? 諛?諛깊븘(backfill=湲곗〈 ?곗씠??梨꾩슦湲? ???ъ슜?쒕떎.
+3. ?뺣쪟??留곹겕 1李?留ㅽ븨? 怨듦컙 洹쇱젒 湲곕컲 `SNAP_NEAREST` 濡??섑뻾?쒕떎.
+4. 1李?留ㅽ븨? `150m` ?곗꽑 ?먯깋, 誘몃ℓ???뺣쪟?μ뿉 ?쒗빐 `500m` fallback ???덉슜?쒕떎.
+5. ?뺣쪟?λ퀎 primary 留곹겕 ?좏깮? `row_number()` 湲곕컲 理쒓렐??1嫄댁쑝濡??섑뻾?쒕떎.
+6. 2李??뺣? 留ㅽ븨? `route_id + move_dir_code + stop_seq/link_seq` ?뺥빀?깆쓣 諛섏쁺?섎뒗 route-aware 蹂댁젙 ?④퀎濡?遺꾨━?쒕떎.
+7. 湲곗〈 1李?留ㅽ븨? ??젣?섏? ?딄퀬 蹂댁젙 寃곌낵瑜??꾩쟻/?밴꺽?섎뒗 諛⑹떇?쇰줈 愿由ы븳??
+
+#### 寃利?湲곗?
+- `duplicate primary mappings = 0`
+- `node-edge integrity ?ㅻ쪟 = 0`
+- `STOP_TO_LINK`, `LINK_TO_STOP` 媛꾩꽑 ?뺤긽 ?앹꽦
+- `unmapped stops` 理쒖냼??- `distance_to_link_m > 100m` 寃쎄퀬 嫄댁닔 ?먭?
+- `distance_to_link_m > 250m` ?섎룞 寃?????遺꾨━
+- Phase 3?먯꽌 諛섎? 諛⑺뼢 留곹겕 ?섏떖 嫄댁닔 諛?sequence ?댁긽移??먭?
+
+#### ?꾩옱 ?④퀎 ?먯젙
+- Integrated Graph Master Phase 2: 援ы쁽/寃利?吏꾪뻾 ?④퀎
+- Integrated Graph Master Phase 3: 珥덉븞 ?묒꽦 ?꾨즺, ?ㅽ뻾 諛?寃곌낵 ?먮룆 ?湲?
+#### ?ㅼ쓬 ?묒뾽
+- Phase 2 ?ㅽ뻾:
+  1. `prepare_source_spatial_columns.sql`
+  2. `load_graph_master_phase_2.sql`
+  3. `graph_mapping_quality_check.sql`
+- Phase 3 ?ㅽ뻾:
+  4. `refine_stop_link_mapping_phase_3.sql`
+  5. `stop_link_mapping_phase_3_quality_check.sql`
+- 寃곌낵???곕씪 `APPROVED / HOLD / MANUAL_REVIEW` ?먯젙
+- ?댄썑 `graph_state_timeslice` ?ㅺ퀎濡?吏꾩엯
+
+---
+
+## ?뱟 2026-04-10 - Integrated Graph Master Phase Kick-off
+
+- route_link_sequence ?댁쁺 湲곗???湲곕컲?쇰줈 ?듯빀 洹몃옒??留덉뒪??1李??ㅺ퀎 ?쒖옉
+- stop / link 遺꾨━ ?몃뱶 ?좏삎 ?꾨왂 梨꾪깮
+- 諛⑺뼢??洹몃옒??湲곗? ??`(route_id, move_dir_code, link_seq)` ?좎? ?뺤젙
+- `graph_node_master`, `graph_edge_master`, `stop_link_mapping_master` DDL 珥덉븞 ?묒꽦
+- `route_link_graph_edge_vw` 諛?LINK_TO_LINK ?곸옱 SQL 珥덉븞 ?묒꽦
+- readiness 寃利?SQL 珥덉븞 ?묒꽦
+- `integrated_graph_master_spec.md` 臾몄꽌 珥덉븞 ?묒꽦
+
+*Notes:*
+- ???④퀎??LINK 以묒떖 1李?洹몃옒???밴꺽源뚯?瑜?踰붿쐞濡???- STOP_TO_LINK / LINK_TO_STOP 媛꾩꽑怨??곹깭 ?쒓퀎???뚯씠釉붿? ?꾩냽 ?④퀎濡?遺꾨━
+- ?ㅼ젣 留곹겕 嫄곕━ / ?대룞?쒓컙 / ?쇱옟?꾨뒗 留곹겕 ?먯쿇 留덉뒪??寃고빀 ??蹂닿컯 ?덉젙
+
+---
+
+## ?뱟 2026-04-10 - 理쒖쥌 ?⑦궎吏??곗텧臾??앹꽦
+
+- ?댁쁺 ?쒖? 臾몄꽌 ?뺣━ ?꾨즺
+- 理쒖쥌 ?곗텧臾??⑦궎吏??꾨즺
+- 諛고룷/蹂닿???理쒖쥌 ?뺤텞蹂??앹꽦:
+  - `urbanbus_rl_project_final_2026-04-10.zip`
+- 蹂??뺤텞蹂몄? 2026-04-10 湲곗? ?댁쁺 ?뱀씤 ?ㅻ깄?룹쑝濡?蹂닿?
+
+---
+
+## ?뱟 2026-04-10 - 湲닿툒 ?곗씠???뺣퉬(Remediation) 醫낅즺 諛??댁쁺 ?덉젙??吏꾩엯
+
+- **Remediation 醫낅즺**: `route_id='1000'` ?ㅼ뿼 ?쒓굅 諛?以묐났 ?곗씠??dedup) 泥섎━ ?꾨즺.
+- **理쒖쥌 ?뱀씤**: 39,247???밴꺽 ???뺥빀??寃利?PASS ?뺤씤 諛?理쒖쥌 ?뱀씤(**APPROVED**).
+- **?댁쁺 湲곗? SQL ?뺤젙**:
+  - ?밴꺽: `promote_route_link_sequence_dedup.sql`
+  - 寃利? `route_link_promotion_readiness_dedup.sql`
+- **?댁쁺 ?꾨줈?몄뒪 ?뺣┰**:
+  - `01_data_contracts/route_link_operational_checklist.md` [?좉퇋]: 諛곗튂 ?묒뾽 ?쒖? 泥댄겕由ъ뒪??異붽?.
+- **?곹깭 ?꾪솚**: 臾몄젣 ?쒖젙 ?④퀎?먯꽌 ?뺢퇋 ?댁쁺 諛??⑦궎吏??④퀎濡??꾪솚.
+
+---
+
+## ?뱟 2026-04-10 - ?밴꺽 ?댁쁺 ?덉감 ?쒖???諛?Runbook ?묒꽦 (?ㅽ뻾 ??
+
+- **`02_ingest_jobs/route_link_promotion_execution_runbook.md`** [?좉퇋]: `route_link_sequence` ?밴꺽 諛?寃利앹쓣 ?꾪븳 ?쒖? ?댁쁺 ?덉감(Runbook) ?묒꽦 ?꾨즺.
+- **`02_ingest_jobs/README.md`** ?낅뜲?댄듃: ?밴꺽 ?ㅽ뻾 Runbook ?곌껐 諛?媛?대뱶 異붽?.
+- **?뱀씠?ы빆**: ?ㅽ뻾 ???댁쁺 ?덉감 臾몄꽌?붾? ?꾨즺?섏??쇰ŉ, ?ㅼ젣 ?밴꺽 ?ㅽ뻾? ?꾩쭅 吏꾪뻾?섏? ?딆쓬.
+
+---
+
+## ?뱟 2026-04-10 - 諛깆뾽 ?鍮??쒖뒪??蹂寃쎌젏 遺꾩꽍 (Diff 由ы룷???붿빟)
+
+#### 1. ?몄꽑 留곹겕 ?밴꺽 寃利??꾨젅?꾩썙??Validation Framework) ?꾩꽦
+- **`03_validation_queries/route_link_promotion_readiness.sql`** [?좉퇋]: Staging ??Promoted ?밴꺽 臾닿껐?깆쓣 寃利앺븯??醫낇빀 寃利?SQL 荑쇰━ 異붽?.
+- **`01_data_contracts/route_link_promotion_result_guide.md`** [?좉퇋]: ?덉쭏 寃利?荑쇰━ 寃곌낵(PASS/WARN/FAIL) ?먮룆 湲곗???異붽?.
+- **`01_data_contracts/route_link_promotion_result_report_template.md`** [?좉퇋]: 理쒖쥌 ?뱀씤 ?щ?瑜?湲곕줉?섎뒗 留덊겕?ㅼ슫 由ы룷???묒떇 ?꾨즺.
+- **`03_validation_queries/README.md`**: ?곴린 ?쒖뒪??紐낆꽭 ?낅뜲?댄듃.
+
+#### 2. 寃利앹슜 ?묒뾽 ?꾧뎄 異붽?
+- **`scripts/compare_with_zip.ps1`** [?좉퇋]: 諛깆뾽 ?뺤텞?뚯씪(`urbanbus_rl_project (2).zip`)怨?理쒖떊 ?묒뾽 ?대뜑 媛꾩쓽 ?뚯씪 ?⑥쐞 ?댁슜 鍮꾧탳(Diff) ?먮룞???ㅽ겕由쏀듃 ?묒꽦.
+
+---
+
+## ?뱟 2026-04-10 - ?밴꺽 寃곌낵 由ы룷???쒗뵆由??좉퇋 異붽?
+
+#### 1. ?뱀씤 / 蹂대쪟 / 李⑤떒 湲곕줉 ?쒗뵆由?臾몄꽌??- **`01_data_contracts/route_link_promotion_result_report_template.md`** [?좉퇋]: `route_link_promotion_readiness.sql` ?ㅽ뻾 寃곌낵瑜?蹂듬텤?섏뿬 理쒖쥌 ?먯젙??湲곕줉?섎뒗 寃곌낵 由ы룷???쒗뵆由??묒꽦.
+  - summary 湲곕?媛?/ ?ㅼ젣媛?/ ?먯젙 ???ы븿.
+  - ?곸꽭 荑쇰━蹂????? ?먯젙, 鍮꾧퀬 湲곕줉 ???ы븿.
+  - 寃곌낵 ?먮Ц 蹂댁〈 援ш컙怨?理쒖쥌 ?곹깭(?뱀씤 / 蹂대쪟 / 李⑤떒), ?꾩냽 議곗튂, ?뱀씤 湲곕줉 ?뱀뀡 ?ы븿.
+
+#### 2. 寃利?README ?뺤옣
+- **`03_validation_queries/README.md`** ?낅뜲?댄듃: 寃곌낵 由ы룷???쒗뵆由?臾몄꽌 ?꾩튂 諛??ъ슜 紐⑹쟻 異붽?.
+
+---
+
+## ?뱟 2026-04-10 - ?뚯씠?꾨씪???덉젙??諛??꾩껜 ?몄꽑 ?밴꺽 以鍮??묒뾽
+
+#### 1. PowerShell ?뚯씠?꾨씪??湲곗닠??遺梨??닿껐
+- **`scripts/run_promote_route_link_sequence.ps1`** ?섏젙:
+  - `psql` ?몄텧 ??`NOTICE` 硫붿떆吏媛 PowerShell 醫낅즺 ?ㅻ쪟濡??ㅼ쿂由щ릺??臾몄젣 ?닿껐.
+  - `try/finally` 釉붾줉?쇰줈 `ErrorActionPreference` ?곹깭 蹂듦뎄 蹂댁옣.
+  - `stderr` 異쒕젰??Verbose 濡쒓렇濡?遺꾨쪟?섏뿬 媛?낆꽦 媛쒖꽑.
+- **`scripts/validate_route_link_sequence.sql`** ?섏젙:
+  - `route_id` 議곗씤 ??諛쒖깮?섎뜕 `text` vs `integer` ???遺덉씪移??ㅻ쪟 ?섏젙 (Type casting ?곸슜).
+
+#### 2. 寃利?諛??꾨줈?좏??댄븨
+- **?섑뵆 寃利??깃났**: `route_id=1000` ?몄꽑?????`Pre-validation -> Promotion -> Post-validation -> Final Report` ??怨쇱젙 `PASS` ?뺤씤.
+- **?곸옱 ?꾪솴 ?먭?**:
+  - `stg_daegu_route_links_api`: ?꾩옱 1媛??몄꽑(287嫄? ?곸옱 ?곹깭.
+  - `api_snapshots`: 1媛??뚯씪 議댁옱 ?뺤씤.
+- **李④린 怨쇱젣**: ?꾩껜 ?몄꽑 ????곗씠???섏쭛(getLink02 API) 諛??뚮같移?5-10媛? ?밴꺽 ?뚯뒪??以鍮?
+
+---
+
+## ?뱟 2026-04-10 - ?몄꽑 留곹겕 ?밴꺽 寃利??먮룆 湲곗? 媛?대뱶 ?뺣━
+
+#### 1. 寃利?寃곌낵 ?먮룆 湲곗???臾몄꽌??- **`01_data_contracts/route_link_promotion_result_guide.md`** [?좉퇋]: `route_link_promotion_readiness.sql` ?ㅽ뻾 寃곌낵瑜?PASS / WARN / FAIL 濡??댁꽍?섎뒗 湲곗????묒꽦.
+  - summary 湲곕?媛?`238 / 4 / 234 / 234 / 234`) 紐낆떆.
+  - `unexpected_route_in_staging` ?먯꽌 legacy sample `route_id='1000'` ?붿〈 ??WARN ?쇰줈 ?댁꽍?섎뒗 ?댁쁺 湲곗? ?뺣━.
+  - promoted ?ㅼ뿼, ?먯뿰??以묐났, 嫄댁닔 遺덉씪移? key gap, ?곗냽???⑥젅, `link_id` 異⑸룎? 紐⑤몢 FAIL 濡?遺꾨쪟.
+
+#### 2. 寃利?README 蹂닿컯
+- **`03_validation_queries/README.md`** ?낅뜲?댄듃: ?먮룆 湲곗???臾몄꽌 ?꾩튂 諛??ъ슜 紐⑹쟻 異붽?.
+
+---
+
+## ?뱟 2026-04-09
+### ?援?踰꾩뒪 API ?섏쭛/寃利??밴툒 ?뚯씠?꾨씪??援ъ텞
+
+#### 1. ?곗씠???섏쭛 ?먮룞??(Ingest)
+- **`scripts/load_route_links_api_csv.ps1`** [?좉퇋]: getLink02 API ?ㅻ깄??CSV ??`stg_daegu_route_links_api` ?곸옱 ?먮룞??
+  - ?뚯씪紐?湲곕컲 以묐났 濡쒕뱶 諛⑹?.
+  - 而щ읆 留ㅽ븨 諛?`route_id` 二쇱엯.
+  - `psql \copy`瑜??댁슜??怨좎냽 濡쒕뱶.
+- **`scripts/create_stg_daegu_route_links_api.sql`** [?좉퇋]: Staging ?뚯씠釉?DDL.
+
+#### 2. 寃利??쒖뒪??(Guard)
+- **`scripts/validate_route_link_sequence.sql`** [?좉퇋]: 738以?洹쒕え??醫낇빀 寃利??ㅽ겕由쏀듃.
+  - **Pre-validation**: ???泥댄겕, ?꾩닔媛? Natural Key 以묐났.
+  - **Post-validation**: PK 以묐났, 留곹겕 ?쒕쾲 ?곗냽???⑥젅, Key Collision, Count Mismatch.
+  - **Guard 湲곕뒫**: ?ㅻ쪟 諛쒓껄 ??`RAISE EXCEPTION`?쇰줈 ?뚯씠?꾨씪??以묐떒.
+  - psql 蹂??`route_id_raw`, `snapshot_file`, `phase`)濡??ㅼ퐫???쒖뼱 媛??
+
+#### 3. ?밴툒 ?뚯씠?꾨씪??(Promotion)
+- **`scripts/create_route_link_sequence.sql`** [?좉퇋]: 遺꾩꽍???뚯씠釉?DDL 諛??쒖빟議곌굔.
+- **`scripts/promote_route_link_sequence.sql`** [?좉퇋]: Staging ??遺꾩꽍???뚯씠釉?Upsert 濡쒖쭅.
+  - `ON CONFLICT (route_id, move_dir_code, link_seq) DO UPDATE` ?곸슜.
+
+#### 4. ?뚯씠?꾨씪???ㅼ??ㅽ듃?덉씠??- **`scripts/run_promote_route_link_sequence.ps1`** [?좉퇋]: ?꾩껜 ?뚰겕?뚮줈???먮룞??
+  - 5?④퀎 ?ㅽ뻾: Scope ?뺤씤 ??DDL ??Pre-check ??Promote ??Post-check.
+  - ?뱀젙 `route_id` ?먮뒗 `snapshot_file` 湲곗? Scoped Execution 吏??
+  - ?묒뾽 濡쒓렇 ?먮룞 ?앹꽦 (`Start-Transcript`).
+
+#### 5. ?명봽??- **`mcp_config.json`** ?섏젙: JSON ?뚯떛 ?ㅻ쪟 蹂듦뎄 諛?MCP ?쒕쾭 ?뺤긽??
+- **`.agents/skills/bus_route_link_ingest_guard`** [?좉퇋]: ?몄꽑 留곹겕 ?곸옱 ?꾩슜 ?ㅽ궗.
+- **`.agents/skills/data-contract-audit-skill`** ?낅뜲?댄듃.
+
+---
+
+## ?뱟 2026-04-08
+### 怨듦컙 ?곗씠??紐⑤뜽留?諛??뺣쪟??湲곗큹 ?곗씠???곸옱
+
+#### 1. 怨듦컙 ?곗씠???꾨줈?뚯씪留?- `bs_20250903`, `link_20250903`, `node_20250903` Shapefile ?덉씠??遺꾩꽍.
+- Geometry ??? SRID, Row Count, ?꾨낫 ??而щ읆 臾몄꽌??
+- **`01_data_contracts/shape_layer_profile.md`** [?좉퇋] ?묒꽦.
+
+#### 2. ?뺣쪟???먯쿇 ?곗씠??DB ?곸옱
+- ?덈룄???몄퐫??UHC/UTF-8) 異⑸룎 ?닿껐: `geopandas` + SQLAlchemy 諛⑹떇 ?ъ슜.
+- 5,705嫄??뺣쪟???곗씠????`public.bs_20250903` ?곸옱 ?꾨즺.
+- 怨듦컙 硫뷀??곗씠??EPSG:5187 ?쇱튂 ?뺤씤.
+
+#### 3. dim_stop 李⑥썝 ?뚯씠釉??밴꺽
+- **`scripts/create_dim_stop.sql`** [?좉퇋]: 李⑥썝 ?뚯씠釉??앹꽦 ?ㅽ겕由쏀듃.
+- `ST_SetSRID`濡?醫뚰몴怨?紐낆떆 遺?????댁쨷 醫뚰몴怨?`geom_5187`, `geom_4326`) 諛?寃쎌쐞??異붿텧.
+- **臾닿껐??寃利?寃곌낵**:
+  - PK(`stop_id`) NULL/以묐났: **0嫄?* ??  - ?꾧꼍???援?沅뚯뿭 ?댄깉: **0嫄?* ??  - ?좏슚?섏? ?딆? Geometry: **0嫄?* ??  - `stop_name` 以묐났: **250嫄?* ??**?대쫫 湲곕컲 議곗씤 湲덉? ?먯튃 ?섎┰** ?좑툘
+
+#### 4. ?곗씠??怨꾩빟 諛?寃利??꾨젅?꾩썙??- **`01_data_contracts/keys.md`** [?좉퇋]: ???뺤쓽 諛?議곗씤 洹쒖튃 臾몄꽌??
+- **`01_data_contracts/source_registry.md`** [?좉퇋]: ?먯쿇 ?곗씠??異쒖쿂 ?깅줉.
+- **`01_data_contracts/schema_draft.sql`** [?좉퇋]: PostgreSQL ?ㅽ궎留?珥덉븞.
+- **`02_ingest_jobs/`** [?좉퇋]: ?곸옱 ?ㅽ겕由쏀듃 ?붾젆?좊━ (`load_daegu_stops.ps1`, `fetch_bus_api.ps1`).
+- **`03_validation_queries/`** [?좉퇋]: SQL 寃利?荑쇰━ (`basic_checks.sql`, `join_checks.sql`).
+- **`.agents/skills/shape-inspection-skill`** [?좉퇋]: 怨듦컙 ?덉씠??寃???ㅽ궗.
+- **`.agents/skills/data-contract-audit-skill`** [?좉퇋]: ?곗씠??怨꾩빟 ?ㅻ뵩 ?ㅽ궗.
+
+---
