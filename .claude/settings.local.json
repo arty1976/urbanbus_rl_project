@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la artifacts/)",
+      "Bash(ls -la 05_training/evaluation/)",
+      "Bash(python 05_training/run_b1_noop_rollout.py --help)"
+    ]
+  }
+}
