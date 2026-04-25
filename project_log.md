@@ -1,6 +1,33 @@
 
 ---
 
+## 날짜: 2026-04-25
+### 프로젝트 진행 현황 검토 및 다음 과업 정의
+
+오늘은 신규 구현 없이 4/24까지의 작업 결과를 전체 검토하고 다음 단계 과업을 확정했다.
+
+#### 1. 검토 결과 요약
+
+| 조건 | 상태 | 비고 |
+|------|------|------|
+| B0 historical | canonical full-year PASS | 6,570 window, KPI 일부 NULL (cv_headway 등) |
+| B1 No-op | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
+| B2 rule-based | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
+| [A] pure MAPPO | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
+
+- `causal_comparison_allowed=false` — 전 조건 non-causal, 논문 성능 비교 아직 불가
+- B0의 `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy` valid_count=0 (NULL) 문제 미해결
+
+#### 2. 다음 과업 우선순위 (확정)
+
+1. **[P1] B1 full rollout 실행** — `run_b1_noop_rollout.py --limit 0`, 3 seed 전체 → 19,710 rows, `full_year_complete=true` 달성
+2. **[P2] B2 real rollout runner 작성** — `run_b2_rulebased_rollout.py`, rule 파라미터 (target_headway_seconds=600 등) 적용, B1과 동일 KPI 경로 연결
+3. **[P3] [A] MAPPO runner 실제 연결** — stub → 실 `window_rollup.parquet` 생성
+4. **[P4] B0 KPI NULL 해결** — cv_headway / bunching_rate / on_time_rate / energy_proxy DB 컬럼 매핑 점검
+5. **[P5 중기] Phase 2 Causal Simulator Adapter 설계** — `causal_comparison_allowed=true` 경로 구축, 논문 성능 비교 가능 단계
+
+---
+
 ### Canonical KPI Aggregator v1 Smoke Validation 최종 PASS
 
 이번 작업에서는 B0/B1/B2/[A] 전 조건이 동일한 canonical KPI(KPI=Key Performance Indicator, 핵심성과지표) 집계 경로를 통과하는지 최종 점검했다. `05_training/evaluation/check_canonical_outputs.py`를 생성하여 각 조건의 `canonical_eval` 산출물 존재 여부, row count, condition_id, strict_canonical flag, causal_comparison_allowed flag, manifest row count 일치 여부를 검증했다.

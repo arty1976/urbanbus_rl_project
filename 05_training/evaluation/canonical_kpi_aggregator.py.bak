@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,17 +16,6 @@ EXPECTED_SHARED_KPIS = [
 ]
 
 VALID_TIME_BANDS = {"peak", "offpeak", "night"}
-
-NON_CAUSAL_SOURCE_MODES = {
-    "historical",
-    "legacy_bridge",
-    "stub_b1_noop_smoke",
-    "stub_b2_rulebased_smoke",
-    "stub_A_pure_mappo_smoke",
-    "replay_b1_noop_noncausal",
-    "replay_b2_rulebased_noncausal",
-    "replay_A_pure_mappo_noncausal",
-}
 
 REQUIRED_OFFICIAL_COLUMNS = [
     "condition_id",
