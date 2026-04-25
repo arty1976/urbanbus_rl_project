@@ -1,0 +1,607 @@
+﻿from __future__ import annotations
+
+import os
+import json
+import math
+from pathlib import Path
+from typing import Dict, Any, List, Tuple, Optional
+
+import pandas as pd
+
+try:
+    import yaml
+except Exception as exc:
+    raise SystemExit(f"[FAIL] PyYAML import failed: {exc}")
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception as exc:
+    raise SystemExit(f"[FAIL] psycopg2 import failed: {exc}")
+
+
+PROJECT_ROOT = Path.cwd()
+
+SCENARIO_INDEX_PATH = PROJECT_ROOT / "artifacts" / "baseline_v1" / "B1_noop" / "scenario_index.parquet"
+PROFILE_PATH = PROJECT_ROOT / "05_training" / "configs" / "shared_exogenous_demand_profile_v1.yaml"
+CURRENT_OPS_PATH = PROJECT_ROOT / "05_training" / "configs" / "current_ops_reconstructed_v1.yaml"
+CONTRACT_PATH = PROJECT_ROOT / "artifacts" / "baseline_v2_causal" / "phase2_causal_contract.json"
+
+REPORT_DIR = PROJECT_ROOT / "artifacts" / "baseline_v2_causal" / "demand_profile"
+REPORT_JSON_PATH = REPORT_DIR / "shared_exogenous_demand_profile_v1_report.json"
+REPORT_CSV_PATH = REPORT_DIR / "shared_exogenous_demand_profile_v1_summary.csv"
+COLUMN_REPORT_PATH = REPORT_DIR / "source_column_inspection_step14.json"
+
+SOURCE_CANDIDATES = [
+    "public.gatv2_snapshot_stop_features_train_mat",
+    "public.gatv2_snapshot_stop_features_train",
+    "public.rl_state_training_base",
+]
+
+
+def find_dsn() -> str:
+    env_names = [
+        "URBANBUS_DB_DSN",
+        "DATABASE_URL",
+        "DB_URL",
+        "POSTGRES_URL",
+        "PG_DSN",
+    ]
+    for name in env_names:
+        value = os.environ.get(name)
+        if value:
+            return value
+
+    for env_path in [
+        PROJECT_ROOT / ".env",
+        PROJECT_ROOT / "05_training" / ".env",
+        PROJECT_ROOT / "04_model_inputs" / ".env",
+    ]:
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key in env_names and value:
+                return value
+
+    raise SystemExit(
+        "[FAIL] DB DSN not found. Set URBANBUS_DB_DSN or DATABASE_URL."
+    )
+
+
+def split_relation(relation: str) -> Tuple[str, str]:
+    if "." not in relation:
+        return "public", relation
+    return relation.split(".", 1)
+
+
+def relation_exists(conn, relation: str) -> bool:
+    schema, name = split_relation(relation)
+    sql = """
+    SELECT 1
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = %s
+      AND c.relname = %s
+      AND c.relkind IN ('r', 'v', 'm')
+    LIMIT 1
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (schema, name))
+        return cur.fetchone() is not None
+
+
+def get_columns_pg_attribute(conn, relation: str) -> Dict[str, str]:
+    schema, name = split_relation(relation)
+    sql = """
+    SELECT
+        a.attname AS column_name,
+        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = %s
+      AND c.relname = %s
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+    ORDER BY a.attnum
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(sql, (schema, name))
+        rows = cur.fetchall()
+    return {str(r["column_name"]): str(r["data_type"]) for r in rows}
+
+
+def candidate_column_report(conn) -> Dict[str, Any]:
+    report: Dict[str, Any] = {}
+
+    for rel in SOURCE_CANDIDATES + ["public.gatv2_snapshot_summary"]:
+        exists = relation_exists(conn, rel)
+        cols = get_columns_pg_attribute(conn, rel) if exists else {}
+        report[rel] = {
+            "exists": exists,
+            "column_count": len(cols),
+            "columns": cols,
+        }
+
+    return report
+
+
+def choose_first_existing(cols: Dict[str, str], names: List[str]) -> Optional[str]:
+    for name in names:
+        if name in cols:
+            return name
+    return None
+
+
+def pick_expr(cols: Dict[str, str], raw_names: List[str], log_names: List[str]) -> Tuple[str, str, str]:
+    raw = choose_first_existing(cols, raw_names)
+    if raw:
+        return f"LN(1.0 + GREATEST(m.{raw}::double precision, 0.0))", "raw_to_log1p", raw
+
+    log = choose_first_existing(cols, log_names)
+    if log:
+        return f"GREATEST(m.{log}::double precision, 0.0)", "precomputed_log1p", log
+
+    raise RuntimeError(
+        f"Missing both raw columns {raw_names} and log columns {log_names}"
+    )
+
+
+def resolve_source(conn) -> Dict[str, Any]:
+    """
+    Pick a usable relation.
+
+    Preferred:
+      source relation directly has state_ts.
+
+    Fallback:
+      source has snapshot_id and public.gatv2_snapshot_summary maps snapshot_id -> state_ts.
+    """
+    reports = candidate_column_report(conn)
+
+    usable: List[Dict[str, Any]] = []
+
+    for rel in SOURCE_CANDIDATES:
+        info = reports.get(rel, {})
+        if not info.get("exists", False):
+            continue
+
+        cols = info.get("columns", {})
+
+        has_state_ts = "state_ts" in cols
+        has_snapshot_id = "snapshot_id" in cols
+
+        try:
+            board_expr, board_kind, board_col = pick_expr(
+                cols,
+                ["boardings_recent", "boardings", "boarding_count"],
+                ["boardings_recent_log", "boardings_log"],
+            )
+            wait_expr, wait_kind, wait_col = pick_expr(
+                cols,
+                ["waiting_passenger_cnt", "waiting_passengers", "waiting_count"],
+                ["waiting_passenger_cnt_log", "waiting_passengers_log"],
+            )
+            alight_expr, alight_kind, alight_col = pick_expr(
+                cols,
+                ["alightings_recent", "alightings", "alighting_count"],
+                ["alightings_recent_log", "alightings_log"],
+            )
+        except Exception as exc:
+            print(f"[WARN] skip {rel}: feature columns not usable: {exc}")
+            continue
+
+        if has_state_ts:
+            usable.append(
+                {
+                    "relation": rel,
+                    "mode": "direct_state_ts",
+                    "state_expr": "m.state_ts::timestamp",
+                    "join_sql": "",
+                    "board_expr": board_expr,
+                    "board_kind": board_kind,
+                    "board_col": board_col,
+                    "wait_expr": wait_expr,
+                    "wait_kind": wait_kind,
+                    "wait_col": wait_col,
+                    "alight_expr": alight_expr,
+                    "alight_kind": alight_kind,
+                    "alight_col": alight_col,
+                    "columns": cols,
+                }
+            )
+            continue
+
+        if has_snapshot_id and reports.get("public.gatv2_snapshot_summary", {}).get("exists", False):
+            summary_cols = reports["public.gatv2_snapshot_summary"]["columns"]
+            if "snapshot_id" in summary_cols and "state_ts" in summary_cols:
+                usable.append(
+                    {
+                        "relation": rel,
+                        "mode": "snapshot_id_to_summary_state_ts",
+                        "state_expr": "ss.state_ts::timestamp",
+                        "join_sql": "JOIN public.gatv2_snapshot_summary ss ON ss.snapshot_id = m.snapshot_id",
+                        "board_expr": board_expr,
+                        "board_kind": board_kind,
+                        "board_col": board_col,
+                        "wait_expr": wait_expr,
+                        "wait_kind": wait_kind,
+                        "wait_col": wait_col,
+                        "alight_expr": alight_expr,
+                        "alight_kind": alight_kind,
+                        "alight_col": alight_col,
+                        "columns": cols,
+                    }
+                )
+                continue
+
+        print(f"[WARN] skip {rel}: no state_ts column and no usable snapshot_id mapping")
+
+    if not usable:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        COLUMN_REPORT_PATH.write_text(
+            json.dumps(reports, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        raise RuntimeError(
+            "No usable source relation found. Column inspection written to "
+            f"{COLUMN_REPORT_PATH}"
+        )
+
+    # Prefer materialized/direct state_ts, then view/direct, then snapshot mapping.
+    def rank(item: Dict[str, Any]) -> Tuple[int, int]:
+        rel = item["relation"]
+        mode = item["mode"]
+        direct_score = 0 if mode == "direct_state_ts" else 1
+        mat_score = 0 if rel.endswith("_mat") else 1
+        return (direct_score, mat_score)
+
+    usable.sort(key=rank)
+    selected = usable[0]
+
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    COLUMN_REPORT_PATH.write_text(
+        json.dumps(
+            {
+                "selected": {
+                    k: v
+                    for k, v in selected.items()
+                    if k not in {"columns"}
+                },
+                "candidate_report": reports,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return selected
+
+
+def build_scenario_variants(scenario_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    base = scenario_df[["state_ts", "time_band"]].drop_duplicates().copy()
+    base["time_band"] = base["time_band"].astype(str).str.strip().str.lower()
+
+    wall = base.copy()
+    wall["state_ts_join"] = base["state_ts"].apply(
+        lambda x: pd.Timestamp(x).tz_localize(None)
+        if pd.Timestamp(x).tzinfo is not None
+        else pd.Timestamp(x)
+    )
+
+    utc = base.copy()
+    utc["state_ts_join"] = (
+        pd.to_datetime(base["state_ts"], utc=True)
+        .dt.tz_convert("UTC")
+        .dt.tz_localize(None)
+    )
+
+    return {
+        "wall_time_naive": wall[["state_ts_join", "time_band"]].drop_duplicates(),
+        "utc_naive": utc[["state_ts_join", "time_band"]].drop_duplicates(),
+    }
+
+
+def load_temp_scenario(conn, variant_df: pd.DataFrame) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS tmp_phase2_scenario_index")
+        cur.execute("""
+            CREATE TEMP TABLE tmp_phase2_scenario_index (
+                state_ts timestamp PRIMARY KEY,
+                time_band text NOT NULL
+            ) ON COMMIT DROP
+        """)
+
+    records = [
+        (pd.Timestamp(r.state_ts_join).to_pydatetime(), str(r.time_band))
+        for r in variant_df.itertuples(index=False)
+    ]
+
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO tmp_phase2_scenario_index (state_ts, time_band)
+            VALUES %s
+            ON CONFLICT (state_ts) DO UPDATE SET time_band = EXCLUDED.time_band
+            """,
+            records,
+            page_size=1000,
+        )
+    conn.commit()
+
+
+def aggregate_for_variant(
+    conn,
+    selected: Dict[str, Any],
+    variant_name: str,
+    variant_df: pd.DataFrame,
+) -> pd.DataFrame:
+    load_temp_scenario(conn, variant_df)
+
+    rel = selected["relation"]
+    state_expr = selected["state_expr"]
+    join_sql = selected["join_sql"]
+    board_expr = selected["board_expr"]
+    wait_expr = selected["wait_expr"]
+    alight_expr = selected["alight_expr"]
+
+    sql = f"""
+    SELECT
+        s.time_band,
+        COUNT(*)::bigint AS row_count,
+        COUNT(DISTINCT {state_expr})::bigint AS matched_snapshot_count,
+        AVG({board_expr})::double precision AS mean_log1p_boardings_recent,
+        AVG({wait_expr})::double precision AS mean_log1p_waiting_passenger_cnt,
+        AVG({alight_expr})::double precision AS mean_log1p_alightings_recent,
+        (
+            0.6 * AVG({board_expr})
+            + 0.4 * AVG({wait_expr})
+        )::double precision AS demand_intensity
+    FROM {rel} m
+    {join_sql}
+    JOIN tmp_phase2_scenario_index s
+      ON {state_expr} = s.state_ts
+    GROUP BY s.time_band
+    ORDER BY
+      CASE s.time_band
+        WHEN 'night' THEN 1
+        WHEN 'offpeak' THEN 2
+        WHEN 'peak' THEN 3
+        ELSE 9
+      END
+    """
+
+    return pd.read_sql_query(sql, conn)
+
+
+def choose_best_variant(results: Dict[str, pd.DataFrame]) -> Tuple[str, pd.DataFrame]:
+    scored = []
+    for name, df in results.items():
+        score = int(df["matched_snapshot_count"].sum()) if not df.empty else 0
+        scored.append((score, name, df))
+    scored.sort(reverse=True, key=lambda x: x[0])
+
+    best_score, best_name, best_df = scored[0]
+    if best_score <= 0:
+        detail = {
+            name: int(df["matched_snapshot_count"].sum()) if not df.empty else 0
+            for name, df in results.items()
+        }
+        raise RuntimeError(f"No state_ts matches found. details={detail}")
+
+    return best_name, best_df.copy()
+
+
+def normalize_profile(summary_df: pd.DataFrame) -> Dict[str, float]:
+    required = {"night", "offpeak", "peak"}
+    got = set(summary_df["time_band"].astype(str).str.lower().tolist())
+    missing = sorted(required - got)
+    if missing:
+        raise RuntimeError(f"Missing time_band rows: {missing}")
+
+    intensity = {
+        str(r.time_band).lower(): float(r.demand_intensity)
+        for r in summary_df.itertuples(index=False)
+    }
+
+    night_base = intensity["night"]
+    if not math.isfinite(night_base) or night_base <= 0:
+        positives = [v for v in intensity.values() if math.isfinite(v) and v > 0]
+        if not positives:
+            raise RuntimeError("No positive demand intensity values")
+        night_base = min(positives)
+
+    out = {
+        tb: round(float(intensity[tb] / night_base), 6)
+        for tb in ["night", "offpeak", "peak"]
+    }
+    out["night"] = 1.0
+    return out
+
+
+def main() -> None:
+    for p in [SCENARIO_INDEX_PATH, CURRENT_OPS_PATH, CONTRACT_PATH]:
+        if not p.exists():
+            raise SystemExit(f"[FAIL] required file missing: {p}")
+
+    dsn = find_dsn()
+    print("[OK] DB DSN found")
+
+    scenario_df = pd.read_parquet(SCENARIO_INDEX_PATH).copy()
+    if "state_ts" not in scenario_df.columns or "time_band" not in scenario_df.columns:
+        raise SystemExit("[FAIL] scenario_index must include state_ts and time_band")
+
+    scenario_df["time_band"] = scenario_df["time_band"].astype(str).str.strip().str.lower()
+    variants = build_scenario_variants(scenario_df)
+
+    with psycopg2.connect(dsn) as conn:
+        conn.set_client_encoding("UTF8")
+
+        selected = resolve_source(conn)
+        print(f"[OK] selected source relation: {selected['relation']}")
+        print(f"[OK] selected source mode    : {selected['mode']}")
+        print(f"[OK] boardings source       : {selected['board_col']} ({selected['board_kind']})")
+        print(f"[OK] waiting source         : {selected['wait_col']} ({selected['wait_kind']})")
+        print(f"[OK] alighting source       : {selected['alight_col']} ({selected['alight_kind']})")
+        print(f"[OK] column report          : {COLUMN_REPORT_PATH}")
+
+        results = {}
+        for name, vdf in variants.items():
+            print(f"[INFO] aggregate join variant: {name}, scenario_rows={len(vdf)}")
+            results[name] = aggregate_for_variant(conn, selected, name, vdf)
+
+    best_name, summary_df = choose_best_variant(results)
+
+    summary_df = summary_df.sort_values(
+        by="time_band",
+        key=lambda s: s.map({"night": 1, "offpeak": 2, "peak": 3}).fillna(9),
+    ).reset_index(drop=True)
+
+    multipliers = normalize_profile(summary_df)
+
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    summary_df["arrival_multiplier_vs_night"] = summary_df["time_band"].map(multipliers)
+    summary_df.to_csv(REPORT_CSV_PATH, index=False, encoding="utf-8-sig")
+
+    profile = {
+        "artifact_version": "shared_exogenous_demand_profile_v1",
+        "phase": "Phase-2",
+        "profile_name": "empirical_2023_time_band_demand_profile",
+        "status": "ADOPTED_EMPIRICAL",
+        "source": {
+            "relation": selected["relation"],
+            "source_mode": selected["mode"],
+            "scenario_index": str(SCENARIO_INDEX_PATH.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+            "join_variant": best_name,
+            "boardings_column": selected["board_col"],
+            "boardings_column_kind": selected["board_kind"],
+            "waiting_column": selected["wait_col"],
+            "waiting_column_kind": selected["wait_kind"],
+            "alightings_column": selected["alight_col"],
+            "alightings_column_kind": selected["alight_kind"],
+            "column_inspection_report": str(COLUMN_REPORT_PATH.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        },
+        "method": {
+            "demand_intensity_formula": (
+                "0.6 * mean(log1p(boardings_recent)) + "
+                "0.4 * mean(log1p(waiting_passenger_cnt))"
+            ),
+            "normalization": "night = 1.0; offpeak/peak are divided by night demand_intensity",
+            "condition_specific_demand_allowed": False,
+        },
+        "arrival_multiplier_by_time_band": multipliers,
+        "empirical_summary_by_time_band": [
+            {
+                "time_band": str(r.time_band),
+                "row_count": int(r.row_count),
+                "matched_snapshot_count": int(r.matched_snapshot_count),
+                "mean_log1p_boardings_recent": float(r.mean_log1p_boardings_recent),
+                "mean_log1p_waiting_passenger_cnt": float(r.mean_log1p_waiting_passenger_cnt),
+                "mean_log1p_alightings_recent": float(r.mean_log1p_alightings_recent),
+                "demand_intensity": float(r.demand_intensity),
+                "arrival_multiplier_vs_night": float(multipliers[str(r.time_band)]),
+            }
+            for r in summary_df.itertuples(index=False)
+        ],
+        "constraints": {
+            "same_profile_for_conditions": [
+                "B0R_current_ops_reconstructed",
+                "B1_noop",
+                "B2_rulebased",
+                "A_pure_mappo",
+            ],
+            "same_exogenous_events": True,
+            "condition_specific_demand_allowed": False,
+            "post_hoc_tuning_allowed": False,
+        },
+    }
+
+    with PROFILE_PATH.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(profile, f, allow_unicode=True, sort_keys=False)
+
+    report = {
+        "status": "empirical_demand_profile_derived",
+        "profile_path": str(PROFILE_PATH.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        "summary_csv_path": str(REPORT_CSV_PATH.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        "source_relation": selected["relation"],
+        "source_mode": selected["mode"],
+        "join_variant_selected": best_name,
+        "join_variant_snapshot_counts": {
+            name: int(df["matched_snapshot_count"].sum()) if not df.empty else 0
+            for name, df in results.items()
+        },
+        "arrival_multiplier_by_time_band": multipliers,
+        "summary_records": profile["empirical_summary_by_time_band"],
+    }
+
+    with REPORT_JSON_PATH.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # Link into current_ops config.
+    with CURRENT_OPS_PATH.open("r", encoding="utf-8-sig") as f:
+        current_ops = yaml.safe_load(f)
+
+    current_ops["shared_exogenous_demand_profile"] = {
+        "path": str(PROFILE_PATH.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        "artifact_version": "shared_exogenous_demand_profile_v1",
+        "profile_name": "empirical_2023_time_band_demand_profile",
+        "status": "ADOPTED_EMPIRICAL",
+        "condition_specific_demand_allowed": False,
+    }
+
+    with CURRENT_OPS_PATH.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(current_ops, f, allow_unicode=True, sort_keys=False)
+
+    # Link into contract.
+    with CONTRACT_PATH.open("r", encoding="utf-8-sig") as f:
+        contract = json.load(f)
+
+    contract.setdefault("input_artifacts", {})
+    contract["input_artifacts"]["shared_exogenous_demand_profile"] = str(
+        PROFILE_PATH.relative_to(PROJECT_ROOT)
+    ).replace("\\", "/")
+
+    contract["shared_exogenous_demand_policy"] = {
+        "artifact_version": "shared_exogenous_demand_profile_v1",
+        "profile_name": "empirical_2023_time_band_demand_profile",
+        "status": "ADOPTED_EMPIRICAL",
+        "arrival_multiplier_by_time_band": multipliers,
+        "same_profile_for_conditions": [
+            "B0R_current_ops_reconstructed",
+            "B1_noop",
+            "B2_rulebased",
+            "A_pure_mappo",
+        ],
+        "condition_specific_demand_allowed": False,
+        "post_hoc_tuning_allowed": False,
+    }
+
+    with CONTRACT_PATH.open("w", encoding="utf-8") as f:
+        json.dump(contract, f, ensure_ascii=False, indent=2)
+
+    print("")
+    print("=== Empirical 2023 time-band demand profile ===")
+    print(summary_df.to_string(index=False))
+    print("")
+    print(f"[OK] selected join variant: {best_name}")
+    print(f"[OK] arrival_multiplier_by_time_band: {multipliers}")
+    print(f"[OK] wrote YAML : {PROFILE_PATH}")
+    print(f"[OK] wrote JSON : {REPORT_JSON_PATH}")
+    print(f"[OK] wrote CSV  : {REPORT_CSV_PATH}")
+    print("[OK] linked profile into current_ops_reconstructed_v1.yaml")
+    print("[OK] linked profile into phase2_causal_contract.json")
+    print("STEP 14 EMPIRICAL DEMAND PROFILE PASS")
+
+
+if __name__ == "__main__":
+    main()

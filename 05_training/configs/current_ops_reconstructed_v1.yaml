@@ -1,0 +1,152 @@
+artifact_version: current_ops_reconstructed_v1
+phase: Phase-2
+condition_id: B0R
+condition_name: current_ops_reconstructed
+display_name: B0R_current_ops_reconstructed
+description: 'Reconstructed current fixed-route bus operation baseline for Phase-2
+  causal simulator evaluation. This is not the observed B0_historical baseline. It
+  is a causal simulator-backed reconstruction of current fixed-route operations using
+  the existing graph, demand, and scenario artifacts plus explicit operational assumptions.
+
+  '
+source_mode: causal_sim_current_ops_reconstructed_v1
+causal_comparison_allowed_expected: true
+qwen:
+  qwen_train: false
+  qwen_inference: false
+  qwen_trigger_rate: 0.0
+evaluation:
+  evaluation_horizon_minutes: 30
+  sim_step_seconds: 60
+  decision_interval_seconds: 300
+  seeds:
+  - 1
+  - 2
+  - 3
+  time_bands:
+  - peak
+  - offpeak
+  - night
+fairness_constraints:
+  same_initial_state: true
+  same_exogenous_events: true
+  same_eval_window: true
+operation:
+  fixed_route_mode: true
+  baseline_role: current_fixed_route_reconstructed_baseline
+  stop_policy: stop_at_all_scheduled_stops
+  allow_hold: false
+  allow_skip: false
+  allow_dispatch: false
+  allow_dynamic_reroute: false
+  allow_on_demand_assignment: false
+fleet:
+  bus_capacity: 70
+  init_mode: infer_from_headway
+  fleet_count_mode: estimate_by_time_band
+  active_bus_mask_required: true
+headway:
+  target_headway_seconds:
+    peak: 600
+    offpeak: 900
+    night: 1200
+  initial_headway_jitter_seconds:
+    peak: 60
+    offpeak: 90
+    night: 120
+dwell_time:
+  base_seconds: 20
+  per_boarding_seconds: 2.0
+  per_alighting_seconds: 1.5
+  min_seconds: 10
+  max_seconds: 90
+travel_time:
+  use_edge_time_sec: true
+  fallback_speed_kmh: 20.0
+  time_band_multiplier:
+    peak: 1.15
+    offpeak: 1.0
+    night: 0.9
+passenger_flow:
+  use_existing_waiting_passenger_cnt: true
+  use_exogenous_demand_events: true
+  boarding_policy: fifo_until_capacity
+  alighting_mode: reconstructed_expected_alightings
+  destination_required: false
+action_space:
+  action_type_dim: 4
+  action_types:
+    0: proceed
+    1: hold
+    2: skip
+    3: dispatch
+  forced_action_type: proceed
+  hold_buckets_seconds:
+  - 0
+  - 30
+  - 60
+  - 120
+  dispatch_top_k: 0
+kpi:
+  shared_kpis:
+  - cv_headway
+  - avg_wait_seconds
+  - bunching_rate
+  - on_time_rate
+  - intervention_rate
+  - energy_proxy
+  bunching_threshold_seconds: 180
+  on_time_tolerance_seconds: 120
+  energy_proxy:
+    idle_cost_per_second: 0.01
+    distance_cost_per_meter: 0.001
+    dwell_cost_per_second: 0.005
+    deadhead_distance_penalty: 1.0
+  bunching_threshold_ratio: 0.75
+  bunching_threshold_policy:
+    method: max_fixed_seconds_or_target_headway_ratio
+    formula: max(bunching_threshold_seconds, target_headway_seconds * bunching_threshold_ratio)
+    rationale: Fixed 180 seconds alone is too strict for offpeak/night headways. The
+      ratio criterion makes bunching detection relative to the planned service interval.
+output_contract:
+  required_window_rollup_columns:
+  - condition_id
+  - seed
+  - window_id
+  - state_ts
+  - service_date
+  - time_band
+  - evaluation_horizon_minutes
+  - qwen_trigger_rate
+  - effective_replay_step_minutes
+  - headway_mean_seconds
+  - headway_std_seconds
+  - headway_sample_count
+  - bunching_event_count
+  - headway_event_count
+  - wait_total_passenger_seconds
+  - wait_passenger_count
+  - ontime_event_count
+  - schedulable_arrival_count
+  - intervention_count
+  - decision_step_count
+  - energy_proxy_total
+  - source_mode
+notes:
+- B0_historical_observed must remain unchanged.
+- B0R_current_ops_reconstructed is a simulated causal baseline, not an observed historical
+  baseline.
+- The first smoke target is 1 window x 1 seed before any full-year execution.
+- Official comparison must be performed through canonical_kpi_aggregator.py.
+feature_weight_profile:
+  path: 05_training/configs/feature_weight_profile_v1.yaml
+  artifact_version: feature_weight_profile_v1
+  profile_name: operational_pressure_feature_weights
+  pressure_score_formula: 100 * demand_pressure * (1 + 0.2 * time_context)
+  status: ADOPTED
+shared_exogenous_demand_profile:
+  path: 05_training/configs/shared_exogenous_demand_profile_v1.yaml
+  artifact_version: shared_exogenous_demand_profile_v1
+  profile_name: empirical_2023_time_band_demand_profile
+  status: ADOPTED_EMPIRICAL
+  condition_specific_demand_allowed: false

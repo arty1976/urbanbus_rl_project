@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
+
+import pandas as pd
+
+try:
+    import yaml
+except Exception as exc:
+    raise SystemExit(f"[FAIL] PyYAML import failed: {exc}")
+
+
+REQUIRED_WINDOW_ROLLUP_COLUMNS = [
+    "condition_id",
+    "seed",
+    "window_id",
+    "state_ts",
+    "service_date",
+    "time_band",
+    "evaluation_horizon_minutes",
+    "qwen_trigger_rate",
+    "effective_replay_step_minutes",
+    "headway_mean_seconds",
+    "headway_std_seconds",
+    "headway_sample_count",
+    "bunching_event_count",
+    "headway_event_count",
+    "wait_total_passenger_seconds",
+    "wait_passenger_count",
+    "ontime_event_count",
+    "schedulable_arrival_count",
+    "intervention_count",
+    "decision_step_count",
+    "energy_proxy_total",
+    "source_mode",
+]
+
+
+CONDITION_KEY_BY_ID = {
+    "B0R": "B0R_current_ops_reconstructed",
+    "B1": "B1_noop",
+    "B2": "B2_rulebased",
+    "A": "A_pure_mappo",
+}
+
+
+def load_json(path: Path) -> Dict[str, Any]:
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with path.open("r", encoding=enc) as f:
+                return json.load(f)
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"failed to read json: {path}")
+
+
+def load_yaml(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8-sig") as f:
+        return yaml.safe_load(f)
+
+
+def dump_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def validate_contract(contract: Dict[str, Any]) -> None:
+    expected_kpis = [
+        "cv_headway",
+        "avg_wait_seconds",
+        "bunching_rate",
+        "on_time_rate",
+        "intervention_rate",
+        "energy_proxy",
+    ]
+    if contract.get("shared_kpis") != expected_kpis:
+        raise RuntimeError(f"shared_kpis mismatch: {contract.get('shared_kpis')}")
+
+    if int(contract.get("evaluation_horizon_minutes", -1)) != 30:
+        raise RuntimeError("evaluation_horizon_minutes must be 30")
+
+    fairness = contract.get("fairness_constraints", {})
+    for key in ["same_initial_state", "same_exogenous_events", "same_eval_window"]:
+        if fairness.get(key) is not True:
+            raise RuntimeError(f"fairness constraint must be true: {key}")
+
+
+def validate_scenario_index(df: pd.DataFrame) -> None:
+    required = ["window_id", "state_ts", "service_date", "time_band"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"scenario_index missing columns: {missing}")
+    if df.empty:
+        raise RuntimeError("scenario_index is empty")
+
+
+def build_adapter_config(
+    *,
+    condition_id: str,
+    contract: Dict[str, Any],
+    policy_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    condition_key = CONDITION_KEY_BY_ID.get(condition_id)
+    if not condition_key:
+        raise RuntimeError(f"unsupported condition_id: {condition_id}")
+
+    condition = contract["conditions"][condition_key]
+
+    operation = policy_cfg.get("operation", {})
+    fleet = policy_cfg.get("fleet", {})
+    headway = policy_cfg.get("headway", {})
+    kpi = policy_cfg.get("kpi", {})
+    action_space = policy_cfg.get("action_space", {})
+
+    feature_profile = policy_cfg.get("feature_weight_profile", {})
+    feature_profile_path = (
+        feature_profile.get("path")
+        or contract.get("input_artifacts", {}).get("feature_weight_profile", "")
+    )
+
+    target_headway_by_time_band = headway.get(
+        "target_headway_seconds",
+        {
+            "peak": 600,
+            "offpeak": 900,
+            "night": 1200,
+        },
+    )
+
+    cfg = {
+        "feature_weight_profile_path": feature_profile_path,
+        "condition_id": condition["condition_id"],
+        "condition_name": condition.get("condition_name", condition_id),
+        "source_mode": condition["source_mode"],
+        "num_agents": int(policy_cfg.get("num_agents", 10)),
+        "num_nodes": int(policy_cfg.get("num_nodes", 4116)),
+        "num_edges": int(policy_cfg.get("num_edges", 5484)),
+        "evaluation_horizon_minutes": int(contract["evaluation_horizon_minutes"]),
+        "sim_step_seconds": int(contract["sim_step_seconds"]),
+        "decision_interval_seconds": int(contract["decision_interval_seconds"]),
+        "bus_capacity": int(fleet.get("bus_capacity", 70)),
+        "target_headway_by_time_band": target_headway_by_time_band,
+        "target_headway_seconds": float(target_headway_by_time_band.get("offpeak", 900)),
+        "allow_hold": bool(operation.get("allow_hold", False)),
+        "allow_skip": bool(operation.get("allow_skip", False)),
+        "allow_dispatch": bool(operation.get("allow_dispatch", False)),
+        "hold_buckets_seconds": list(action_space.get("hold_buckets_seconds", [0, 30, 60, 120])),
+        "dispatch_top_k": int(action_space.get("dispatch_top_k", 0)),
+        "bunching_threshold_seconds": float(kpi.get("bunching_threshold_seconds", 180)),
+        "bunching_threshold_ratio": float(kpi.get("bunching_threshold_ratio", 0.75)),
+        "on_time_tolerance_seconds": float(kpi.get("on_time_tolerance_seconds", 120)),
+    }
+
+    # B0R must remain fixed-route reconstructed baseline without control actions.
+    if condition_id == "B0R":
+        for key in ["allow_hold", "allow_skip", "allow_dispatch"]:
+            if cfg[key] is not False:
+                raise RuntimeError(f"B0R must have {key}=false")
+
+    # B2 is the rule-based control baseline.
+    # It uses pressure_score-based action selection in this Step-12 runner.
+    if condition_id == "B2":
+        rule_params = condition.get("rule_params", {})
+        cfg["allow_hold"] = bool(float(rule_params.get("max_hold_seconds", 0)) > 0)
+        cfg["allow_skip"] = bool(rule_params.get("allow_skip", True))
+        cfg["allow_dispatch"] = False
+        cfg["target_headway_seconds"] = float(rule_params.get("target_headway_seconds", 600))
+        cfg["low_headway_threshold_seconds"] = float(rule_params.get("low_headway_threshold_seconds", 360))
+        cfg["high_headway_threshold_seconds"] = float(rule_params.get("high_headway_threshold_seconds", 900))
+        cfg["max_hold_seconds"] = float(rule_params.get("max_hold_seconds", 120))
+
+    return cfg
+
+
+def scenario_row_to_config(row: pd.Series) -> Dict[str, Any]:
+    return {
+        "window_id": str(row["window_id"]),
+        "state_ts": str(row["state_ts"]),
+        "service_date": str(row["service_date"]),
+        "time_band": str(row["time_band"]).strip().lower(),
+        "initial_waiting_passengers": 10.0,
+    }
+
+
+def build_proceed_actions(agent_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    return {
+        int(agent_id): {
+            "action_type": 0,
+            "hold_bucket": 0,
+            "pressure_score": 0.0,
+            "pressure_rank": -1,
+            "rule_reason": "proceed_default",
+        }
+        for agent_id in agent_ids
+    }
+
+
+def extract_pressure_scores(obs: Dict[str, Any], agent_ids: List[int]) -> Dict[int, float]:
+    """
+    actor_obs[:, 5] contains pressure_score / 120.0 from CausalSimulatorAdapter.
+    Recover nominal pressure_score for rule-based action selection.
+    """
+    actor_obs = obs.get("actor_obs")
+    out: Dict[int, float] = {}
+
+    for idx, agent_id in enumerate(agent_ids):
+        try:
+            out[int(agent_id)] = float(actor_obs[idx, 5]) * 120.0
+        except Exception:
+            out[int(agent_id)] = 0.0
+
+    return out
+
+
+def pressure_ranks_desc(pressure_scores: Dict[int, float]) -> Dict[int, int]:
+    ordered = sorted(
+        pressure_scores.items(),
+        key=lambda kv: (-float(kv[1]), int(kv[0])),
+    )
+    return {int(agent_id): rank + 1 for rank, (agent_id, _) in enumerate(ordered)}
+
+
+def build_policy_actions(
+    *,
+    condition_id: str,
+    agent_ids: List[int],
+    sim_step_idx: int,
+    obs: Dict[str, Any],
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Step-12 policy action generator.
+
+    B0R/B1/A:
+      proceed-only at this skeleton stage.
+
+    B2:
+      pressure_score-based rule controller.
+      - highest pressure agent: hold 60 sec
+      - lowest pressure agent: occasional skip
+      - others: proceed
+    """
+    cid = str(condition_id).upper()
+    actions = build_proceed_actions(agent_ids)
+
+    pressure_scores = extract_pressure_scores(obs, agent_ids)
+    ranks = pressure_ranks_desc(pressure_scores)
+
+    for agent_id in agent_ids:
+        actions[int(agent_id)]["pressure_score"] = float(pressure_scores.get(int(agent_id), 0.0))
+        actions[int(agent_id)]["pressure_rank"] = int(ranks.get(int(agent_id), -1))
+
+    if cid != "B2":
+        return actions
+
+    if not agent_ids:
+        return actions
+
+    high_agent = max(
+        agent_ids,
+        key=lambda aid: (float(pressure_scores.get(int(aid), 0.0)), -int(aid)),
+    )
+    low_agent = min(
+        agent_ids,
+        key=lambda aid: (float(pressure_scores.get(int(aid), 0.0)), int(aid)),
+    )
+
+    # High pressure: hold to stabilize headway under pressure-aware rule control.
+    actions[int(high_agent)].update(
+        {
+            "action_type": 1,
+            "hold_bucket": 2,
+            "rule_reason": "high_pressure_hold",
+        }
+    )
+
+    # Low pressure: occasional skip if different from high pressure agent.
+    if len(agent_ids) > 1 and int(low_agent) != int(high_agent) and sim_step_idx % 5 == 0:
+        actions[int(low_agent)].update(
+            {
+                "action_type": 2,
+                "hold_bucket": 0,
+                "rule_reason": "low_pressure_skip",
+            }
+        )
+
+    return actions
+
+
+def run_one_window(adapter: Any, *, seed: int, scenario_config: Dict[str, Any]) -> Dict[str, Any]:
+    obs = adapter.reset(seed=seed, scenario_config=scenario_config)
+    raw_rows: List[Dict[str, Any]] = []
+
+    while True:
+        agent_ids = [int(x) for x in obs["agent_ids"]]
+        actions = build_policy_actions(
+            condition_id=adapter.condition_id,
+            agent_ids=agent_ids,
+            sim_step_idx=int(getattr(adapter, "step_idx", 0)),
+            obs=obs,
+        )
+
+        step_result = adapter.step(actions)
+        info = step_result.info
+
+        for agent_id in agent_ids:
+            action_payload = actions.get(int(agent_id), {"action_type": 0, "hold_bucket": 0})
+            action_type = int(action_payload.get("action_type", 0))
+            raw_rows.append(
+                {
+                    "condition_id": adapter.condition_id,
+                    "seed": int(seed),
+                    "window_id": scenario_config["window_id"],
+                    "state_ts": scenario_config["state_ts"],
+                    "service_date": scenario_config["service_date"],
+                    "time_band": scenario_config["time_band"],
+                    "step_idx": int(info.get("sim_step_idx", 0)),
+                    "sim_elapsed_seconds": int(info.get("sim_elapsed_seconds", 0)),
+                    "agent_id": int(agent_id),
+                    "action_type": action_type,
+                    "hold_bucket": int(action_payload.get("hold_bucket", 0)),
+                    "action_valid": True,
+                    "intervention_applied": bool(action_type != 0),
+                    "pressure_score": float(action_payload.get("pressure_score", 0.0)),
+                    "pressure_rank": int(action_payload.get("pressure_rank", -1)),
+                    "rule_reason": str(action_payload.get("rule_reason", "proceed_default")),
+                    "reward": float(step_result.rewards.get(agent_id, 0.0)),
+                    "terminated": bool(step_result.terminated),
+                    "truncated": bool(step_result.truncated),
+                    "source_mode": adapter.source_mode,
+                }
+            )
+
+        obs = step_result.obs
+
+        if step_result.terminated or step_result.truncated:
+            break
+
+    rollup_row = adapter.build_window_rollup_row(seed=seed)
+    return {
+        "raw_rows": raw_rows,
+        "rollup_row": rollup_row,
+        "kpis": adapter.compute_kpis(),
+    }
+
+
+def validate_window_rollup_df(df: pd.DataFrame, expected_source_mode: str) -> None:
+    missing = [c for c in REQUIRED_WINDOW_ROLLUP_COLUMNS if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"window_rollup missing columns: {missing}")
+
+    if df.empty:
+        raise RuntimeError("window_rollup is empty")
+
+    bad_source = sorted(set(df["source_mode"].astype(str)) - {expected_source_mode})
+    if bad_source:
+        raise RuntimeError(f"unexpected source_mode values: {bad_source}")
+
+    forbidden_tokens = ["historical", "legacy", "stub", "replay", "smoke", "non_causal", "non-causal"]
+    lower_modes = df["source_mode"].astype(str).str.lower()
+    for token in forbidden_tokens:
+        if lower_modes.str.contains(token, regex=False).any():
+            raise RuntimeError(f"source_mode contains non-causal token: {token}")
+
+    if (pd.to_numeric(df["headway_sample_count"], errors="coerce") <= 0).any():
+        raise RuntimeError("headway_sample_count must be positive")
+
+    if (pd.to_numeric(df["decision_step_count"], errors="coerce") <= 0).any():
+        raise RuntimeError("decision_step_count must be positive")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Phase-2 causal rollout runner skeleton"
+    )
+    parser.add_argument("--contract", required=True)
+    parser.add_argument("--condition-id", required=True, choices=["B0R", "B1", "B2", "A"])
+    parser.add_argument("--policy-config", required=True)
+    parser.add_argument("--scenario-index", required=True)
+    parser.add_argument("--output-root", required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument(
+        "--simulator-adapter",
+        default="adapters.causal_simulator_adapter.CausalSimulatorAdapter",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    project_root = Path.cwd()
+    training_dir = project_root / "05_training"
+    if str(training_dir) not in sys.path:
+        sys.path.insert(0, str(training_dir))
+
+    from simulator_adapter_interface import load_adapter_class
+
+    contract_path = Path(args.contract)
+    policy_config_path = Path(args.policy_config)
+    scenario_index_path = Path(args.scenario_index)
+    output_root = Path(args.output_root)
+
+    if not contract_path.exists():
+        raise SystemExit(f"[FAIL] contract not found: {contract_path}")
+    if not policy_config_path.exists():
+        raise SystemExit(f"[FAIL] policy config not found: {policy_config_path}")
+    if not scenario_index_path.exists():
+        raise SystemExit(f"[FAIL] scenario index not found: {scenario_index_path}")
+
+    contract = load_json(contract_path)
+    policy_cfg = load_yaml(policy_config_path)
+
+    validate_contract(contract)
+
+    scenario_df = pd.read_parquet(scenario_index_path).copy()
+    validate_scenario_index(scenario_df)
+
+    if args.limit and args.limit > 0:
+        scenario_df = scenario_df.head(args.limit).copy()
+
+    if scenario_df.empty:
+        raise SystemExit("[FAIL] no scenarios selected")
+
+    adapter_cls = load_adapter_class(args.simulator_adapter)
+    adapter_config = build_adapter_config(
+        condition_id=args.condition_id,
+        contract=contract,
+        policy_cfg=policy_cfg,
+    )
+
+    seed_dir = output_root / "rollouts" / f"seed_{int(args.seed):03d}"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    all_raw_rows: List[Dict[str, Any]] = []
+    all_rollup_rows: List[Dict[str, Any]] = []
+
+    adapter = adapter_cls(adapter_config)
+
+    try:
+        for row in scenario_df.itertuples(index=False):
+            row_series = pd.Series(row._asdict())
+            scenario_config = scenario_row_to_config(row_series)
+
+            result = run_one_window(
+                adapter,
+                seed=int(args.seed),
+                scenario_config=scenario_config,
+            )
+
+            all_raw_rows.extend(result["raw_rows"])
+            all_rollup_rows.append(result["rollup_row"])
+    finally:
+        adapter.close()
+
+    raw_df = pd.DataFrame(all_raw_rows)
+    rollup_df = pd.DataFrame(all_rollup_rows)
+
+    expected_source_mode = adapter_config["source_mode"]
+    validate_window_rollup_df(rollup_df, expected_source_mode)
+
+    raw_events_path = seed_dir / "raw_events.parquet"
+    window_rollup_path = seed_dir / "window_rollup.parquet"
+    manifest_path = seed_dir / "run_manifest.json"
+    status_path = seed_dir / "status.json"
+
+    raw_df.to_parquet(raw_events_path, index=False)
+    rollup_df.to_parquet(window_rollup_path, index=False)
+
+    manifest = {
+        "artifact_version": "causal_rollout_runner_step12_pressure_rulebased_v1",
+        "condition_id": args.condition_id,
+        "seed": int(args.seed),
+        "contract_path": str(contract_path),
+        "policy_config_path": str(policy_config_path),
+        "scenario_index_path": str(scenario_index_path),
+        "output_root": str(output_root),
+        "simulator_adapter": args.simulator_adapter,
+        "adapter_config": adapter_config,
+        "scenario_count_used": int(len(rollup_df)),
+        "raw_event_rows": int(len(raw_df)),
+        "window_rollup_rows": int(len(rollup_df)),
+        "output_files": {
+            "raw_events": str(raw_events_path),
+            "window_rollup": str(window_rollup_path),
+            "run_manifest": str(manifest_path),
+            "status": str(status_path),
+        },
+        "note": (
+            "Step-12 causal runner. B2 rule-based actions are selected from "
+            "pressure_score_v1 ranks. This is still skeleton-stage, not full city-scale simulation."
+        ),
+    }
+
+    status = {
+        "status": "smoke_completed",
+        "condition_id": args.condition_id,
+        "seed": int(args.seed),
+        "source_mode": expected_source_mode,
+        "causal_comparison_allowed_expected": True,
+        "scenario_count_used": int(len(rollup_df)),
+        "raw_event_rows": int(len(raw_df)),
+        "window_rollup_rows": int(len(rollup_df)),
+    }
+
+    dump_json(manifest_path, manifest)
+    dump_json(status_path, status)
+
+    print("[OK] causal rollout completed")
+    print(f"[OK] condition_id      : {args.condition_id}")
+    print(f"[OK] seed              : {int(args.seed):03d}")
+    print(f"[OK] source_mode       : {expected_source_mode}")
+    print(f"[OK] scenario_count    : {len(rollup_df)}")
+    print(f"[OK] raw_events        : {raw_events_path}")
+    print(f"[OK] window_rollup     : {window_rollup_path}")
+    print(f"[OK] run_manifest      : {manifest_path}")
+    print(f"[OK] status            : {status_path}")
+    print("SMOKE PASS")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,58 @@
+artifact_version: shared_exogenous_demand_profile_v1
+phase: Phase-2
+profile_name: empirical_2023_time_band_demand_profile
+status: ADOPTED_EMPIRICAL
+source:
+  relation: public.gatv2_snapshot_stop_features_train_mat
+  source_mode: direct_state_ts
+  scenario_index: artifacts/baseline_v1/B1_noop/scenario_index.parquet
+  join_variant: wall_time_naive
+  boardings_column: boardings_recent_log
+  boardings_column_kind: precomputed_log1p
+  waiting_column: waiting_passenger_cnt_log
+  waiting_column_kind: precomputed_log1p
+  alightings_column: alightings_recent_log
+  alightings_column_kind: precomputed_log1p
+  column_inspection_report: artifacts/baseline_v2_causal/demand_profile/source_column_inspection_step14.json
+method:
+  demand_intensity_formula: 0.6 * mean(log1p(boardings_recent)) + 0.4 * mean(log1p(waiting_passenger_cnt))
+  normalization: night = 1.0; offpeak/peak are divided by night demand_intensity
+  condition_specific_demand_allowed: false
+arrival_multiplier_by_time_band:
+  night: 1.0
+  offpeak: 0.764451
+  peak: 0.977582
+empirical_summary_by_time_band:
+- time_band: night
+  row_count: 4505771
+  matched_snapshot_count: 1459
+  mean_log1p_boardings_recent: 1.398332637868369
+  mean_log1p_waiting_passenger_cnt: 1.0508367935976972
+  mean_log1p_alightings_recent: 0.9090582037913629
+  demand_intensity: 1.2593343001601003
+  arrival_multiplier_vs_night: 1.0
+- time_band: offpeak
+  row_count: 4505771
+  matched_snapshot_count: 1459
+  mean_log1p_boardings_recent: 1.0494586899025482
+  mean_log1p_waiting_passenger_cnt: 0.8325596422309784
+  mean_log1p_alightings_recent: 0.5813056043833679
+  demand_intensity: 0.9626990708339203
+  arrival_multiplier_vs_night: 0.764451
+- time_band: peak
+  row_count: 4505771
+  matched_snapshot_count: 1459
+  mean_log1p_boardings_recent: 1.367770646969185
+  mean_log1p_waiting_passenger_cnt: 1.0261006296636264
+  mean_log1p_alightings_recent: 0.8903918524025538
+  demand_intensity: 1.2311026400469616
+  arrival_multiplier_vs_night: 0.977582
+constraints:
+  same_profile_for_conditions:
+  - B0R_current_ops_reconstructed
+  - B1_noop
+  - B2_rulebased
+  - A_pure_mappo
+  same_exogenous_events: true
+  condition_specific_demand_allowed: false
+  post_hoc_tuning_allowed: false

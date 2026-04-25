@@ -1,0 +1,98 @@
+artifact_version: feature_weight_profile_v1
+phase: Phase-2
+profile_name: operational_pressure_feature_weights
+scale: 1_to_5
+scale_description: Integer feature importance scale where 1 means lowest operational
+  weight and 5 means highest operational weight.
+decision:
+  status: ADOPTED
+  adopted_as: phase2_pressure_score_v1
+  method: demand_pressure_times_time_context_multiplier
+  post_hoc_tuning_allowed: false
+feature_weights:
+  waiting_passenger_cnt:
+    weight: 5
+    role: primary_pressure_signal
+    group: demand_pressure
+  boardings_recent:
+    weight: 3
+    role: observed_demand_confirmation
+    group: demand_pressure
+  alightings_recent:
+    weight: 2
+    role: capacity_management_signal
+    group: demand_pressure
+  is_peak:
+    weight: 4
+    role: peak_context_multiplier
+    group: time_context
+  hour_of_day:
+    weight: 4
+    role: hourly_pattern_context
+    group: time_context
+  day_of_week:
+    weight: 4
+    role: weekly_pattern_context
+    group: time_context
+normalization:
+  method: log1p_cap
+  caps:
+    waiting_passenger_cnt: 50
+    boardings_recent: 30
+    alightings_recent: 30
+  clip_to_0_1: true
+  note: Weights must be applied after normalization, not directly to raw counts.
+pressure_score_v1:
+  formula_name: demand_pressure_times_time_context_multiplier
+  demand_pressure:
+    formula: (5*waiting_norm + 3*boarding_norm + 2*alighting_norm) / 10
+    weight_sum: 10
+  time_context:
+    formula: (4*is_peak + 4*hour_pattern_score + 4*day_pattern_score) / 12
+    weight_sum: 12
+  final_pressure_score:
+    formula: 100 * demand_pressure * (1 + 0.2 * time_context)
+    time_context_max_boost_ratio: 0.2
+    score_range_nominal: 0_to_120
+    interpretation: Demand pressure remains primary. Time context can boost the score
+      by up to 20 percent, but cannot dominate passenger pressure.
+example_validation:
+  example_1_non_peak_high_wait:
+    inputs:
+      waiting_passenger_cnt: 40
+      boardings_recent: 12
+      alightings_recent: 4
+      is_peak: 0
+      hour_pattern_score: 0.4
+      day_pattern_score: 0.7
+    expected_pressure_score_approx: 84.8
+  example_2_peak_medium_wait:
+    inputs:
+      waiting_passenger_cnt: 15
+      boardings_recent: 10
+      alightings_recent: 8
+      is_peak: 1
+      hour_pattern_score: 0.9
+      day_pattern_score: 0.8
+    expected_pressure_score_approx: 81.4
+usage_plan:
+  causal_simulator:
+    use_for_pressure_score: true
+    use_for_dispatch_candidate_ranking: true
+    use_for_local_demand_pressure: true
+    apply_stage: after_B0R_B1_B2_skeleton_smoke
+  mappo:
+    use_for_observation_scaling: true
+    use_for_reward_shaping: true
+    apply_after_skeleton_smoke: true
+  gatv2:
+    use_for_loss_weighting: false
+    note: Do not change supervised GATv2 loss weighting at this step.
+constraints:
+  same_profile_for_conditions:
+  - B0R_current_ops_reconstructed
+  - B1_noop
+  - B2_rulebased
+  - A_pure_mappo
+  profile_must_be_version_pinned: true
+  post_hoc_tuning_allowed: false
