@@ -2,7 +2,7 @@
 Self-test for Step 30 A-family bridge canonical smoke.
 
 Run:
-    python .\05_training\evaluation\test_a_family_bridge_canonical_smoke_v1.py
+    python ./05_training/evaluation\test_a_family_bridge_canonical_smoke_v1.py
 """
 
 from __future__ import annotations

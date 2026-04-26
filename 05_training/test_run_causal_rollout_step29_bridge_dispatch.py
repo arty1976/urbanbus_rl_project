@@ -2,7 +2,7 @@
 Self-test for Step 29 run_causal_rollout.py bridge dispatch.
 
 Run:
-    python .\05_training\test_run_causal_rollout_step29_bridge_dispatch.py
+    python ./05_training/test_run_causal_rollout_step29_bridge_dispatch.py
 """
 
 from __future__ import annotations

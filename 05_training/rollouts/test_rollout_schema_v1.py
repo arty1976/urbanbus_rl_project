@@ -2,7 +2,7 @@
 Self-test for rollout_schema_v1.py.
 
 Run:
-    python .\05_training\rollouts\test_rollout_schema_v1.py
+    python ./05_training/rollouts\test_rollout_schema_v1.py
 """
 
 from rollout_schema_v1 import (

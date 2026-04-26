@@ -2,7 +2,7 @@
 Self-test for a_family_rollout_bridge_v1.py.
 
 Run:
-    python .\05_training\rollouts\test_a_family_rollout_bridge_v1.py
+    python ./05_training/rollouts\test_a_family_rollout_bridge_v1.py
 """
 
 from a_family_rollout_bridge_v1 import (

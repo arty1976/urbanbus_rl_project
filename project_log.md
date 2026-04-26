@@ -1258,3 +1258,137 @@ Phase 4(`graph_state_timeslice` 적재)와 Phase 5(`rl_state_training_base` 생�
 - **`.agents/skills/data-contract-audit-skill`** [신규]: 데이터 계약 오딧 스킬.
 
 ---
+
+---
+## 📅 2026-04-26
+### Phase 2 Step 21~31 MAPPO Reward and A-family Rollout Bridge
+
+오늘 작업에서는 기존 A/A90/A80/A70 placeholder 정책을 실제 MAPPO 연결 준비 단계로 승격하기 위한 보상 계약, rollout schema, policy boundary, bridge runner, canonical KPI smoke 경로를 단계적으로 구축했다.
+
+#### 1. Step 21 — MAPPO reward contract v1 추가
+- 생성 경로: `05_training/rewards/`
+- 핵심 파일:
+  - `mappo_reward_v1.py`
+  - `reward_config_v1.yaml`
+  - `README_reward_contract.md`
+  - `test_mappo_reward_v1.py`
+- 설계 원칙:
+  - 서비스 품질 우선
+  - 평균 대기시간과 p95 long-wait penalty 분리
+  - `energy_proxy` 단독 최적화 금지
+  - `energy_proxy_per_passenger` 기준 에너지 효율 평가
+  - `fleet_reduction_ratio`는 보너스이며 hard objective가 아님
+  - A 계열에서 `qwen_trigger_rate=0.0` 강제
+
+#### 2. Step 22 — rollout schema contract v1 추가
+- 생성 경로: `05_training/rollouts/`
+- 핵심 파일:
+  - `rollout_schema_v1.py`
+  - `README_rollout_schema.md`
+  - `test_rollout_schema_v1.py`
+- 확정된 extended rollout 필드:
+  - `passenger_demand_generated`
+  - `passenger_served_count`
+  - `passenger_service_rate`
+  - `passenger_wait_p95_seconds`
+  - `energy_proxy_per_passenger`
+  - `active_bus_count`
+  - `baseline_bus_count`
+  - `fleet_reduction_ratio`
+  - `policy_source`
+  - `policy_checkpoint_path`
+  - `source_mode`
+  - reward component fields
+
+#### 3. Step 23 — policy registry contract v1 추가
+- 생성 경로: `05_training/policies/`
+- 핵심 파일:
+  - `policy_registry_v1.py`
+  - `README_policy_registry.md`
+  - `test_policy_registry_v1.py`
+- 정책 종류를 `noop`, `rulebased`, `placeholder`, `mappo`로 분리.
+- 실제 MAPPO 정책은 checkpoint가 없으면 실패하도록 설계.
+- placeholder가 actual MAPPO로 조용히 대체되는 fallback을 금지.
+
+#### 4. Step 24 — policy inference boundary v1 추가
+- 핵심 파일:
+  - `policy_inference_boundary_v1.py`
+  - `README_policy_inference_boundary.md`
+  - `test_policy_inference_boundary_v1.py`
+- A/A90/A80/A70에서 Qwen 개입 금지.
+- 실제 MAPPO 추론 경로는 checkpoint path를 반드시 요구.
+- 논문용 causal claim 가능 여부를 boundary 수준에서 분리.
+
+#### 5. Step 25 — A-family rollout bridge v1 추가
+- 핵심 파일:
+  - `a_family_rollout_bridge_v1.py`
+  - `README_a_family_rollout_bridge.md`
+  - `test_a_family_rollout_bridge_v1.py`
+- 한 개 scenario row를 A/A90/A80/A70 rollout row로 변환하는 bridge 생성.
+- reward contract, rollout schema, policy boundary를 단일 row 생성 경로에서 통합.
+
+#### 6. Step 26 — A-family bridge smoke runner v1 추가
+- 핵심 파일:
+  - `run_a_family_bridge_smoke_v1.py`
+  - `README_a_family_bridge_smoke_runner.md`
+  - `test_a_family_bridge_smoke_runner_v1.py`
+- A/A90/A80/A70 4조건 row를 한 번에 생성하고 검증.
+- smoke artifact는 Git 커밋 대상에서 제외.
+
+#### 7. Step 27 — A-family scenario rollout writer v1 추가
+- 핵심 파일:
+  - `run_a_family_scenario_rollout_writer_v1.py`
+  - `README_a_family_scenario_rollout_writer.md`
+  - `test_a_family_scenario_rollout_writer_v1.py`
+- `scenario_index.parquet`를 입력으로 받아 A/A90/A80/A70 조건별 `window_rollup` 구조를 생성.
+- 실제 B1_noop scenario index 기반 smoke 통과.
+
+#### 8. Step 28 — root A-family rollout bridge entrypoint 추가
+- 핵심 파일:
+  - `run_causal_rollout_a_family_bridge_v1.py`
+  - `README_run_causal_rollout_a_family_bridge.md`
+  - `test_run_causal_rollout_a_family_bridge_v1.py`
+- `05_training/` 루트에서 A-family bridge를 실행하는 엔트리포인트 추가.
+- 아직 기존 `run_causal_rollout.py`는 직접 수정하지 않는 안전 검증 단계로 사용.
+
+#### 9. Step 29 — run_causal_rollout.py bridge dispatch 추가
+- `run_causal_rollout.py`에 `--a-family-bridge` 옵션 기반 dispatch 추가.
+- 기존 causal rollout 실행 경로는 유지.
+- `--a-family-bridge`가 명시된 경우에만 Step 28 bridge entrypoint로 위임.
+
+#### 10. Step 30 — A-family bridge canonical KPI smoke 추가
+- 핵심 파일:
+  - `run_a_family_bridge_canonical_smoke_v1.py`
+  - `README_a_family_bridge_canonical_smoke.md`
+  - `test_a_family_bridge_canonical_smoke_v1.py`
+- 검증 경로:
+  - `run_causal_rollout.py --a-family-bridge`
+  - A/A90/A80/A70 `window_rollup` 생성
+  - `canonical_kpi_aggregator.py --mode official_rollup`
+  - condition별 `canonical_eval` 산출물 생성
+- 결과: smoke self-test와 CLI smoke 모두 PASS.
+
+#### 11. Step 31 — cleanup and log update
+- Step 26~30 smoke artifact 디렉터리 정리.
+- Windows path docstring으로 인한 `SyntaxWarning: invalid escape sequence` 제거.
+- Step 21~30 집중 regression test 재실행.
+- `project_log.md`에 Phase 2 reward/bridge 구축 내역 반영.
+
+#### 현재 의미
+A 계열 정책은 아직 실제 학습된 MAPPO inference가 아니다. 그러나 이제 다음 경계가 모두 마련되었다.
+
+1. reward contract
+2. rollout schema contract
+3. policy registry
+4. policy inference boundary
+5. A-family rollout bridge
+6. scenario-index writer
+7. root bridge entrypoint
+8. `run_causal_rollout.py --a-family-bridge` dispatch
+9. canonical KPI aggregator smoke path
+
+#### 다음 단계
+- 실제 MAPPO checkpoint가 생성되면 `--policy-kind mappo --checkpoint-path ...` 경로로 A/A90/A80/A70 rollout을 실행한다.
+- 이후 `run_causal_rollout.py` 내부의 placeholder A-family 경로를 actual MAPPO inference 경로로 단계적으로 교체한다.
+- 논문용 성능 주장은 `source_mode=causal_*`이며 actual checkpoint가 연결된 결과에 한해 사용한다.
+

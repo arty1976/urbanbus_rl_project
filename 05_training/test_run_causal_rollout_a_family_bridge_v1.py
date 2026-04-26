@@ -2,7 +2,7 @@
 Self-test for run_causal_rollout_a_family_bridge_v1.py.
 
 Run:
-    python .\05_training\test_run_causal_rollout_a_family_bridge_v1.py
+    python ./05_training/test_run_causal_rollout_a_family_bridge_v1.py
 """
 
 import shutil

@@ -2,7 +2,7 @@
 Self-test for mappo_reward_v1.py.
 
 Run:
-    python .\05_training\rewards\test_mappo_reward_v1.py
+    python ./05_training/rewards\test_mappo_reward_v1.py
 """
 
 from mappo_reward_v1 import compute_total_reward

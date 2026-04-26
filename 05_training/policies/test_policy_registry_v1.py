@@ -2,7 +2,7 @@
 Self-test for policy_registry_v1.py.
 
 Run:
-    python .\05_training\policies\test_policy_registry_v1.py
+    python ./05_training/policies\test_policy_registry_v1.py
 """
 
 from policy_registry_v1 import (

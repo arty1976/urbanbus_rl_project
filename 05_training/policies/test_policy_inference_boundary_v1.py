@@ -2,7 +2,7 @@
 Self-test for policy_inference_boundary_v1.py.
 
 Run:
-    python .\05_training\policies\test_policy_inference_boundary_v1.py
+    python ./05_training/policies\test_policy_inference_boundary_v1.py
 """
 
 from policy_inference_boundary_v1 import (

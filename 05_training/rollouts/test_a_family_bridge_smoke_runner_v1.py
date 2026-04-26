@@ -2,7 +2,7 @@
 Self-test for run_a_family_bridge_smoke_v1.py.
 
 Run:
-    python .\05_training\rollouts\test_a_family_bridge_smoke_runner_v1.py
+    python ./05_training/rollouts\test_a_family_bridge_smoke_runner_v1.py
 """
 
 import shutil
