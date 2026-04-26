@@ -1,4 +1,4 @@
-## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+﻿## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
 
 ### 1. Phase 2 causal simulator 구조 확장
 Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
@@ -33,7 +33,86 @@ demand_intensity =
 산출된 arrival_multiplier_by_time_band는 다음과 같다.
 
 | time_band | demand_intensity | multiplier_vs_night |
-|---|---:|---:|
+|---
+
+## 📅 2026-04-26
+### Step 40 actual neural MAPPO inference adapter 자리 생성
+
+오늘 작업에서는 Step 39까지 완료된 actual-inference preparation progress 위에, Step 40으로 **actual neural MAPPO inference adapter**가 들어갈 자리를 만들었다.  
+이번 단계의 목표는 아직 학습된 MAPPO 체크포인트를 붙이는 것이 아니라, 향후 실제 신경망 정책 체크포인트가 들어왔을 때 같은 인터페이스로 추론을 수행할 수 있는 **정식 어댑터 껍데기와 smoke 검증 경로**를 먼저 고정하는 것이다.
+
+#### 1. 시작 상태
+- Step 39까지 완료.
+- `project_log.md`에 Step 32~39 actual-inference preparation progress 기록 완료.
+- GitHub main 최신 기준 커밋:
+  - `dfd24db Document MAPPO actual-inference preparation progress`
+- 다음 목표:
+  - Step 40부터 actual neural MAPPO inference adapter 자리 만들기.
+
+#### 2. Step 40 신규 파일 생성
+- 신규 파일:
+  - `05_training/policies/mappo_neural_inference_adapter.py`
+  - `05_training/run_experiment_A_neural_inference_smoke.py`
+- 보조 생성/확인:
+  - `05_training/policies/__init__.py`
+
+#### 3. `mappo_neural_inference_adapter.py` 역할
+- MAPPO (Multi-Agent Proximal Policy Optimization=다중 에이전트 근접 정책 최적화) 정책의 실제 추론 어댑터 자리 생성.
+- `NeuralMAPPOInferenceAdapter` 클래스 추가.
+- `ActorCriticMLP` 기반 actor-critic 구조 추가.
+- 현재는 checkpoint가 없어도 smoke test가 가능하도록 random-initialized policy를 허용.
+- 향후 실제 학습 checkpoint가 생기면 `--checkpoint-path`로 로드 가능하도록 설계.
+- action mask, active bus mask, agent_ids를 모두 검증.
+- Qwen 개입률은 [A] 조건 기준으로 항상 `0.0` 유지.
+
+#### 4. `run_experiment_A_neural_inference_smoke.py` 역할
+- Experiment A 계약 검증:
+  - `condition_id = A`
+  - `qwen_train = false`
+  - `qwen_inference = false`
+  - `evaluation_horizon_minutes = 30`
+- `HistoricalReplayAdapter`를 통해 관측값을 받아 neural MAPPO adapter에 전달.
+- adapter가 action을 생성하고, 이를 simulator adapter의 `step()`에 전달하는 경로를 검증.
+- 산출물 생성 위치:
+  - `artifacts/experiment_A_v1/neural_inference_smoke/seed_001/status.json`
+  - `artifacts/experiment_A_v1/neural_inference_smoke/seed_001/actions_preview.json`
+  - `artifacts/experiment_A_v1/neural_inference_smoke/seed_001/neural_inference_manifest.json`
+
+#### 5. 중요한 해석
+- 이번 Step 40은 **성능 평가 단계가 아니다.**
+- 현재 HistoricalReplayAdapter는 비인과적 replay adapter이므로 action이 다음 상태를 실제로 바꾸지 않는다.
+- 따라서 이번 산출물은 “actual neural MAPPO inference adapter가 들어갈 경로가 정상 배선되었는가”를 확인하는 smoke validation이다.
+- 실제 causal performance comparison은 Phase 2 causal simulator adapter 이후에 가능하다.
+
+#### 6. 현재 상태 판정
+- Step 40 범위:
+  - neural MAPPO inference adapter 자리 생성
+  - checkpoint optional loading 구조 생성
+  - Experiment A 계약 검증 연결
+  - adapter → action 생성 → simulator step 호출 경로 smoke 가능
+- 상태:
+  - **Step 40 scaffold ready**
+  - **actual checkpoint integration pending**
+  - **causal evaluation not yet supported**
+
+#### 7. 다음 단계
+1. Step 40 스크립트 실행 결과 확인:
+   - `SMOKE PASS`
+   - `status.json`
+   - `actions_preview.json`
+   - `neural_inference_manifest.json`
+2. Git 상태 확인:
+   - `git status`
+3. Step 40 파일 커밋:
+   - 권장 커밋 메시지:
+     - `Add neural MAPPO inference adapter smoke path`
+4. 다음 Step 41 후보:
+   - 실제 MAPPO policy checkpoint contract 정의
+   - checkpoint 저장 키 표준화
+   - neural adapter와 기존 `mappo_runner.py` 연결
+   - A 조건 rollout writer에서 stub policy를 neural adapter로 교체하는 준비
+
+---|---:|---:|
 | night | 1.259334 | 1.000000 |
 | offpeak | 0.962699 | 0.764451 |
 | peak | 1.231103 | 0.977582 |
@@ -1563,4 +1642,5 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
