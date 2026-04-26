@@ -1,5 +1,34 @@
 from __future__ import annotations
 
+
+# [STEP29_A_FAMILY_BRIDGE_DISPATCH_START]
+def _urbanbus_step29_maybe_dispatch_a_family_bridge():
+    """
+    Dispatch to Step 28 A-family bridge entrypoint only when
+    --a-family-bridge is explicitly provided.
+
+    This keeps the original run_causal_rollout.py path unchanged.
+    """
+    import sys
+    from pathlib import Path
+
+    if "--a-family-bridge" not in sys.argv:
+        return
+
+    sys.argv = [arg for arg in sys.argv if arg != "--a-family-bridge"]
+
+    training_dir = Path(__file__).resolve().parent
+    if str(training_dir) not in sys.path:
+        sys.path.insert(0, str(training_dir))
+
+    from run_causal_rollout_a_family_bridge_v1 import main as _a_family_bridge_main
+
+    raise SystemExit(_a_family_bridge_main())
+
+
+_urbanbus_step29_maybe_dispatch_a_family_bridge()
+# [STEP29_A_FAMILY_BRIDGE_DISPATCH_END]
+
 import argparse
 import json
 import sys
