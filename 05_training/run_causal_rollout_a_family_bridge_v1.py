@@ -191,7 +191,19 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    manifest = run_entry(args)
+    try:
+        manifest = run_entry(args)
+    except FileNotFoundError as exc:
+        print("[STOP] " + str(exc))
+        print("")
+        print("This is expected before actual MAPPO training.")
+        print("No placeholder fallback was used.")
+        return 2
+    except ValueError as exc:
+        print("[STOP] " + str(exc))
+        print("")
+        print("No placeholder fallback was used.")
+        return 2
 
     print("[OK] root A-family bridge entrypoint completed")
     print(f"[OK] output_root     : {args.output_root}")
