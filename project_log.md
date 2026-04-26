@@ -1,282 +1,232 @@
+## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+
+### 1. Phase 2 causal simulator 구조 확장
+Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
+
+- `B0_historical_observed`는 실제 관측 기반 non-causal reference로 보존.
+- `B0R_current_ops_reconstructed`를 새로 분리하여 현재 고정노선 운영을 causal simulator 안에서 재구성하는 기준선으로 정의.
+- B0R/B1/B2/A 계열 모두 `causal_comparison_allowed=true`가 되도록 canonical output 경로 검증.
+- `run_causal_rollout.py`와 `canonical_kpi_aggregator.py`를 통해 causal rollout -> window_rollup -> canonical_eval 경로를 유지.
+
+### 2. Bunching 판정 기준 개선
+기존 고정 180초 기준만으로는 night/offpeak/peak의 target headway 차이를 반영하기 어려워 다음 기준으로 개선하였다.
+
+```text
+effective_bunching_threshold = max(180, target_headway_seconds * 0.75)
+```
+
+Step 13 결과에서 B1의 bunching_rate는 night < offpeak < peak 순으로 증가했고, B2는 B1 대비 bunching_rate를 낮추는 방향으로 작동하였다. 이는 target-headway-ratio 기반 bunching policy가 조건 차이에 민감하게 반응함을 의미한다.
+
+### 3. 2023 observed 기반 empirical shared demand profile 적용
+임시 수요 배율을 사용하지 않고 2023년 대구 observed feature table에서 직접 time_band별 empirical demand profile을 산출하였다.
+
+- source relation: `public.gatv2_snapshot_stop_features_train_mat`
+- 사용 컬럼: `boardings_recent_log`, `waiting_passenger_cnt_log`, `alightings_recent_log`
+- demand_intensity 계산식:
+
+```text
+demand_intensity =
+  0.6 * mean_log1p_boardings_recent
++ 0.4 * mean_log1p_waiting_passenger_cnt
+```
+
+산출된 arrival_multiplier_by_time_band는 다음과 같다.
+
+| time_band | demand_intensity | multiplier_vs_night |
+|---|---:|---:|
+| night | 1.259334 | 1.000000 |
+| offpeak | 0.962699 | 0.764451 |
+| peak | 1.231103 | 0.977582 |
+
+time_band의 KST 기준 정의도 검증하였다.
+
+| time_band | KST 기준 시간 |
+|---|---|
+| peak | 07, 08, 09, 17, 18, 19 |
+| offpeak | 06, 10, 11, 12, 13, 14, 15, 16 |
+| night | 05, 20, 21, 22 |
+
+이 profile은 `shared_exogenous_demand_profile_v1.yaml`로 저장되었고, 모든 causal 조건이 같은 수요 profile을 사용하도록 연결하였다.
+
+### 4. Fleet sensitivity 정책 도입
+A_pure_mappo가 B0R보다 모든 KPI를 압도해야 한다는 가정 대신, 다음 연구 가설을 실험 계약에 반영하였다.
+
+> A_pure_mappo는 B0R 대비 on_time_rate가 약간 낮더라도, 더 적은 active_bus_count와 낮은 energy_proxy로 유사한 passenger_service_rate를 유지할 수 있다면 성공으로 볼 수 있다.
+
+이를 위해 A 계열 fleet variants를 정의하였다.
+
+| 조건 | 의미 | fleet_ratio_vs_b0r |
+|---|---|---:|
+| A | A_pure_mappo_fleet_100 | 1.00 |
+| A90 | A_pure_mappo_fleet_90 | 0.90 |
+| A80 | A_pure_mappo_fleet_80 | 0.80 |
+| A70 | A_pure_mappo_fleet_70 | 0.70 |
+
+성공 조건은 다음 방향으로 정의하였다.
+
+- avg_wait_seconds <= 1.10 × B0R
+- passenger_service_rate >= 0.98 × B0R
+- on_time_rate drop <= 10 percentage points
+- passenger_wait_p95_seconds <= 1.20 × B0R
+- bunching_rate increase <= 5 percentage points
+- energy_proxy는 B0R보다 감소해야 함
+- A90/A80/A70은 실제 fleet reduction을 달성해야 함
+
+### 5. Extended KPI 산출 경로 추가
+기존 shared KPI 6개는 유지하고, fleet 및 passenger service quality를 해석하기 위한 extended KPI를 추가하였다.
+
+기존 shared KPI:
+- cv_headway
+- avg_wait_seconds
+- bunching_rate
+- on_time_rate
+- intervention_rate
+- energy_proxy
+
+추가 extended KPI:
+- active_bus_count
+- base_num_agents_b0r
+- fleet_ratio_vs_b0r
+- fleet_reduction_ratio
+- passengers_served
+- passenger_demand_generated
+- passenger_service_rate
+- passenger_wait_p95_seconds
+- energy_proxy_per_passenger
+- intervention_events
+
+`canonical_kpi_aggregator.py`는 optional extended KPI를 보존하도록 수정되었다.
+
+### 6. Shared demand generation fairness 수정
+Step 18에서 A90/A80/A70의 active_bus_count가 줄면서 `passenger_demand_generated`도 함께 줄어드는 문제가 발견되었다. 이는 fleet reduction 실험에서 공정성 위반이므로 Step 19에서 수정하였다.
+
+수정 후 같은 seed/window/time_band에서는 B0R/B1/B2/A/A90/A80/A70 모두 동일한 generated demand를 받는다.
+
+| window_id | time_band | passenger_demand_generated | label_count |
+|---|---|---:|---:|
+| 1 | night | 520.0 | 7 |
+| 2 | offpeak | 506.0 | 7 |
+| 3 | peak | 523.0 | 7 |
+
+이제 fleet-reduced variants는 같은 수요를 받으면서 더 적은 active_bus_count로 대응하므로, passenger_service_rate와 wait-time KPI를 공정하게 해석할 수 있다.
+
+### 7. Step 20 KPI relationship analyzer 생성
+`05_training/evaluation/analyze_kpi_relationships.py`를 생성하여 다음 분석 결과를 산출하였다.
+
+- KPI label summary
+- Pearson correlation matrix
+- Spearman correlation matrix
+- strong Spearman correlations
+- B0R-relative service constraints
+- Pareto frontier
+- markdown report
+- summary JSON
+
+생성 파일:
+- `artifacts/baseline_v2_causal/analysis/kpi_label_summary.csv`
+- `artifacts/baseline_v2_causal/analysis/kpi_correlation_pearson.csv`
+- `artifacts/baseline_v2_causal/analysis/kpi_correlation_spearman.csv`
+- `artifacts/baseline_v2_causal/analysis/kpi_strong_spearman_correlations.csv`
+- `artifacts/baseline_v2_causal/analysis/b0r_relative_service_constraints.csv`
+- `artifacts/baseline_v2_causal/analysis/kpi_pareto_frontier.csv`
+- `artifacts/baseline_v2_causal/analysis/kpi_relationship_report.md`
+- `artifacts/baseline_v2_causal/analysis/kpi_relationship_analysis_summary.json`
+
+### 8. Step 20 주요 해석
+Step 20 label summary에서 B0R은 서비스 품질이 가장 높고, A는 B0R 대비 energy_proxy와 energy_proxy_per_passenger를 줄이지만 avg_wait_seconds와 p95 wait가 증가하였다.
+
+| label | avg_wait_seconds | p95_wait | service_rate | on_time_rate | energy_proxy | fleet_reduction |
+|---|---:|---:|---:|---:|---:|---:|
+| B0R | 4.021270 | 3.107143 | 1.000000 | 1.000000 | 480.0 | 0.0 |
+| A | 5.701756 | 49.118880 | 0.999044 | 0.928889 | 390.0 | 0.0 |
+| A90 | 24.315487 | 82.747620 | 0.927327 | 0.925926 | 351.0 | 0.1 |
+| A80 | 41.812523 | 372.750000 | 0.868431 | 0.931944 | 312.0 | 0.2 |
+| A70 | 60.062176 | 571.666667 | 0.810445 | 0.923810 | 273.0 | 0.3 |
+| B1 | 31.238253 | 133.822220 | 0.991595 | 0.436667 | 300.0 | 0.0 |
+| B2 | 68.945827 | 1234.000000 | 0.894052 | 0.858889 | 571.0 | 0.0 |
+
+B0R-relative constraint evaluation에서는 모든 조건이 `success_under_fleet_policy=False`로 나타났다. 현재 A 계열은 아직 placeholder policy이며 학습된 MAPPO 결과가 아니므로 성능 결론으로 해석하지 않는다. 다만 실험 구조가 A 정책이 해결해야 할 trade-off를 명확히 드러낸다.
+
+### 9. Qwen 역할 경계
+KPI relationship analyzer와 Qwen의 역할은 분리한다.
+
+- KPI analyzer: deterministic numeric analysis 도구. 공식 KPI 수치, 상관관계, Pareto frontier, B0R-relative constraint를 계산한다.
+- Qwen: analyzer 결과를 읽고 원인 가설, reward shaping 후보, 다음 ablation 설계를 제안하는 해석자 역할을 수행한다.
+- Qwen은 공식 KPI 값을 수정하거나 사후 tuning을 수행하지 않는다.
+- A_pure_mappo 조건에서는 Qwen 개입이 없어야 하며, Qwen 개입 실험은 별도 D 조건에서만 허용한다.
+
+### 10. 다음 단계
+다음 작업은 MAPPO reward 설계와 학습 연결이다.
+
+우선순위:
+1. reward에 avg_wait, p95 wait, passenger_service_rate, energy_proxy, bunching/on_time penalty를 반영.
+2. A/A90/A80/A70 placeholder를 실제 MAPPO policy output으로 교체.
+3. 1 seed × 3 window smoke를 넘어 다중 seed 및 더 많은 windows로 확장.
+4. analyzer 결과를 Qwen 해석 입력으로 사용하되, 공식 KPI 산출과 분리.
+5. A90/A80/A70의 fleet reduction frontier를 정식 실험으로 평가.
+
+중요 caveat:
+현재 A/A90/A80/A70 결과는 학습된 MAPPO 성능 결과가 아니라 skeleton-stage placeholder 결과다. 따라서 논문에는 성능 결론이 아니라 실험 체계, 공정성 제약, KPI 분석 도구의 검증 결과로 기록한다.
 
 ---
 
-## 날짜: 2026-04-25
-### 프로젝트 진행 현황 검토 및 다음 과업 정의
 
-오늘은 신규 구현 없이 4/24까지의 작업 결과를 전체 검토하고 다음 단계 과업을 확정했다.
+# 🚌 UrbanBus RL Project - 작업 일지 (Project Journal)
 
-#### 1. 검토 결과 요약
-
-| 조건 | 상태 | 비고 |
-|------|------|------|
-| B0 historical | canonical full-year PASS | 6,570 window, KPI 일부 NULL (cv_headway 등) |
-| B1 No-op | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
-| B2 rule-based | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
-| [A] pure MAPPO | smoke PASS (128 windows × 3 seeds) | full-year 19,710 미달, stub 상태 |
-
-- `causal_comparison_allowed=false` — 전 조건 non-causal, 논문 성능 비교 아직 불가
-- B0의 `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy` valid_count=0 (NULL) 문제 미해결
-
-#### 2. 다음 과업 우선순위 (확정)
-
-1. **[P1] B1 full rollout 실행** — `run_b1_noop_rollout.py --limit 0`, 3 seed 전체 → 19,710 rows, `full_year_complete=true` 달성
-2. **[P2] B2 real rollout runner 작성** — `run_b2_rulebased_rollout.py`, rule 파라미터 (target_headway_seconds=600 등) 적용, B1과 동일 KPI 경로 연결
-3. **[P3] [A] MAPPO runner 실제 연결** — stub → 실 `window_rollup.parquet` 생성
-4. **[P4] B0 KPI NULL 해결** — cv_headway / bunching_rate / on_time_rate / energy_proxy DB 컬럼 매핑 점검
-5. **[P5 중기] Phase 2 Causal Simulator Adapter 설계** — `causal_comparison_allowed=true` 경로 구축, 논문 성능 비교 가능 단계
+이 문서는 프로젝트의 진행 상황을 일자별로 기록하는 통합 로그입니다.  
+**"오늘 한 일 저장"** 요청 시 최신 날짜가 상단에 추가됩니다.
 
 ---
+## 📅 2026-04-24
+### Canonical KPI Aggregator 배선 완료 및 B1 Replay-backed Rollout 성공 (Phase 1)
 
-### Canonical KPI Aggregator v1 Smoke Validation 최종 PASS
+오늘 작업에서는 B1 No-op baseline의 실행기를 스텁에서 실제 리플레이 기반으로 확장하고, B0/B1/B2/[A] 전 조건이 공통 KPI 집계 경로에 연결되도록 canonical aggregator 파이프라인을 정비했다. 특히 B1은 이제 단순 스텁이 아닌 어댑터 기반의 실제 롤아웃 데이터를 생성한다.
 
-이번 작업에서는 B0/B1/B2/[A] 전 조건이 동일한 canonical KPI(KPI=Key Performance Indicator, 핵심성과지표) 집계 경로를 통과하는지 최종 점검했다. `05_training/evaluation/check_canonical_outputs.py`를 생성하여 각 조건의 `canonical_eval` 산출물 존재 여부, row count, condition_id, strict_canonical flag, causal_comparison_allowed flag, manifest row count 일치 여부를 검증했다.
+#### 1. B1 No-op Rollout Writer 구현 및 실행 완료 (Phase 1)
+- **파일**: `05_training/run_b1_noop_rollout.py` 고도화 완료.
+- **기능**: `HistoricalReplayAdapter`를 로드하여 각 시나리오 윈도우에 대해 `reset()` -> `step()` 과정을 수행하고 실측 데이터를 모사한 아티팩트를 생성함.
+- **산출물**: 
+  - `raw_events.parquet`: 에이전트별 행동 및 보상 기록 (비인과 리플레이).
+  - `window_rollup.parquet`: 표준 집계기용 KPI 요약 데이터.
+  - `status.json` / `run_manifest.json`: 비인과성 경고 및 메타데이터 포함.
+- **검증**: Seed 001에 대해 128개 윈도우 롤아웃 실행 및 `canonical_kpi_aggregator.py` 통과 확인 (**Real-ish PASS**).
 
-#### 1. 생성/수정 파일
-- `05_training/evaluation/canonical_kpi_aggregator.py`
-  - B0 `legacy_b0_passthrough` 모드 구현
-  - B1/B2/[A] `official_rollup` 모드 구현
-  - KPI 6종 공식 계산 기능 구현
-  - seed/time_band/overall 집계 출력 구현
-  - non-causal 또는 smoke/stub 산출물의 `causal_comparison_allowed=false` 기록
+#### 2. Simulator Adapter 인터페이스 확정 및 Phase 1 Smoke Validation 체계 구축
+- **Simulator Adapter 인터페이스 설계**: `05_training/simulator_adapter_interface.py` 정의. CTDE 기반 `ObsDict`, Multi-Agent `StepResult`, `GraphSkeleton` 확장 포함.
+- **HistoricalReplayAdapter 구현**: Phase 1 전용 비인과적(Non-causal) 리플레이 어댑터 구축 및 smoke validation 용도 제한 명시.
+- **MAPPO Runner 고도화**: 어댑터 동적 로드 및 `reset()`, `get_graph_skeleton()` 호출 실측 기능 보강.
 
-- `05_training/evaluation/check_canonical_outputs.py`
-  - B0/B1/B2/[A] canonical output 전체 검증 스크립트
-  - full-year row count를 강제하지 않고, manifest와 실제 파일의 row count 일치를 우선 검증
-  - full-year가 아닌 B1/B2/[A] 산출물은 FAIL이 아니라 warning으로 기록
+#### 3. canonical_kpi_aggregator.py 실파일 생성 및 실행 경로 정착
+- 생성 파일: `05_training/evaluation/canonical_kpi_aggregator.py`
+- 실행 모드 2종 검증: `legacy_b0_passthrough`, `official_rollup`.
+- 공통 출력 5종(`kpi_by_window.parquet` 등) 생성 확인.
 
-- `artifacts/canonical_eval_summary.json`
-  - 네 조건의 canonical output 검증 요약 파일
-
-#### 2. 최종 검증 결과
-
-실행 명령:
-
-```powershell
-& $py .\05_training\evaluation\check_canonical_outputs.py
-검증 결과:
-
-[OK] B0_historical  condition=B0 window_rows= 6570 seed_rows= 1 time_band_rows= 3 strict=False causal=False full_year=True
-[OK] B1_noop        condition=B1 window_rows=  384 seed_rows= 3 time_band_rows= 9 strict=True causal=False full_year=False
-[WARN] partial_or_smoke_window_count: B1_noop: current rows=384, full-year expected rows=19710. Allowed for smoke/limited validation.
-[OK] B2_rulebased   condition=B2 window_rows=  384 seed_rows= 3 time_band_rows= 9 strict=True causal=False full_year=False
-[WARN] partial_or_smoke_window_count: B2_rulebased: current rows=384, full-year expected rows=19710. Allowed for smoke/limited validation.
-[OK] A_pure_mappo   condition=A  window_rows=  384 seed_rows= 3 time_band_rows= 9 strict=True causal=False full_year=False
-[WARN] partial_or_smoke_window_count: A_pure_mappo: current rows=384, full-year expected rows=19710. Allowed for smoke/limited validation.
-[OK] summary_json: artifacts\canonical_eval_summary.json
-SMOKE PASS
-3. 조건별 판정
-조건상태해석
-B0 historicalPASSfull-year 6570 window canonical export 완료
-B1 No-opPASS with warning128 windows × 3 seeds = 384 rows limited smoke canonical output 완료
-B2 rule-basedPASS with warning128 windows × 3 seeds = 384 rows limited smoke canonical output 완료
-[A] pure MAPPOPASS with warning128 windows × 3 seeds = 384 rows limited smoke canonical output 완료
-4. 중요한 해석
-
-현재 결과는 성능 비교 결과가 아니다.
-
-causal_comparison_allowed=false
-B1/B2/[A]는 full-year output이 아니라 limited smoke output
-현재 HistoricalReplayAdapter는 non-causal(비인과적=행동이 다음 상태를 바꾸지 않음)이므로, 이 결과는 contract/smoke validation(계약·스모크 검증) 전용이다.
-따라서 논문 성능 비교에는 아직 사용할 수 없다.
-
-이번 단계에서 닫힌 것은 다음이다.
-
-B0/B1/B2/[A]가 같은 canonical KPI 계산 경로를 통과한다.
-KPI 6종의 컬럼, 파일 규약, seed/time_band/overall 집계 규약이 모두 작동한다.
-canonical_eval_summary.json으로 전체 상태를 한 번에 검증할 수 있다.
-5. 현재 canonical output 위치
-artifacts/baseline_v1/B0_historical/canonical_eval/
-artifacts/baseline_v1/B1_noop/canonical_eval/
-artifacts/baseline_v1/B2_rulebased/canonical_eval/
-artifacts/experiment_A_v1/canonical_eval/
-artifacts/canonical_eval_summary.json
-6. 다음 작업
-
-다음 단계는 두 갈래 중 하나다.
-
-B1/B2/[A] limited smoke가 아니라 full-year 6570 window × 3 seed rollout으로 확장한다.
-Phase 2 causal simulator adapter를 설계하여 causal_comparison_allowed=true가 가능한 평가 경로를 만든다.
-
-현재 우선순위는 B2 rule-based real rollout runner를 작성하고, 이후 [A] MAPPO runner가 실제 window_rollup.parquet를 생성하도록 연결하는 것이다.
-
-
----
-
-### Canonical KPI Aggregator ?④퀎蹂?援ъ텞 諛??낅젰 寃利??꾨즺
-
-?대쾲 ?묒뾽?먯꽌??B0/B1/B2/[A] 怨듯넻 ?됯? 泥닿퀎瑜?留뚮뱾湲??꾪븳 `canonical_kpi_aggregator.py`瑜??④퀎?곸쑝濡?援ъ텞?섍퀬, 媛?baseline 諛?[A] pure MAPPO ?ㅽ뿕援곗쓽 ?낅젰 寃利앹쓣 ?꾨즺?덈떎.
-
-#### 1. ?묒뾽 ?먯튃
-- ??踰덉뿉 ?섎굹??湲곕뒫留?異붽??섎뒗 諛⑹떇?쇰줈 吏꾪뻾?덈떎.
-- Windows PowerShell(PowerShell=留덉씠?щ줈?뚰봽??紐낅졊???? 遺숈뿬?ｊ린??workflow濡?媛??④퀎瑜?寃利앺뻽??
-- 湲곗〈 ?뚯씪??吏곸젒 ??뼱?곌린 ?꾩뿉 `.bak_YYYYMMDD_HHMMSS` 諛깆뾽???앹꽦?섎룄濡??덈떎.
-- ?꾩옱 `HistoricalReplayAdapter`??non-causal(鍮꾩씤怨쇱쟻=?됰룞???ㅼ쓬 ?곹깭瑜?諛붽씀吏 ?딆쓬)?대?濡? ?대쾲 寃곌낵???깅뒫 鍮꾧탳媛 ?꾨땲??contract/smoke validation(怨꾩빟쨌?ㅻえ??寃利? ?꾩슜?쇰줈 ?댁꽍?쒕떎.
-
-#### 2. ?앹꽦/?섏젙 ?뚯씪
-- `05_training/evaluation/canonical_kpi_aggregator.py`
-  - CLI(Command Line Interface=紐낅졊???명꽣?섏씠?? scaffold ?앹꽦
-  - contract JSON(JavaScript Object Notation=?먮컮?ㅽ겕由쏀듃 媛앹껜 ?쒓린踰? 濡쒕뜑 異붽?
-  - baseline contract 寃利?異붽?
-  - B0 `legacy_b0_passthrough` 異쒕젰 ?앹꽦 湲곕뒫 異붽?
-  - B1/B2/[A] `official_rollup` ?낅젰 寃利?湲곕뒫 異붽?
-
-#### 3. B0 historical baseline canonical export ?꾨즺
-B0 historical baseline?????`legacy_b0_passthrough` 紐⑤뱶瑜??ㅽ뻾?섏뿬 canonical 異쒕젰 5醫낆쓣 ?앹꽦?덈떎.
-
-?앹꽦 ?꾩튂:
-- `artifacts/baseline_v1/B0_historical/canonical_eval/aggregation_manifest.json`
-- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_seed.parquet`
-- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_time_band.parquet`
-- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_by_window.parquet`
-- `artifacts/baseline_v1/B0_historical/canonical_eval/kpi_overall.json`
-
-寃利?寃곌낵:
-- `window_rows = 6570`
-- `seed_rows = 1`
-- `time_band_rows = 3`
-- `SMOKE PASS`
-
-?댁꽍:
-- B0 ?먮낯 `kpi_by_window.parquet`?먮뒗 ?대? `time_band` 而щ읆??議댁옱?덉쑝硫? `peak/offpeak/night` ???쒓컙?媛 ?좎??섏뿀??
-- ?곕씪??B0???쒓컙?蹂?吏묎퀎媛 媛?ν븯??
-- ?? B0??legacy passthrough?대?濡?`strict_canonical = false`, `causal_comparison_allowed = false`濡?湲곕줉?쒕떎.
-
-#### 4. B1 No-op baseline official_rollup ?낅젰 寃利??꾨즺
-B1 No-op baseline??seed蹂?`window_rollup.parquet` ?낅젰 寃利앹쓣 ?꾨즺?덈떎.
-
-寃利???ぉ:
-- ?꾩닔 official rollup 而щ읆 議댁옱 ?뺤씤
-- `condition_id = B1` ?뺤씤
-- `seed = 1, 2, 3` ?뺤씤
-- `evaluation_horizon_minutes = 30` ?뺤씤
-- `time_band ??{peak, offpeak, night}` ?뺤씤
-- `(condition_id, seed, window_id)` 以묐났 ?놁쓬 ?뺤씤
-- ?뚯닔 媛?諛?遺덇??ν븳 鍮꾩쑉 援ъ“ ?놁쓬 ?뺤씤
-
-?앹꽦 ?뚯씪:
-- `artifacts/baseline_v1/B1_noop/canonical_eval/official_rollup_input_validation.json`
-
-寃利?寃곌낵:
-- `SMOKE PASS`
-
-#### 5. B2 rule-based baseline official_rollup ?낅젰 寃利??꾨즺
-B2 rule-based baseline??seed蹂?`window_rollup.parquet` ?낅젰 寃利앹쓣 ?꾨즺?덈떎.
-
-寃利???ぉ:
-- ?꾩닔 official rollup 而щ읆 議댁옱 ?뺤씤
-- `condition_id = B2` ?뺤씤
-- `seed = 1, 2, 3` ?뺤씤
-- `evaluation_horizon_minutes = 30` ?뺤씤
-- `time_band ??{peak, offpeak, night}` ?뺤씤
-- 以묐났 諛??뚯닔 援ъ“ ?ㅻ쪟 ?놁쓬 ?뺤씤
-
-?앹꽦 ?뚯씪:
-- `artifacts/baseline_v1/B2_rulebased/canonical_eval/official_rollup_input_validation.json`
-
-寃利?寃곌낵:
-- `SMOKE PASS`
-
-#### 6. [A] pure MAPPO baseline official_rollup ?낅젰 寃利??꾨즺
-[A] pure MAPPO(Multi-Agent Proximal Policy Optimization=?ㅼ쨷 ?먯씠?꾪듃 洹쇱젒 ?뺤콉 理쒖쟻?? ?ㅽ뿕援곗쓽 seed蹂?`window_rollup.parquet` ?낅젰 寃利앹쓣 ?꾨즺?덈떎.
-
-寃利???ぉ:
-- ?꾩닔 official rollup 而щ읆 議댁옱 ?뺤씤
-- `condition_id = A` ?뺤씤
-- `seed = 1, 2, 3` ?뺤씤
-- `qwen_train = false` ?뺤씤
-- `qwen_inference = false` ?뺤씤
-- `qwen_trigger_rate = 0.0` ?뺤씤
-- `evaluation_horizon_minutes = 30` ?뺤씤
-- `time_band ??{peak, offpeak, night}` ?뺤씤
-
-?앹꽦 ?뚯씪:
-- `artifacts/experiment_A_v1/canonical_eval/official_rollup_input_validation.json`
-
-寃利?寃곌낵:
-- `SMOKE PASS`
-
-#### 7. ?꾩옱 ?먯젙
-?꾩옱源뚯????섎????ㅼ쓬怨?媛숇떎.
-
-- B0??canonical 異쒕젰 5醫??앹꽦 ?꾨즺
-- B1/B2/[A]??official rollup ?낅젰 寃利??꾨즺
-- B1/B2/[A]??KPI 6醫?怨듭떇 ?ш퀎??諛?canonical 異쒕젰 5醫??앹꽦? ?꾩쭅 ?ㅼ쓬 ?④퀎
-- ?꾩옱 replay 湲곕컲 寃곌낵??non-causal smoke validation ?꾩슜?대ŉ, ?ㅼ젣 ?깅뒫 鍮꾧탳 ?먮즺濡??ъ슜?섏? ?딅뒗??
-#### 8. ?ㅼ쓬 ?묒뾽
-?ㅼ쓬 ?④퀎??`official_rollup` ?ㅼ젣 KPI 怨꾩궛 湲곕뒫??異붽??섎뒗 寃껋씠??
-
-援ъ껜?곸쑝濡쒕뒗 B1/B2/[A]??`window_rollup.parquet`?먯꽌 ?꾨옒 KPI 6醫낆쓣 ?숈씪 ?섏떇?쇰줈 ?ш퀎?고븳??
-
-- `cv_headway = headway_std_seconds / headway_mean_seconds`
-- `avg_wait_seconds = wait_total_passenger_seconds / wait_passenger_count`
-- `bunching_rate = bunching_event_count / headway_event_count`
-- `on_time_rate = ontime_event_count / schedulable_arrival_count`
-- `intervention_rate = intervention_count / decision_step_count`
-- `energy_proxy = energy_proxy_total`
-
-紐⑺몴 ?곗텧臾?
-- `kpi_by_window.parquet`
-- `kpi_by_seed.parquet`
-- `kpi_by_time_band.parquet`
-- `kpi_overall.json`
-- `aggregation_manifest.json`
-
-# ???UrbanBus RL Project - ?臾믩씜 ??? (Project Journal)
-
-???얜챷苑???袁⑥쨮??븍뱜??筌욊쑵六??怨뱀넺????깆쁽癰귢쑬以?疫꿸퀡以??롫뮉 ???? 嚥≪뮄???낅빍??  
-**"??삳뮎 ????????** ?遺욧퍕 ??筌ㅼ뮇???醫롮?揶쎛 ?怨룸뼊???곕떽???몃빍??
-
----
-## ?諭?2026-04-24
-### Canonical KPI Aggregator 獄쏄퀣苑??袁⑥┷ 獄?B1 Replay-backed Rollout ?源껊궗 (Phase 1)
-
-??삳뮎 ?臾믩씜?癒?퐣??B1 No-op baseline????쎈뻬疫꿸퀡? ??쎈?癒?퐣 ??쇱젫 ?귐뗫탣??됱뵠 疫꿸퀡而??곗쨮 ?類ㅼ삢??랁? B0/B1/B2/[A] ??鈺곌퀗援???⑤벏??KPI 筌욌쵌??野껋럥以???怨뚭퍙??롫즲嚥?canonical aggregator ???뵠?袁⑥뵬?紐꾩뱽 ?類ｍ돩??덈뼄. ?諭곸뿳 B1?? ??곸젫 ??λ떄 ??쎈???袁⑤빒 ?????疫꿸퀡而????쇱젫 嚥▲끉釉???怨쀬뵠?怨? ??밴쉐??뺣뼄.
-
-#### 1. B1 No-op Rollout Writer ?닌뗭겱 獄???쎈뻬 ?袁⑥┷ (Phase 1)
-- **???뵬**: `05_training/run_b1_noop_rollout.py` ?⑥쥓猷???袁⑥┷.
-- **疫꿸퀡??*: `HistoricalReplayAdapter`??嚥≪뮆諭??뤿연 揶???뺢돌?귐딆궎 ??덈즲?怨쀫퓠 ????`reset()` -> `step()` ?⑥눘?????묐뻬??랁???쇰? ?怨쀬뵠?怨? 筌뤴뫁沅???袁る뼒??븍뱜????밴쉐??
-- **?怨쀭뀱??*: 
-  - `raw_events.parquet`: ?癒?뵠?袁る뱜癰???곕짗 獄?癰귣똻湲?疫꿸퀡以?(??쑴?ㅶ??귐뗫탣??됱뵠).
-  - `window_rollup.parquet`: ??? 筌욌쵌?롦묾怨쀬뒠 KPI ?遺용튋 ?怨쀬뵠??
-  - `status.json` / `run_manifest.json`: ??쑴?ㅶ⑥눘苑?野껋럡??獄?筌롫???怨쀬뵠????釉?
-- **野꺜筌?*: Seed 001??????128揶???덈즲??嚥▲끉釉????쎈뻬 獄?`canonical_kpi_aggregator.py` ???궢 ?類ㅼ뵥 (**Real-ish PASS**).
-
-#### 2. Simulator Adapter ?紐낃숲??륁뵠???類ㅼ젟 獄?Phase 1 Smoke Validation 筌ｋ떯???닌딇뀧
-- **Simulator Adapter ?紐낃숲??륁뵠????블?*: `05_training/simulator_adapter_interface.py` ?類ㅼ벥. CTDE 疫꿸퀡而?`ObsDict`, Multi-Agent `StepResult`, `GraphSkeleton` ?類ㅼ삢 ??釉?
-- **HistoricalReplayAdapter ?닌뗭겱**: Phase 1 ?袁⑹뒠 ??쑴?ㅶ⑥눘??Non-causal) ?귐뗫탣??됱뵠 ??????닌딇뀧 獄?smoke validation ??몃즲 ??쀫립 筌뤿굞??
-- **MAPPO Runner ?⑥쥓猷??*: ???????덉읅 嚥≪뮆諭?獄?`reset()`, `get_graph_skeleton()` ?紐꾪뀱 ??쇰? 疫꿸퀡??癰귣떯而?
-
-#### 3. canonical_kpi_aggregator.py ??쎈솁????밴쉐 獄???쎈뻬 野껋럥以??類ㅺ컩
-- ??밴쉐 ???뵬: `05_training/evaluation/canonical_kpi_aggregator.py`
-- ??쎈뻬 筌뤴뫀諭?2??野꺜筌? `legacy_b0_passthrough`, `official_rollup`.
-- ?⑤벏???곗뮆??5??`kpi_by_window.parquet` ?? ??밴쉐 ?類ㅼ뵥.
-
-#### 4. ?袁⑹삺 ?癒?젟 獄???뽯튋 ??鍮?- **?怨밴묶**: 
+#### 4. 현재 판정 및 제약 사항
+- **상태**: 
   - B0: **completed** (Legacy Pass)
   - B1: **completed** (Real-ish Pass via Historical Replay)
   - B2/A: **smoke PASS** (via Stub rollup)
-- **??볧?*: ?袁⑹삺 筌뤴뫀諭?PASS????? ?④쑴鍮?獄????뵬 野껋럥以?域뱀뮇鍮???類λ???野꺜筌??源껊궗???????렽? **??쑴?ㅶ⑥눘???귐뗫탣??됱뵠 疫꿸퀡而?*???嚥???쇱젫 ?源낅뮟 ??쑨???癒?┷嚥??????븍뜃?.
+- **한계**: 현재 모든 PASS는 평가 계약 및 파일 경로 규약의 정합성 검증 성공을 의미하며, **비인과적 리플레이 기반**이므로 실제 성능 비교 자료로 사용 불가.
 
-#### 5. ??쇱벉 ??ｍ?(Next Steps)
-- B2 rule-based real rollout ??쎈뻬疫?Runner) ?臾믨쉐 獄?`HistoricalReplayAdapter` ?怨뚭퍙.
-- [A] MAPPO runner揶쎛 ??쇱젫 `window_rollup.parquet`????밴쉐??롫즲嚥???????怨뚭퍙.
-- 筌뤴뫀諭?鈺곌퀗援???귐뗫탣??됱뵠 疫꿸퀡而???쇰? ?怨쀬뵠?怨? ??밴쉐??롢늺 ?袁⑷퍥 ???뵠?袁⑥뵬?紐꾩뱽 **Real-ish PASS**嚥??諛닿봄.
-- Phase 2 ?硫몃궢 ?????됱뵠??Causal Simulator) ?????餓Β??
+#### 5. 다음 단계 (Next Steps)
+- B2 rule-based real rollout 실행기(Runner) 작성 및 `HistoricalReplayAdapter` 연결.
+- [A] MAPPO runner가 실제 `window_rollup.parquet`를 생성하도록 어댑터 연결.
+- 모든 조건이 리플레이 기반 실측 데이터를 생성하면 전체 파이프라인을 **Real-ish PASS**로 승격.
+- Phase 2 인과 시뮬레이터(Causal Simulator) 어댑터 준비.
 
 ---
-## ?諭?2026-04-23
-### B0/B1/B2 Baseline ?袁⑷쉐 獄?[A] MAPPO ??덈뮸 ?ⓥ몿爰?Stub) ?닌딇뀧
+## 📅 2026-04-23
+### B0/B1/B2 Baseline 완성 및 [A] MAPPO 학습 골격(Stub) 구축
 
-??삳뮎 ?臾믩씜?癒?퐣??揶쏅벤???덈뮸 ?????됱뵠??륁뱽 ?袁る립 疫꿸퀣???Baseline) ?袁⑥쟿?袁⑹뜖??? ?類ｂ뵲??랁? B0(Historical) 筌왖??? ?怨쀬뵠?怨뺤퓢??곷뮞 獄?Parquet ?類κ묶嚥??類ｋ궖??됰뮸??덈뼄. ?遺얩뀑???????됱뵠?怨? ?봔??釉??袁⑹삺 ?怨밴묶??獄쏆꼷???B1(No-op) 獄?B2(Rule-based)????쎈뻬 ??筌롫???怨쀬뵠?怨? 筌띾뜄???됱몵筌? 筌ㅼ뮇伊?怨몄몵嚥?[A] ??뽯땾 MAPPO 筌뤴뫀?????瑗?Runner) ?ⓥ몿爰???닌딄쉐??됰뮸??덈뼄.
+오늘 작업에서는 강화학습 시뮬레이션을 위한 기준선(Baseline) 프레임워크를 정립하고, B0(Historical) 지표를 데이터베이스 및 Parquet 형태로 확보했습니다. 더불어 시뮬레이터가 부재한 현재 상태를 반영해 B1(No-op) 및 B2(Rule-based)의 실행 전 메타데이터를 마련했으며, 최종적으로 [A] 순수 MAPPO 모델의 러너(Runner) 골격을 구성했습니다.
 
-#### 1. B0 Historical Baseline ?袁⑥┷
-- **??밴쉐 ?袁⑥┷**: `public.baseline_b0_historical_kpi_by_window`, `public.baseline_b0_historical_kpi_metadata`
-- **6揶?KPI ?④쑴鍮??뚎됱쓥 ?⑥쥙??*: `cv_headway`, `avg_wait_seconds`, `bunching_rate`, `on_time_rate`, `intervention_rate`, `energy_proxy`
-- **?怨쀬뵠???怨밴묶**:
-  - 筌?쑴?숋쭪?揶? `avg_wait_seconds`, `intervention_rate`
-  - NULL ?醫?: `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy`
-- **野꺜筌?野껉퀗??*:
+#### 1. B0 Historical Baseline 완료
+- **생성 완료**: `public.baseline_b0_historical_kpi_by_window`, `public.baseline_b0_historical_kpi_metadata`
+- **6개 KPI 계약 컬럼 고정**: `cv_headway`, `avg_wait_seconds`, `bunching_rate`, `on_time_rate`, `intervention_rate`, `energy_proxy`
+- **데이터 상태**:
+  - 채워진 값: `avg_wait_seconds`, `intervention_rate`
+  - NULL 유지: `cv_headway`, `bunching_rate`, `on_time_rate`, `energy_proxy`
+- **검증 결과**:
   - `row_count = 6570`
   - `min_state_ts = 2023-01-01 05:00:00+09`
   - `max_state_ts = 2023-12-31 22:00:00+09`
@@ -284,141 +234,154 @@ B2 rule-based baseline??seed蹂?`window_rollup.parquet` ?낅젰 寃利앹쓣 ?
   - `cv_headway_null_rows = 6570`
   - `zero_intervention_rows = 6570`
 
-#### 2. B0 Artifact Export ?袁⑥┷
-- **??밴쉐 ?怨쀭뀱??*:
+#### 2. B0 Artifact Export 완료
+- **생성 산출물**:
   - `artifacts/baseline_v1/B0_historical/kpi_by_window.parquet`
   - `artifacts/baseline_v1/B0_historical/metadata.json`
 
-#### 3. B1 No-op Baseline 餓Β???袁⑥┷
-- **??밴쉐 ?怨쀭뀱??*:
+#### 3. B1 No-op Baseline 준비 완료
+- **생성 산출물**:
   - `artifacts/baseline_v1/B1_noop/scenario_index.parquet`
   - `artifacts/baseline_v1/B1_noop/policy_config.json`
-  - `artifacts/baseline_v1/B1_noop/rollouts/seed_001` ~ `seed_003` (?????`run_manifest.json` ??밴쉐 ?袁⑥┷)
-  - `run_b1_noop_rollout.py` ?ⓥ몿爰???밴쉐 ?袁⑥┷
-- **?袁⑹삺 ?怨밴묶**: `prepared_not_executed` (???: replay simulator adapter ?봔??
+  - `artifacts/baseline_v1/B1_noop/rollouts/seed_001` ~ `seed_003` (내부에 `run_manifest.json` 생성 완료)
+  - `run_b1_noop_rollout.py` 골격 생성 완료
+- **현재 상태**: `prepared_not_executed` (사유: replay simulator adapter 부재)
 
-#### 4. B2 Rule-based Baseline 餓Β???袁⑥┷
-- **??밴쉐 ?怨쀭뀱??*:
+#### 4. B2 Rule-based Baseline 준비 완료
+- **생성 산출물**:
   - `artifacts/baseline_v1/B2_rulebased/scenario_index.parquet`
   - `artifacts/baseline_v1/B2_rulebased/policy_config.json`
   - `artifacts/baseline_v1/B2_rulebased/rollouts/seed_001` ~ `seed_003`
-- **?袁⑹삺 ?怨밴묶**: `prepared_not_executed` (???: replay simulator adapter ?봔??
-- **B2 Rule Params ?類ㅼ젟**:
+- **현재 상태**: `prepared_not_executed` (사유: replay simulator adapter 부재)
+- **B2 Rule Params 확정**:
   - `target_headway_seconds = 600`
   - `low_headway_threshold_seconds = 360`
   - `high_headway_threshold_seconds = 900`
   - `max_hold_seconds = 120`
   - `allow_skip = true`
 
-#### 5. baseline_contract.json ?類ㅼ젟
-- **??밴쉐 ?怨쀭뀱??*: `artifacts/baseline_v1/baseline_contract.json`
-- **?⑤벏???④쑴鍮?*:
+#### 5. baseline_contract.json 확정
+- **생성 산출물**: `artifacts/baseline_v1/baseline_contract.json`
+- **공통 계약**:
   - `evaluation_horizon_minutes = 30`
   - `seeds = [1, 2, 3]`
   - `time_bands = [peak, offpeak, night]`
-  - `shared_kpis` = 6???⑥쥙??  - `fairness_constraints`:
+  - `shared_kpis` = 6종 고정
+  - `fairness_constraints`:
     - `same_initial_state = true`
     - `same_exogenous_events = true`
     - `same_eval_window = true`
-- **Baseline ?怨밴묶 ??산퉬??*: `B0 = completed`, `B1 = prepared_not_executed`, `B2 = prepared_not_executed`
+- **Baseline 상태 스냅샷**: `B0 = completed`, `B1 = prepared_not_executed`, `B2 = prepared_not_executed`
 
-#### 6. [A] pure_mappo_baseline ?④쑴鍮??怨뚭퍙 ?袁⑥┷
-- **鈺곌퀗援?筌뤿굞苑?*:
+#### 6. [A] pure_mappo_baseline 계약 연결 완료
+- **조건 명세**:
   - `condition_id = A`
   - `qwen_train = false`
   - `qwen_inference = false`
-- **??밴쉐 ?怨쀭뀱??*: `experiment_A_contract.json`
-- **?袁⑹삺 ?怨밴묶**: `contract_linked_not_trained`
+- **생성 산출물**: `experiment_A_contract.json`
+- **현재 상태**: `contract_linked_not_trained`
 
-#### 7. MAPPO ??瑗??ⓥ몿爰?Stub) ??밴쉐 ?袁⑥┷
-- **??밴쉐 ???뵬**:
+#### 7. MAPPO 러너 골격(Stub) 생성 완료
+- **생성 파일**:
   - `05_training/mappo_runner.py`
   - `05_training/run_experiment_A_stub.py`
   - `05_training/policies/mappo_policy_stub.py`
-- **Seed癰???쎈뻬 ?遺얠젂?怨뺚봺 獄??怨쀭뀱??*:
-  - `artifacts/experiment_A_v1/runs/seed_001` ~ `seed_003` ??밴쉐 ?袁⑥┷
-  - 揶?seed癰?`run_manifest.json`, `status.json`, `checkpoint_stub.json` ?怨쀭뀱????釉?- **?袁⑹삺 ?怨밴묶**: `status: "adapter_missing"` (???: simulator adapter 沃섎㈇??袁⑹뵠沃샕嚥??類ㅺ맒 ??덉삂??
+- **Seed별 실행 디렉터리 및 산출물**:
+  - `artifacts/experiment_A_v1/runs/seed_001` ~ `seed_003` 생성 완료
+  - 각 seed별 `run_manifest.json`, `status.json`, `checkpoint_stub.json` 산출물 포함
+- **현재 상태**: `status: "adapter_missing"` (사유: simulator adapter 미구현이므로 정상 동작임)
 
-#### 8. MAPPO ??瑗???블?筌ｋ똾寃뺟뵳?????類ㅼ젟
-- CTDE(Centralized Training Decentralized Execution=餓λ쵐釉곤쭪臾믪㉦ ??덈뮸 ?브쑴沅???쎈뻬) ?닌듼??브쑬??- PyG(PyTorch Geometric=???뵠?醫롰뒄 筌왖??살컭?紐꺿봼) Batch.from_data_list 域밸챶???獄쏄퀣??- ??뽮쉐 甕곌쑴??筌띾뜆???- edge_index 嚥▲끉釉??甕곌쑵????뽰뇚
-- GAE(Generalized Advantage Estimation=??곗뺘????곸젎 ?곕뗄???癒?퐣 terminated / truncated ?브쑬??- 筌ｂ뫀紐??怨몄벓???酉?껅에?쀫돗 ?④쑴??- grad_norm_clip = 0.5
-- rng_state ??釉?筌ｋ똾寃?????- qwen_trigger_rate 嚥≪뮄?? ??[A]?癒?퐣??0.0 揶쏅벡??- shared_policy = true 疫꿸퀡??첎?- GATv2 freeze ???癒?춭 ??곸젫 3??ｍ?- reward normalization
+#### 8. MAPPO 러너 설계 체크리스트 확정
+- CTDE(Centralized Training Decentralized Execution=중앙집중 학습 분산 실행) 구조 분리
+- PyG(PyTorch Geometric=파이토치 지오메트릭) Batch.from_data_list 그래프 배치
+- 활성 버스 마스킹
+- edge_index 롤아웃 버퍼 제외
+- GAE(Generalized Advantage Estimation=일반화 이점 추정)에서 terminated / truncated 분리
+- 첨두 적응형 엔트로피 계수
+- grad_norm_clip = 0.5
+- rng_state 포함 체크포인트
+- qwen_trigger_rate 로깅, 단 [A]에서는 0.0 강제
+- shared_policy = true 기본값
+- GATv2 freeze → 점진 해제 3단계
+- reward normalization
 - KL divergence monitoring + early stopping
-- H200 multi-GPU???袁⑹삺 ?紐낃숲??륁뵠??살춸 ??블? 癰귣㈇??袁? 癰귣?履?
-#### 9. Troubleshooting & Today Notes
-- **Windows PowerShell(PowerShell=筌띾뜆???以??곕늄??筌뤿굝議???? ?븐늿肉?節딅┛??patch workflow ?類ㅺ컩**: 筌욊낯????륁젟 ??????쎄쾿?깆??껆몴????립 ??용뮞??鈺곌퀣?????뵠?袁⑥뵬????됯컩.
-- **psql.exe ?癒?퉳 獄?PATH(Path=??쎈뻬 野껋럥以???띻펾癰궰?? ??곷뭼 ??욧퍙**: PATH 沃섎챷????얜챷?ｇ몴??癒?짗 ?癒?퉳 ??쎄쾿?깆??껅에???욧퍙??랁? DB(Database=?怨쀬뵠?怨뺤퓢??곷뮞) ?????`ryujo` ?紐꾩쵄 ??쎈솭??`PGUSER`/`PGPASSWORD` ??띻펾癰궰??獄쎻뫗???곗쨮 癰귣벀??
-- **SQL ?怨쀬뵠????????살첒 ??륁젟**: `integer` vs `boolean`??`COALESCE` ??살첒 ??륁젟.
-- **?紐꾪맜??& ???뵬 ??뽯뮞????곷뭼 ??곕돗**: 
-  - `preview.sql` UTF-8 BOM(Byte Order Mark=?얜챷???紐꾪맜????뽯뻻 獄쏅뗄??? ?얜챷???類ㅼ뵥 獄??怨좎돳.
-  - config ?遺얠젂?怨뺚봺 ??곸벉??곗쨮 ?紐낅립 YAML ??밴쉐 ??쎈솭 癰귣벀??
-  - JSON UTF-8 BOM ?癒?쑎 獄쏆뮇源???`utf-8-sig` ??꾨┛ ?????怨몄뒠.
-  - PowerShell ??here-string 餓λ쵐爰?????? ???뵠??Bash 癰궰??? null 嚥??????롫뮉 ?얜챷?????툢 獄???곕돗.
+- H200 multi-GPU는 현재 인터페이스만 설계, 본구현은 보류
 
-#### 10. ??쇱벉 ??ｍ?(Next Steps)
-- `simulator_adapter_interface.py` ?ⓥ몿爰???밴쉐
-- replay simulator adapter 筌뤿굞苑??類ㅼ젟
-- B1/B2 real rollout ??쎈뻬疫??怨뚭퍙
-- [A] ??쇱젫 MAPPO train/eval runner ?類ㅼ삢
+#### 9. Troubleshooting & Today Notes
+- **Windows PowerShell(PowerShell=마이크로소프트 명령행 셸) 붙여넣기형 patch workflow 정착**: 직접 수정 대신 스크립트를 통한 텍스트 조작 파이프라인 안착.
+- **psql.exe 탐색 및 PATH(Path=실행 경로 환경변수) 이슈 해결**: PATH 미인식 문제를 자동 탐색 스크립트로 해결하고, DB(Database=데이터베이스) 사용자 `ryujo` 인증 실패를 `PGUSER`/`PGPASSWORD` 환경변수 방식으로 복구.
+- **SQL 데이터 타입 오류 수정**: `integer` vs `boolean`의 `COALESCE` 오류 수정.
+- **인코딩 & 파일 시스템 이슈 회피**: 
+  - `preview.sql` UTF-8 BOM(Byte Order Mark=문자 인코딩 표시 바이트) 문제 확인 및 우회.
+  - config 디렉터리 없음으로 인한 YAML 생성 실패 복구.
+  - JSON UTF-8 BOM 에러 발생 시 `utf-8-sig` 읽기 옵션 적용.
+  - PowerShell 내 here-string 중첩 시 내부 파이썬/Bash 변수가 null 로 평가되는 문제 파악 및 회피.
+
+#### 10. 다음 단계 (Next Steps)
+- `simulator_adapter_interface.py` 골격 생성
+- replay simulator adapter 명세 확정
+- B1/B2 real rollout 실행기 연결
+- [A] 실제 MAPPO train/eval runner 확장
 
 ---
-## ?諭?2026-04-22
-### GATv2 Training Smoke Test Binding 獄??醫됲뇣 ??쎄텢 ??뽰젟
+## 📅 2026-04-22
+### GATv2 Training Smoke Test Binding 및 신규 스킬 제정
 
 - dataset_full_20260422_084243 successfully bound to train_gatv2.py
 - Samsung Galaxy Book 5 Pro CPU-based training smoke test PASS
 - 128 files / batch_size 1 / 3 epochs stability test PASS
 - node-level GATv2 forward, loss, backward, optimizer step verified
 - laptop is sufficient for pipeline validation, but full-scale training should be migrated to H200 server
-- **????쎄텢 `gatv2_training_smoke_test_binding` ?곕떽???* (`05_training/skills/gatv2_training_smoke_test_binding.md`)
+- **새 스킬 `gatv2_training_smoke_test_binding` 추가됨** (`05_training/skills/gatv2_training_smoke_test_binding.md`)
 
 ---
-## ?諭?2026-04-21
-### GATv2 ?袁⑷퍥 ?怨쀬뵠?怨쀫???슢諭??源껊궗 獄????뵠?袁⑥뵬???諭??[APPROVED]
+## 📅 2026-04-21
+### GATv2 전체 데이터셋 빌드 성공 및 파이프라인 승인 [APPROVED]
 
-GATv2 ??덈뮸???袁る립 1??燁?2023?? ?袁⑸땾 ?怨쀬뵠?怨쀫???슢諭띄몴??袁⑥┷??랁? ??밴쉐???袁る뼒??븍뱜???얜떯猿?源놁뱽 筌ㅼ뮇伊??諭???
+GATv2 학습을 위한 1년 치(2023년) 전수 데이터셋 빌드를 완료하고, 생성된 아티팩트의 무결성을 최종 승인함.
 
-#### 1. 雅뚯눘???源껊궢
+#### 1. 주요 성과
 - **run_build_dataset.ps1** full dataset save PASS
-- **snap 6570/6570** completed (1??燁??袁⑷퍥 ???袁⑸뮩??깆뵠??癰궰???袁⑥┷)
+- **snap 6570/6570** completed (1년 치 전체 타임슬라이스 변환 완료)
 - **build_report.json** generated successfully
 - **full dataset build** completed in 4470.9s (74m 31s)
 - **end-to-end artifact generation pipeline** approved
 
-#### 2. ??쇱벉 ??ｍ?(Next Step)
-- `dataset_full` ?곗뮆???`train_gatv2.py`??獄쏅뗄???븍릭????덈뮸 smoke test ??쎈뻬
+#### 2. 다음 단계 (Next Step)
+- `dataset_full` 출력을 `train_gatv2.py`에 바인딩하고 학습 smoke test 실행
 
 ---
-## ?諭?2026-04-20
-### ??덈뮸 ??materialize + PyG dataset ??슢??????띻펾/獄쏄퀣苑?筌뤴뫀紐????궢 [APPROVED]
+## 📅 2026-04-20
+### 학습 뷰 materialize + PyG dataset 빌더 — 환경/배선 모두 통과 [APPROVED]
 
-?袁④텊 ?類ㅼ젟??5揶?view ?袁⑸퓠 ??揶쏆뮇?????뵠?袁⑥뵬????ｍ롧몴??酉鍮?GATv2 ??덈뮸 筌욊낯?얏틦????野껋럥以덄몴???룻돱筌왖 獄쏄퀣苑??袁⑥┷. ??以??????甕곕뜆??筌띲끋?껆뵳?堉??깆뵠筌앸뜄諭????뵠?됰뗀以??⑥쥙???랁?
-PyG `Data` ??슢?묊몴??臾믨쉐??뤿연 smoke test ?癒?퐣 invariant 8?ル굞??筌뤴뫀紐????궢??μ뱽 ?類ㅼ뵥.
+전날 확정한 5개 view 위에 두 개의 파이프라인 단계를 더해 GATv2 학습 직전까지의
+경로를 끝까지 배선 완료. 슬로우 뷰 한 번을 매트리얼라이즈드 테이블로 고정하고,
+PyG `Data` 빌더를 작성하여 smoke test 에서 invariant 8종이 모두 통과함을 확인.
 
-#### 1. ??밴쉐/??륁젟 ???뵬
+#### 1. 생성/수정 파일
 
-| ???뵬 | ??釉?|
+| 파일 | 역할 |
 |------|------|
-| `04_model_inputs/materialize_gatv2_training_table.sql` [NEW] | view ?????뵠??癰궰??+ 3揶??紐껊쑔??+ VACUUM ANALYZE + parity check |
-| `04_model_inputs/run_materialize.ps1` [NEW] | psql ??瑗? ASCII-only (PS 5.1 CP949 ??됱읈), `$LASTEXITCODE` ?癒?젟 |
-| `05_training/build_gatv2_dataset.py` [NEW] | PyG `Data` 揶쏆빘猿???슢?? mat-table ?癒?짗 揶쏅Ŋ?, time-based split, invariant C1~C8 assert |
-| `05_training/run_build_dataset.ps1` [NEW] | venv ?봔?紐꾨뮞?紐껋삫 + torch CPU ??+ ??슢????쎈뻬 + 嚥≪뮄??|
+| `04_model_inputs/materialize_gatv2_training_table.sql` [NEW] | view → 테이블 변환 + 3개 인덱스 + VACUUM ANALYZE + parity check |
+| `04_model_inputs/run_materialize.ps1` [NEW] | psql 러너. ASCII-only (PS 5.1 CP949 안전), `$LASTEXITCODE` 판정 |
+| `05_training/build_gatv2_dataset.py` [NEW] | PyG `Data` 객체 빌더. mat-table 자동 감지, time-based split, invariant C1~C8 assert |
+| `05_training/run_build_dataset.ps1` [NEW] | venv 부트스트랩 + torch CPU 휠 + 빌더 실행 + 로그 |
 | `05_training/requirements.txt` [NEW] | torch / torch_geometric / pandas / sqlalchemy / psycopg2 |
 
-#### 2. Materialization ??쇰? (?袁⑷퍥 13,803.4 s ??3h 50m)
+#### 2. Materialization 실측 (전체 13,803.4 s ≈ 3h 50m)
 
-| ??ｍ?| ??볦퍢 | 筌롫뗀??|
+| 단계 | 시간 | 메모 |
 |------|------|------|
-| MAT-0 drop (IF EXISTS) | 0.01 s | 筌???쎈뻬????NOTICE skip |
-| **MAT-1 CTAS (20.29M rows)** | **5,549.8 s (1h 32m 29s)** | ?????곕뗄??~2h 癰귣?????쥓已?|
+| MAT-0 drop (IF EXISTS) | 0.01 s | 첫 실행이라 NOTICE skip |
+| **MAT-1 CTAS (20.29M rows)** | **5,549.8 s (1h 32m 29s)** | 사전 추정 ~2h 보다 빠름 |
 | MAT-2 row count | 1,404.3 s (23m 24s) | cold cache full scan |
-| MAT-3 idx (state_ts, node_index) | 484.9 s (8m 4s) | ??덈뮸 hot path 癰귣벏鍮 ?紐껊쑔??|
-| MAT-3 idx (service_date) | 306.6 s (5m 6s) | split ?袁り숲??|
-| MAT-3 idx (node_index) | 285.2 s (4m 45s) | per-node ?브쑴苑??|
-| MAT-4 VACUUM ANALYZE | 900.4 s (15m) | planner ????|
-| MAT-5 parity check | 4,872.1 s (1h 21m 12s) | view 筌??묒눖?곩첎? ???얍첎?(吏? 獄쏆뮄猿? |
+| MAT-3 idx (state_ts, node_index) | 484.9 s (8m 4s) | 학습 hot path 복합 인덱스 |
+| MAT-3 idx (service_date) | 306.6 s (5m 6s) | split 필터용 |
+| MAT-3 idx (node_index) | 285.2 s (4m 45s) | per-node 분석용 |
+| MAT-4 VACUUM ANALYZE | 900.4 s (15m) | planner 통계 |
+| MAT-5 parity check | 4,872.1 s (1h 21m 12s) | view 측 쿼리가 재전개 (§5 발견) |
 
-**parity_check 野껉퀗??*:
+**parity_check 결과**:
 
 ```
  mat_rows | view_total_rows | mat_snapshots | view_snapshots | parity_check
@@ -426,32 +389,35 @@ PyG `Data` ??슢?묊몴??臾믨쉐??뤿연 smoke test ?癒?퐣 invariant 8?ル�
  20289600 |        20289600 |          6570 |           6570 | OK
 ```
 
-?袁④텊 readiness ??V4/V5 ??륂뒄 (`total_training_rows=20,289,600`, `distinct_snapshots=6,570`)
-?? **?類μ넇????깊뒄**. ????(`gatv2_snapshot_summary` ??mat table) 揶??類λ? ?類ㅼ뵥.
+전날 readiness 의 V4/V5 수치 (`total_training_rows=20,289,600`, `distinct_snapshots=6,570`)
+와 **정확히 일치**. 두 뷰 (`gatv2_snapshot_summary` ↔ mat table) 간 정합 확인.
 
-#### 3. ?紐껊쑔????블?
-??덈뮸 ??PyG DataLoader 揶쎛 snapshot ??μ맄嚥???덈뮉 ???쉘 (`WHERE state_ts = ?`) ??筌띿쉸??`(state_ts, node_index)` 癰귣벏鍮 ?紐껊쑔??? hot path 嚥?筌왖?? ?봔??륁읅??곗쨮
-`service_date` (split ?袁り숲), `node_index` (per-node ?브쑴苑? 癰귣똻???紐껊쑔???곕떽?.
-??꾩뜎 筌뤴뫀諭???덈뮸 ?묒눖???btree seek 嚥?筌앸맧??(??롪컶 ms ??沅???됯맒).
+#### 3. 인덱스 설계
 
-#### 4. PyG Dataset Builder ??블???`build_gatv2_dataset.py`
+학습 시 PyG DataLoader 가 snapshot 단위로 읽는 패턴 (`WHERE state_ts = ?`) 에
+맞춰 `(state_ts, node_index)` 복합 인덱스를 hot path 로 지정. 부수적으로
+`service_date` (split 필터), `node_index` (per-node 분석) 보조 인덱스 추가.
+이후 모든 학습 쿼리는 btree seek 로 즉답 (수백 ms 이내 예상).
 
-contract `pytorch_geometric_dataset_contract.md` 吏?0 invariant C1~C8 ???꾨뗀諭???덇볼?癒?퐣 `assert` 嚥?揶쏅벡?? 雅뚯눘????λ땾:
+#### 4. PyG Dataset Builder 설계 — `build_gatv2_dataset.py`
 
-| ??λ땾 | ??釉?|
+contract `pytorch_geometric_dataset_contract.md` §10 invariant C1~C8 을 코드
+레벨에서 `assert` 로 강제. 주요 함수:
+
+| 함수 | 역할 |
 |------|------|
-| `_resolve_training_source(engine, prefer_mat)` | `_mat` ???뵠??鈺곕똻?????癒?짗 ?醫뤾문, ??곸몵筌?view fallback |
-| `load_static_graph(engine)` | (num_nodes, edge_index, edge_attr, nodes_df) 獄쏆꼹?? C3/C4 assert |
-| `load_snapshot_list(engine, source, cfg)` | state_ts 域밸챶竊?? `--max-snapshots` smoke cap 筌왖??|
-| `load_snapshot_rows(engine, source, state_ts)` | snapshot ??μ맄 dataframe |
-| `build_snapshot_data(df_ts, num_nodes, state_ts)` | x/y/node_mask ??ㅻ뎃 + C5/C8 assert |
-| `_split(service_date, cfg)` | train (01-10) / val (11) / test (12) date 疫꿸퀡而???깆뒭??|
-| `run_build(cfg)` | 筌롫뗄???룐뫂遊? 30?λ뜄彛??筌욊쑵六?嚥≪뮄?? `.pt` 4揶?+ `build_report.json` ????|
+| `_resolve_training_source(engine, prefer_mat)` | `_mat` 테이블 존재 시 자동 선택, 없으면 view fallback |
+| `load_static_graph(engine)` | (num_nodes, edge_index, edge_attr, nodes_df) 반환. C3/C4 assert |
+| `load_snapshot_list(engine, source, cfg)` | state_ts 그룹화. `--max-snapshots` smoke cap 지원 |
+| `load_snapshot_rows(engine, source, state_ts)` | snapshot 단위 dataframe |
+| `build_snapshot_data(df_ts, num_nodes, state_ts)` | x/y/node_mask 패딩 + C5/C8 assert |
+| `_split(service_date, cfg)` | train (01-10) / val (11) / test (12) date 기반 라우팅 |
+| `run_build(cfg)` | 메인 루프. 30초마다 진행 로그, `.pt` 4개 + `build_report.json` 저장 |
 
 CLI: `--db-url`, `--out-dir`, `--no-mat`, `--max-snapshots N`, `--dry-run`.
-DB URL 疫꿸퀡??첎誘? `PG*` ??띻펾癰궰??뤿퓠??鈺곌퀡??
+DB URL 기본값은 `PG*` 환경변수에서 조립.
 
-#### 5. Smoke Test 野껉퀗??????띻펾 + ?怨쀬뵠??野껋럥以?筌뤴뫀紐?OK
+#### 5. Smoke Test 결과 — 환경 + 데이터 경로 모두 OK
 
 ```
 [env ] torch 2.5.1+cpu / pyg 2.6.1 / pandas 2.3.3
@@ -462,68 +428,74 @@ DB URL 疫꿸퀡??첎誘? `PG*` ??띻펾癰궰??뤿퓠??鈺곌퀡??
 [DONE] dataset build  (1665.4s)
 ```
 
-| 野꺜筌?????| 筌β돦?쇿첎?| 疫꿸퀡? | ?癒?젟 |
+| 검증 항목 | 측정값 | 기대 | 판정 |
 |----------|-------|-----|------|
-| torch ??쇳뒄 | 2.5.1+cpu | ??.1 | ??|
-| torch_geometric ??쇳뒄 | 2.6.1 | ??.4 | ??|
-| pandas ??쇳뒄 | 2.3.3 | ??.0 | ??|
-| sqlalchemy/psycopg2 import | OK | OK | ??|
-| mat table ?癒?짗 揶쏅Ŋ? | True | True | ??|
-| num_nodes (graph) | 4116 | 4116 | ??|
-| num_edges (graph) | 5484 | 5484 | ??|
-| C1 x.shape == (4116, 10) | OK | OK | ??|
-| C2 y.shape == (4116, 3) | OK | OK | ??|
-| C3 edge_index.max() == 4115 | OK | OK | ??|
-| C4 edge_attr.shape[1] == 4 | OK | OK | ??|
-| C5 node_mask.sum() == rows | OK | OK | ??|
-| C8 isfinite(x) / isfinite(y) | OK | OK | ??|
+| torch 설치 | 2.5.1+cpu | ≥2.1 | ✅ |
+| torch_geometric 설치 | 2.6.1 | ≥2.4 | ✅ |
+| pandas 설치 | 2.3.3 | ≥2.0 | ✅ |
+| sqlalchemy/psycopg2 import | OK | OK | ✅ |
+| mat table 자동 감지 | True | True | ✅ |
+| num_nodes (graph) | 4116 | 4116 | ✅ |
+| num_edges (graph) | 5484 | 5484 | ✅ |
+| C1 x.shape == (4116, 10) | OK | OK | ✅ |
+| C2 y.shape == (4116, 3) | OK | OK | ✅ |
+| C3 edge_index.max() == 4115 | OK | OK | ✅ |
+| C4 edge_attr.shape[1] == 4 | OK | OK | ✅ |
+| C5 node_mask.sum() == rows | OK | OK | ✅ |
+| C8 isfinite(x) / isfinite(y) | OK | OK | ✅ |
 
-1,665.4 s 餓????봔?브쑴? **venv ?봔?紐꾨뮞?紐껋삫 + torch CPU ????쇱뒲嚥≪뮆諭?* ??녹돳????쑴??
-??꾩뜎 ??쎈뻬?봔?怨뺣뮉 venv ??沅??뱀몵嚥?筌앸맩????뽰삂.
+1,665.4 s 중 대부분은 **venv 부트스트랩 + torch CPU 휠 다운로드** 일회성 비용.
+이후 실행부터는 venv 재사용으로 즉시 시작.
 
-#### 6. ??? 獄쏆뮄猿?
-##### 吏?-A. PostgreSQL 18 + PowerShell 5.1 NOTICE ??뽯뻻 ??れ벉
+#### 6. 숨은 발견
 
-psql 18.3 ??`DROP TABLE IF EXISTS` NOTICE 揶쎛 PS 5.1 ?꾩꼷??癒?퐣 `NativeCommandError`
-??몿而??됰뗀以??곗쨮 ???쐭筌띻낮留? `$ErrorActionPreference = "Continue"` 揶쎛 椰꾨챶????됰선
-**??쎈뻬?? ?④쑴???* (??쇰?: MAT-0 NOTICE 獄쏆뮇源???MAT-1 CTAS 1h 32m ?類ㅺ맒 ??묐뻬 ??MAT-5 parity OK 繹먮슣? ?癒?짗 ?袁⑥┷). ?꾩꼷????몿而??= ??볦퍟????れ벉, 嚥≪뮄?????뵬?癒?뮉
-?類ㅺ맒 ??용뮞?紐껋쨮 ???貫留? ?館????덉뵬 ???쉘 獄쏆뮇源????얜똻??揶쎛??
+##### §6-A. PostgreSQL 18 + PowerShell 5.1 NOTICE 표시 잡음
 
-##### 吏?-B. parity check 揶쎛 1h 21m 椰꾨챶????곸?
+psql 18.3 의 `DROP TABLE IF EXISTS` NOTICE 가 PS 5.1 콘솔에서 `NativeCommandError`
+빨간 블록으로 렌더링됨. `$ErrorActionPreference = "Continue"` 가 걸려 있어
+**실행은 계속됨** (실측: MAT-0 NOTICE 발생 → MAT-1 CTAS 1h 32m 정상 수행 →
+MAT-5 parity OK 까지 자동 완료). 콘솔 빨간색 = 시각적 잡음, 로그 파일에는
+정상 텍스트로 저장됨. 향후 동일 패턴 발생 시 무시 가능.
 
-MAT-5 ??`(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 揶쎛
-**?癒?궚 view chain ?????얍첎?* ??뤿연 20.29M row CTE ????쇰뻻 ???뵝. mat table
-筌욊낯???묒눖????紐껊쑔??살쨮 筌앸맧????筌? ??쑨?????怨몄뵠 view 筌β돦?????甕???????쇳떔.
-**??덈뮸 野껋럥以?癒?퐣??獄쏆뮇源??? ??놁벉** ??`build_gatv2_dataset.py` ??mat table 筌?筌〓챷???
+##### §6-B. parity check 가 1h 21m 걸린 이유
 
-##### 吏?-C. PowerShell 5.1 CP949 vs UTF-8 ?紐낆넎
+MAT-5 의 `(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 가
+**원본 view chain 을 재전개** 하여 20.29M row CTE 를 다시 돌림. mat table
+직접 쿼리는 인덱스로 즉답이지만, 비교 대상이 view 측이라 한 번 더 풀스캔.
+**학습 경로에서는 발생하지 않음** — `build_gatv2_dataset.py` 는 mat table 만
+참조함.
 
-?袁④텊 ASCII-only 嚥??類ｍ돩??PS1 ??揶?(`run_materialize.ps1`, `run_build_dataset.ps1`)
-揶쎛 ?紐꾪맜????곷뭼 ??곸뵠 ??쎈뻬?? ?館??`05_training/` ??筌뤴뫀諭?PS1 ?? ASCII-only ?類ㅼ퐠
-?醫?. ??? 筌롫뗄?놅쭪???`.md` / `.sql` (UTF-8 筌ｌ꼶??揶쎛?? ?癒?퐣筌?????
+##### §6-C. PowerShell 5.1 CP949 vs UTF-8 호환
 
-#### 7. ??쇱벉 ??ｍ????? ??슢諭???GATv2 ??덈뮸 ?꾨뗀諭?
-| # | ?⑥눘??| ??쑴??| ?됰뗀以?? |
+전날 ASCII-only 로 정비한 PS1 두 개 (`run_materialize.ps1`, `run_build_dataset.ps1`)
+가 인코딩 이슈 없이 실행됨. 향후 `05_training/` 의 모든 PS1 은 ASCII-only 정책
+유지. 한글 메시지는 `.md` / `.sql` (UTF-8 처리 가능) 에서만 사용.
+
+#### 7. 다음 단계 — 풀 빌드 → GATv2 학습 코드
+
+| # | 과제 | 비용 | 블로킹? |
 |---|------|------|---------|
-| 1 | `run_build_dataset.ps1` ?? ??쎈뻬 (smoke ?紐꾩쁽 ??볤탢) | ??됯맒 ~1-2h | YES (??덈뮸??.pt 4揶???밴쉐) |
-| 2 | `build_report.json` 野꺜筌?(C6/C7 ??밴텦 ??깊뒄 ?類ㅼ뵥) | 筌앸맩??| YES |
-| 3 | `05_training/gatv2_model.py` GATv2 ?紐꾪맜???類ㅼ벥 | - | NO |
-| 4 | `05_training/train_gatv2.py` ??덈뮸 ?룐뫂遊?(MSE in log space) | - | NO |
-| 5 | `05_training/eval_gatv2.py` ??? (expm1 癰귣벊??+ RMSE/MAE) | - | NO |
+| 1 | `run_build_dataset.ps1` 풀 실행 (smoke 인자 제거) | 예상 ~1-2h | YES (학습용 .pt 4개 생성) |
+| 2 | `build_report.json` 검증 (C6/C7 합산 일치 확인) | 즉시 | YES |
+| 3 | `05_training/gatv2_model.py` GATv2 인코더 정의 | - | NO |
+| 4 | `05_training/train_gatv2.py` 학습 루프 (MSE in log space) | - | NO |
+| 5 | `05_training/eval_gatv2.py` 평가 (expm1 복원 + RMSE/MAE) | - | NO |
 
-#### 8. ?봔?怨빿?/ ?類ｂ봺
+#### 8. 부산물 / 정리
 
-- materialize SQL / runner ????`DROP TABLE IF EXISTS` ??뽰삂????**?????  ?袁⑹읈 ??됱읈** (idempotent). ???????????~3h 50m ???뒄.
-- `05_training/.venv/` 揶쎛 ??밴쉐?? `.gitignore` 沃섎챸猷?????곕떽? 亦낅슣??(????몄쎗 venv).
-- `05_training/data/gatv2_dataset/` ?遺얠젂?怨뺚봺 (out-dir) ????슢諭????癒?짗 ??밴쉐.
-  `.pt` ???뵬??삳즲 `.gitignore` 亦낅슣??(??롪컶 MB ??μ맄 ??됯맒).
-- snapshot 癰?筌욊쑵六?? `logs_build_<timestamp>/build.log` ??30?λ뜄彛??疫꿸퀡以???嚥?  餓λ쵌而???쎈솭 ??????state_ts ?癒?퐣 筌롫뜆??遺? 筌앸맩?????툢 揶쎛??
+- materialize SQL / runner 둘 다 `DROP TABLE IF EXISTS` 시작이라 **재실행
+  완전 안전** (idempotent). 단 재실행 시 또 ~3h 50m 소요.
+- `05_training/.venv/` 가 생성됨. `.gitignore` 미포함 시 추가 권장 (대용량 venv).
+- `05_training/data/gatv2_dataset/` 디렉터리 (out-dir) 는 빌드 시 자동 생성.
+  `.pt` 파일들도 `.gitignore` 권장 (수백 MB 단위 예상).
+- snapshot 별 진행은 `logs_build_<timestamp>/build.log` 에 30초마다 기록되므로
+  중간 실패 시 어느 state_ts 에서 멈췄는지 즉시 파악 가능.
 
 ---
 
-### ?袁⑹읅 筌욊쑴荑?筌띲끋?껆뵳???揶쏄퉮??(2026-04-20 23:59 疫꿸퀣?)
+### 누적 진척 매트릭스 갱신 (2026-04-20 23:59 기준)
 
-| ??됱뵠??| ?怨밴묶 |
+| 레이어 | 상태 |
 |-------|------|
 | graph_state_timeslice | APPROVED |
 | rl_state_training_base | APPROVED |
@@ -534,9 +506,9 @@ MAT-5 ??`(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 揶쎛
 | **build_gatv2_dataset.py** | **smoke test PASSED** |
 | GATv2 model / train / eval | TODO |
 
-### RL Baseline & Rollout 筌욊쑴荑??(2026-04-24 疫꿸퀣?)
+### RL Baseline & Rollout 진척도 (2026-04-24 기준)
 
-| ??됱뵠??/ ??뽯뮞??| ?怨밴묶 |
+| 레이어 / 태스크 | 상태 |
 |-------|------|
 | simulator_adapter_interface | **APPROVED** |
 | HistoricalReplayAdapter | **APPROVED (Phase 1)** |
@@ -547,263 +519,287 @@ MAT-5 ??`(SELECT total_training_rows FROM public.gatv2_snapshot_summary)` 揶쎛
 | Canonical KPI Aggregator | **APPROVED (official_rollup)** |
 
 ---
-## ?諭?2026-04-19
-### graph_edge_master STOP_TO_STOP 癰귣벊????leg-aggregation ?袁⑹뿯
+## 📅 2026-04-19
+### graph_edge_master STOP_TO_STOP 복원 — leg-aggregation 도입
 
-`graph_edge_master` ??`STOP_TO_STOP` ?節???`route_link_sequence` + `dim_stop`
-嚥≪뮆?????源?源딅릭?????텕筌왖 (`graph_edge_master_pkg/`) ??v2 嚥??⑥쥓猷?酉釉??
-coverage 22.84% ??**99.91%** (leg 疫꿸퀣?) 嚥?癰귣벀??
+`graph_edge_master` 의 `STOP_TO_STOP` 엣지를 `route_link_sequence` + `dim_stop`
+로부터 재생성하는 패키지 (`graph_edge_master_pkg/`) 를 v2 로 고도화하여,
+coverage 22.84% → **99.91%** (leg 기준) 로 복구.
 
-#### 1. v1 ?온筌????λ뜃由?22.84% ?뚣끇苡?뵳?? ([??륁뒠 ?븍뜃?])
+#### 1. v1 관찰 — 초기 22.84% 커버리지 ([수용 불가])
 - `01_alter_graph_edge_master.sql` / `02_load_...sql` / `03_..._readiness.sql`
-  3-??ｍ????뵠?袁⑥뵬?紐꾩뱽 first pass 嚥???쎈뻬.
-- ?닌듼?筌왖??R3~R6) ???袁? 0 ??곗쨮 繹먥뫀嫄??됱몵??**R10 coverage_pct = 22.84%**.
-- ??덈뻻??R5 ?癒?퐣 `ON CONFLICT DO UPDATE` ??揶쏆늿? edge_uid 嚥???甕?椰꾨?諭??  `21000` ?癒?쑎 ??STAGE 4.5 `tmp_edge_dedup (row_number() over edge_uid)` ?곕떽?嚥???욧퍙.
-- ????뽰젎??coverage ????? "dim_stop 筌띲끋釉??봔?? 嚥?揶쎛?類λ맙.
+  3-단계 파이프라인을 first pass 로 실행.
+- 구조 지표(R3~R6) 는 전부 0 으로 깨끗했으나 **R10 coverage_pct = 22.84%**.
+- 동시에 R5 에서 `ON CONFLICT DO UPDATE` 를 같은 edge_uid 로 두 번 건드려
+  `21000` 에러 → STAGE 4.5 `tmp_edge_dedup (row_number() over edge_uid)` 추가로 해결.
+- 이 시점엔 coverage 저하를 "dim_stop 매핑 부재" 로 가정함.
 
-#### 2. 筌욊쑬??3??ｍ?(D1 / D2 / D3) ??揶쎛??A, B 疫꿸퀗而???揶쎛??D ?類ㅼ젟
-- **D1** (`D_diagnose_stop_id_mapping.sql`): missing_id 1,482揶? ?袁? 疫뀀챷??10,
-  ??ъ쁽 prefix `15xxx / 30007xxx / 73611xxx?? 嚥??브쑵猷? `dim_stop` ?? 7揶??뚎됱쓥
-  ?됰Ŋ???alt-key 筌띲끋釉???? ??곸벉 ??**揶쎛??A (??삘뀲 ?????? 疫꿸퀗而?*.
-- **D2** (`D2_probe_mapping_tables.sql`): 5揶??袁⑤궖 ?됰슢?곻쭪?/staging ???뵠??  (`stop_link_mapping_master`, `stg_daegu_stops_geo`, `bs_20250903`,
-  `graph_node_master`, `err_daegu_stop_usage_mapping_failed`) ??筌뤴뫀諭?text/numeric
-  ?뚎됱쓥??????dynamic `EXECUTE` 嚥?筌띲끉臾???筌β돦????**?袁? 0 筌띲끉??*. ?됰슢?곻쭪?
-  ???뵠??揶쎛??B ?袁⑹읈 疫꿸퀗而?
-- **D3** (`D3_link_vs_stop_hypothesis.sql`): ??щ뮞???紐꾧퐨 `7361109008:dir=1`
-  ??link ??쀂???? `S??, -?萸? S??, -??` ???쉘??곗쨮 ??볥젃?????**?대Ŋ媛????쉘** ?醫딆구.
-  ?袁⑷퍥 ?브쑵猷?`S?萸?32.41% / S?? 32.39% / -?萸?23.01% / -?? 12.19%`.
-  ?紐꾧퐨??`links_per_stop = 1.84` (avg) / 筌ㅼ뮆? ??????μ맄. ??**揶쎛??D
-  (route_link_sequence ??stop + ?袁⑥쨮/?대Ŋ媛먩에?intermediate node ??노? ??쀂???
-  ?類ㅼ젟.**
+#### 2. 진단 3단계 (D1 / D2 / D3) — 가설 A, B 기각 → 가설 D 확정
+- **D1** (`D_diagnose_stop_id_mapping.sql`): missing_id 1,482개, 전부 길이 10,
+  숫자 prefix `15xxx / 30007xxx / 73611xxx…` 로 분포. `dim_stop` 은 7개 컬럼
+  뿐이라 alt-key 매핑 여지 없음 → **가설 A (다른 키 사용) 기각**.
+- **D2** (`D2_probe_mapping_tables.sql`): 5개 후보 브리지/staging 테이블
+  (`stop_link_mapping_master`, `stg_daegu_stops_geo`, `bs_20250903`,
+  `graph_node_master`, `err_daegu_stop_usage_mapping_failed`) × 모든 text/numeric
+  컬럼에 대해 dynamic `EXECUTE` 로 매칭 수 측정 → **전부 0 매치**. 브리지
+  테이블 가설 B 완전 기각.
+- **D3** (`D3_link_vs_stop_hypothesis.sql`): 핫스팟 노선 `7361109008:dir=1`
+  의 link 시퀀스를 `S→-, -→S, S→-, -→-` 패턴으로 태그해보니 **교차 패턴** 선명.
+  전체 분포 `S→S 32.41% / S→- 32.39% / -→S 23.01% / -→- 12.19%`.
+  노선당 `links_per_stop = 1.84` (avg) / 최대 수 십 단위. → **가설 D
+  (route_link_sequence 는 stop + 도로/교차로 intermediate node 혼합 시퀀스)
+  확정.**
 
-#### 3. 02_load v2 ??leg-aggregation ???х뵳?弛?揶쎛??D ??筌띿쉸??`02_load_...sql` ??9-stage ???뵠?袁⑥뵬?紐꾩몵嚥??袁ⓦ늺 ?????
+#### 3. 02_load v2 — leg-aggregation 알고리즘
+가설 D 에 맞춰 `02_load_...sql` 을 9-stage 파이프라인으로 전면 재작성:
 
 ```
-STAGE 1  tmp_rls_tagged    : link 筌띾뜄??(st_is_stop, ed_is_stop) ???삋域?STAGE 2  tmp_rls_legged    : st_is_stop=TRUE 筌띾뜄??leg_id 筌앹빓? (window sum)
-STAGE 3  tmp_leg_edges     : leg ??μ맄 src/dst stop, cum_gis_dist 筌욌쵌??STAGE 4  tmp_edge_src      : dim_stop.geom_5187 join, distance_m/time_sec ?④쑴沅?STAGE 5  tmp_edge_dedup    : edge_uid ??μ맄 揶쎛??????leg 1椰꾨?彛??醫?
-STAGE 6  tmp_edge_ranked   : (src,dst) ??μ맄 edge_rank (distance_m ASC)
+STAGE 1  tmp_rls_tagged    : link 마다 (st_is_stop, ed_is_stop) 플래그
+STAGE 2  tmp_rls_legged    : st_is_stop=TRUE 마다 leg_id 증가 (window sum)
+STAGE 3  tmp_leg_edges     : leg 단위 src/dst stop, cum_gis_dist 집계
+STAGE 4  tmp_edge_src      : dim_stop.geom_5187 join, distance_m/time_sec 계산
+STAGE 5  tmp_edge_dedup    : edge_uid 단위 가장 이른 leg 1건만 유지
+STAGE 6  tmp_edge_ranked   : (src,dst) 단위 edge_rank (distance_m ASC)
 STAGE 7  INSERT ... ON CONFLICT DO UPDATE
-STAGE 8  UPDATE ... SET is_active=false  (stale 筌ｌ꼶?? DELETE ?袁⑤뻷)
-STAGE 9  AFTER ??산퉬??NOTICE
+STAGE 8  UPDATE ... SET is_active=false  (stale 처리, DELETE 아님)
+STAGE 9  AFTER 스냅샷 NOTICE
 ```
 
-- **???뼎**: leg = "??stop ?곗뮆而?~ ??쇱벉 stop ?袁⑷컩 筌욊낯?? 繹먮슣???筌뤴뫀諭?link.
-  餓λ쵌而?intermediate node ??`graph_edge_master` ?????館釉?쭪? ??놁벉 (stop-to-stop
-  directed edge only ?癒?뒅 ?醫?).
-- **椰꾧퀡???④쑴沅?*: `coalesce(nullif(cum_gis_dist,0), ST_Distance(geom_5187))` ??  ?袁⑹읅 ??쇱젫 筌띻낱寃?椰꾧퀡???怨쀪퐨, 0/NULL ????筌욊낯苑묈쳞怨뺚봺 fallback.
-- **??볦퍢 ?④쑴沅?*: `distance_m / 1000.0 / 20.0 * 3600.0` (???뇧 20 km/h 揶쎛??.
+- **핵심**: leg = "한 stop 출발 ~ 다음 stop 도착 직전" 까지의 모든 link.
+  중간 intermediate node 는 `graph_edge_master` 에 저장하지 않음 (stop-to-stop
+  directed edge only 원칙 유지).
+- **거리 계산**: `coalesce(nullif(cum_gis_dist,0), ST_Distance(geom_5187))` —
+  누적 실제 링크 거리 우선, 0/NULL 이면 직선거리 fallback.
+- **시간 계산**: `distance_m / 1000.0 / 20.0 * 3600.0` (평균 20 km/h 가정).
 
-#### 4. 03_readiness ???嚥???륁젟
-- **R10** ?브쑬?덄몴?"source link rows" ??"leg-aggregation distinct legs" 嚥?癰궰野?
+#### 4. 03_readiness 의미론 수정
+- **R10** 분모를 "source link rows" → "leg-aggregation distinct legs" 로 변경.
   `source_legs_total / source_legs_valid / source_legs_distinct / loaded_edges /
-  missing / coverage_pct` 6-?뚎됱쓥 ?곗뮆??
-- **R11** ?????"筌띲끉臾???쎈솭 stop_id" ??"route_link_sequence ??non-stop
-  node_id ??묐탣 (??롫즲??intermediate node ??`dim_stop` ????용뮉 野??類ㅺ맒)" ??곗쨮 ??륁젟.
+  missing / coverage_pct` 6-컬럼 출력.
+- **R11** 의미를 "매칭 실패 stop_id" → "route_link_sequence 의 non-stop
+  node_id 샘플 (의도된 intermediate node — `dim_stop` 에 없는 게 정상)" 으로 수정.
 
-#### 5. v2 Readiness 野껉퀗??([APPROVED])
+#### 5. v2 Readiness 결과 ([APPROVED])
 
-| ID | 筌왖??| 筌β돦?쇿첎?| ?癒?젟 |
+| ID | 지표 | 측정값 | 판정 |
 |---|---|---|---|
-| R0 | stop_to_stop_total | **21,466** | ??|
-| R0 | primary_edges | 5,484 | ??|
-| R0 | inactive_edges | 0 | ??|
-| R3 | self_loop_cnt | **0** | ??|
-| R4 | orphan_src / orphan_dst | **0 / 0** | ??|
-| R5 | duplicate_primary_cnt | **0** | ??|
-| R6 | null_distance / null_time / zero_distance | **0 / 0 / 0** | ??|
-| R7 | min_dist_m / max_dist_m | 6.88 / 17,438.65 | ??(< 20 km) |
-| R7 | avg_dist_m / p50 / p95 | 494.7 / 381.7 / 1,234.9 | ??|
-| R7 | over_5km / over_20km | 27 / 0 | ??|
-| R8 | avg_time_sec / p50_time_sec | 89.0 / 68.7 | ??(1.48 min / 1.15 min) |
+| R0 | stop_to_stop_total | **21,466** | ✅ |
+| R0 | primary_edges | 5,484 | ✅ |
+| R0 | inactive_edges | 0 | ✅ |
+| R3 | self_loop_cnt | **0** | ✅ |
+| R4 | orphan_src / orphan_dst | **0 / 0** | ✅ |
+| R5 | duplicate_primary_cnt | **0** | ✅ |
+| R6 | null_distance / null_time / zero_distance | **0 / 0 / 0** | ✅ |
+| R7 | min_dist_m / max_dist_m | 6.88 / 17,438.65 | ✅ (< 20 km) |
+| R7 | avg_dist_m / p50 / p95 | 494.7 / 381.7 / 1,234.9 | ✅ |
+| R7 | over_5km / over_20km | 27 / 0 | ✅ |
+| R8 | avg_time_sec / p50_time_sec | 89.0 / 68.7 | ✅ (1.48 min / 1.15 min) |
 | R10 | **source_legs_distinct** | **21,485** | |
 | R10 | **loaded_edges** | **21,466** | |
-| R10 | **coverage_pct** | **99.91%** | ??|
+| R10 | **coverage_pct** | **99.91%** | ✅ |
 
-- v1 22.84% ??v2 **99.91%** ??4.37???怨몃뱟.
-- 沃섎챷???19椰?(99.91% ??100%) ?? `tmp_edge_src` STAGE 4 ??`dim_stop.geom_5187
-  is not null` inner-join 鈺곌퀗援?癒?퐣 ??덉뵭??筌왖??살컭?紐꺿봺-野껉퀣瑜?stop ??곗쨮 ?곕뗄??(??  21,485 legs 疫꿸퀣? 0.09%). 癰귢쑬猷??怨쀬뵠????됱춳 ?怨쀭룇??곗쨮 ?브쑬????곕뗄??
-- R11 ??묐탣???袁? `1500xxx` prefix ????됯맒??嚥??袁⑥쨮/?대Ŋ媛먩에?node (???닌딅뻻 `link` /
-  `node` Shapefile ?④쑴肉?. ????곴맒 "筌띲끉臾???쎈솭" 嚥??띯몿???? ??놁벉.
+- v1 22.84% → v2 **99.91%** — 4.37× 상승.
+- 미적재 19건 (99.91% ↔ 100%) 은 `tmp_edge_src` STAGE 4 의 `dim_stop.geom_5187
+  is not null` inner-join 조건에서 탈락한 지오메트리-결측 stop 으로 추정 (총
+  21,485 legs 기준 0.09%). 별도 데이터 품질 티켓으로 분리해 추적.
+- R11 샘플이 전부 `1500xxx` prefix — 예상대로 도로/교차로 node (대구시 `link` /
+  `node` Shapefile 계열). 더 이상 "매칭 실패" 로 취급하지 않음.
 
-#### 6. ?봔?怨빿?/ ?類ｂ봺
-- **?醫?**: `graph_edge_master` ??쎄텕筌?(`distance_m`, `time_sec`,
-  `is_primary_edge`, `edge_rank`) ?袁? 癰궰野???곸벉. GATv2 static graph ?????  繹먥뫁? ??놁벉.
-- **?곕떽????얜챷苑?*: `graph_edge_master_pkg/D_diagnose_stop_id_mapping.sql`,
+#### 6. 부산물 / 정리
+- **유지**: `graph_edge_master` 스키마 (`distance_m`, `time_sec`,
+  `is_primary_edge`, `edge_rank`) 전혀 변경 없음. GATv2 static graph 표준을
+  깨지 않음.
+- **추가된 문서**: `graph_edge_master_pkg/D_diagnose_stop_id_mapping.sql`,
   `D2_probe_mapping_tables.sql`, `D3_link_vs_stop_hypothesis.sql`,
   `run_diagnose.ps1`.
-- **README 吏? changelog** ??"02_load v2 獄쏄퀬猷? ????疫꿸퀡以?
-- PowerShell NativeCommandError (`psql` ??RAISE NOTICE 揶쎛 stderr 嚥????
-  `$ErrorActionPreference=Stop` ?類ㅼ퐠?癒?퐣 ?袁⑷퍥 ??쎄쾿?깆???餓λ쵎?? ????瑗?  (`run_graph_edge_master.ps1`, `run_diagnose.ps1`) ??`$ErrorActionPreference =
-  "Continue"` ?⑥쥙??+ `$LASTEXITCODE` 嚥??源딅솭 ?癒?젟??곗쨮 ?대Ŋ??
+- **README §7 changelog** 에 "02_load v2 배포" 항목 기록.
+- PowerShell NativeCommandError (`psql` 의 RAISE NOTICE 가 stderr 로 나와
+  `$ErrorActionPreference=Stop` 정책에서 전체 스크립트 중단) → 러너
+  (`run_graph_edge_master.ps1`, `run_diagnose.ps1`) 에 `$ErrorActionPreference =
+  "Continue"` 고정 + `$LASTEXITCODE` 로 성패 판정으로 교정.
 
-#### 7. ??쇱벉 ??ｍ?(?됰뗀以????곸젫??
-- `graph_state_timeslice` ??`node_uid = 'STOP:<stop_id>'` 疫꿸퀣? state features
-  雅뚯눘??????苡??癰귣벊???STOP_TO_STOP ?節?揶쎛 GATv2 message-passing ?닌듼??  static skeleton ??곗쨮 ?????
-- 19椰?筌왖??살컭?紐꺿봺-野껉퀣瑜?stop ?? `dim_stop` ?怨쀬뵠????됱춳 ?袁⑸꺗 ?怨쀭룇??곗쨮.
-- ??由경틦?? ?袁⑥┷??롢늺 ??쑬以??**GATv2 筌뤴뫀???꾨뗀諭??臾믨쉐 ??ｍ?* 嚥???꾨뻬.
+#### 7. 다음 단계 (블로킹 해제됨)
+- `graph_state_timeslice` 에 `node_uid = 'STOP:<stop_id>'` 기준 state features
+  주입 — 이번에 복원한 STOP_TO_STOP 엣지가 GATv2 message-passing 구조의
+  static skeleton 으로 사용됨.
+- 19건 지오메트리-결측 stop 은 `dim_stop` 데이터 품질 후속 티켓으로.
+- 여기까지 완료되면 비로소 **GATv2 모델 코드 작성 단계** 로 이행.
 
-### GATv2 ??낆젾 ??됱뵠???닌딄쉐 ??5揶?view + PyG dataset contract [APPROVED]
+### GATv2 입력 레이어 구성 — 5개 view + PyG dataset contract [APPROVED]
 
-`graph_edge_master STOP_TO_STOP v2` 揶쎛 ?諭???筌욊낱?? GATv2 ??덈뮸 ???뵠?袁⑥뵬??(PyTorch Geometric) ????뚯뱽 **DB ??5??* ??**dataset ?④쑴鍮??얜챷苑?* ???類ㅼ젟??뤿연,
-**"static graph skeleton + per-snapshot node features"** ??곕뮉 dual layer ??DB ??덇볼?癒?퐣 ?⑥쥙???덈뼄. readiness ??2026-04-19 21:51 ~ 23:58 (7,664.4 s) ??椰꾨챷????쎈뻬??뤿선 筌뤴뫀諭?hard gate ?????궢??덈뼄.
+`graph_edge_master STOP_TO_STOP v2` 가 승인된 직후, GATv2 학습 파이프라인
+(PyTorch Geometric) 이 읽을 **DB 뷰 5종** 과 **dataset 계약 문서** 를 확정하여,
+**"static graph skeleton + per-snapshot node features"** 라는 dual layer 를
+DB 레벨에서 고정했다. readiness 는 2026-04-19 21:51 ~ 23:58 (7,664.4 s) 에
+걸쳐 실행되어 모든 hard gate 를 통과했다.
 
-#### 1. ??밴쉐/??륁젟 ???뵬
+#### 1. 생성/수정 파일
 
-| ???뵬 | ??釉?|
+| 파일 | 역할 |
 |------|------|
-| `04_model_inputs/create_gatv2_training_views.sql` [NEW] | 5揶?view ??밴쉐 + 8揶?readiness 筌ｋ똾寃?(single-file idempotent) |
-| `04_model_inputs/run_gatv2_views.ps1` [NEW] | psql ??瑗? ASCII-only (PS 5.1 CP949 ??됱읈), `$LASTEXITCODE` ?癒?젟 |
-| `05_training/pytorch_geometric_dataset_contract.md` [NEW] | PyG `Data` 揶쏆빘猿??뚎됱쓥 ??뽮퐣, split 域뱀뮇?? invariant C1~C8 |
+| `04_model_inputs/create_gatv2_training_views.sql` [NEW] | 5개 view 생성 + 8개 readiness 체크 (single-file idempotent) |
+| `04_model_inputs/run_gatv2_views.ps1` [NEW] | psql 러너. ASCII-only (PS 5.1 CP949 안전), `$LASTEXITCODE` 판정 |
+| `05_training/pytorch_geometric_dataset_contract.md` [NEW] | PyG `Data` 객체 컬럼 순서, split 규칙, invariant C1~C8 |
 
-#### 2. ??밴쉐??view 5??
-| View | ??釉?| PyG ????|
+#### 2. 생성된 view 5종
+
+| View | 역할 | PyG 대응 |
 |------|-----|---------|
-| `public.gatv2_node_master_active` | primary+active STOP_TO_STOP ?節? 筌〓챷肉?STOP ?紐껊굡. 0-based dense `node_index` | `num_nodes`, **x** ????뽮퐣 |
-| `public.gatv2_edge_primary_active` | edge_index ??利?+ `distance_km/time_min/*_log` (F_e=4) | **edge_index**, **edge_attr** |
-| `public.gatv2_snapshot_stop_features_train` | per-(state_ts, node) ??덈뮸 row. overnight/terminal ?袁⑹뵠 ??뽰뇚 | **x** (F_x=10) + **y** (F_y=3) |
-| `public.gatv2_snapshot_summary` | snapshot ??/ ??볦퍢 甕곕뗄??/ rows ?브쑵猷?| 嚥≪뮆??筌롫?? / split 疫꿸퀣? |
-| `public.gatv2_edge_summary` | 域밸챶?????쇳렩??딅꽑 ????| shape sanity |
+| `public.gatv2_node_master_active` | primary+active STOP_TO_STOP 엣지 참여 STOP 노드. 0-based dense `node_index` | `num_nodes`, **x** 행 순서 |
+| `public.gatv2_edge_primary_active` | edge_index 재료 + `distance_km/time_min/*_log` (F_e=4) | **edge_index**, **edge_attr** |
+| `public.gatv2_snapshot_stop_features_train` | per-(state_ts, node) 학습 row. overnight/terminal 전이 제외 | **x** (F_x=10) + **y** (F_y=3) |
+| `public.gatv2_snapshot_summary` | snapshot 수 / 시간 범위 / rows 분포 | 로더 메타 / split 기준 |
+| `public.gatv2_edge_summary` | 그래프 스켈레톤 통계 | shape sanity |
 
-#### 3. 雅뚯눘????블??癒?뒅
+#### 3. 주요 설계 원칙
 
-- **?紐껊굡 筌뤴뫁彛??*: primary+active STOP_TO_STOP ?節? 筌〓챷肉?STOP 筌? ?⑥쥓??terminal-only stop ??뽰뇚.
-- **?節? 筌뤴뫁彛??*: `edge_type='STOP_TO_STOP' AND is_primary_edge AND is_active`.
-- **node_index**: `node_uid` ??살カ筌△뫁??`row_number()-1`. node_uid set ?븍뜄??????紐꾨?揶??⑥쥙??
-- **??덈뮸 ??뽰뇚 域뱀뮇??*: `is_overnight_gap=1 OR is_terminal_transition=1` ?袁⑥쎗 ??
-- **Target 癰궰??*: `next_*_recent` ??`log1p` ??덈뻻 ?紐꾪뀱 ??MSE in log space, ?????`expm1` 癰귣벊??
-- **edge_attr**: `distance_km`, `time_min`, `distance_m_log`, `time_sec_log` 4?? Scaling ?? ???袁⑤뻷.
-- **獄쎻뫚堉??*: `is_bidirectional=false` ?醫?. ??媛???節???筌뤴뫀??????癒?퐣 筌ｌ꼶??
-- **甕곕뗄??獄?*: dynamic traffic edge / heterogeneous graph / RL policy ??筌뤴뫀紐???苡???ｍ??袁⑤뻷.
+- **노드 모집단**: primary+active STOP_TO_STOP 엣지 참여 STOP 만. 고립/terminal-only stop 제외.
+- **엣지 모집단**: `edge_type='STOP_TO_STOP' AND is_primary_edge AND is_active`.
+- **node_index**: `node_uid` 오름차순 `row_number()-1`. node_uid set 불변이면 세션 간 고정.
+- **학습 제외 규칙**: `is_overnight_gap=1 OR is_terminal_transition=1` 전량 컷.
+- **Target 변환**: `next_*_recent` 에 `log1p` 동시 노출 — MSE in log space, 평가시 `expm1` 복원.
+- **edge_attr**: `distance_km`, `time_min`, `distance_m_log`, `time_sec_log` 4열. Scaling 은 뷰 아님.
+- **방향성**: `is_bidirectional=false` 유지. 역방향 엣지는 모델 내부에서 처리.
+- **범위 밖**: dynamic traffic edge / heterogeneous graph / RL policy — 모두 이번 단계 아님.
 
-#### 4. Readiness ??쇰? 野껉퀗??([APPROVED])
+#### 4. Readiness 실측 결과 ([APPROVED])
 
-| ID | 筌왖??| 筌β돦?쇿첎?| 疫꿸퀣? | ?癒?젟 |
+| ID | 지표 | 측정값 | 기준 | 판정 |
 |----|------|-------|------|------|
-| V1 | num_nodes | **4,116** | ??5,705 (graph_node_master STOP seed) | ??|
-| V1 | index_gap_check_zero_ok | **0** | = 0 | ??|
-| V2 | num_edges | **5,484** | = graph_edge_master v2 primary_edges | ??|
-| V2 | distinct_src / distinct_dst | 4,096 / 4,089 | < num_nodes | ??|
-| V2 | orphan_index_cnt / self_loop_cnt | **0 / 0** | = 0 | ??|
-| V2 | rank1_cnt / non_rank1_cnt | **5,484 / 0** | 100% primary | ??|
-| V3 | distinct_route_dirs | 301 | ??| 癰귣떯??|
-| V3 | distance (min/avg/p50/p95/max) m | 6.88 / 571.4 / 404.2 / 1,475.8 / 17,438.65 | ????獄쏆꼵瑗?17km 疫??類ㅺ맒 | ??|
-| V3 | time_sec (min/avg/max) | 1.24 / 102.86 / 3,138.96 | ?類ㅺ맒 (17km @ 20km/h ??3060s) | ??|
-| V4 | **total_training_rows** | **20,289,600** | ??20,490,432 (overnight/terminal ??뽰뇚) | ??|
-| V4 | orphan_node_index_cnt | **0** | = 0 | ??|
-| V4 | overnight_leak_cnt / terminal_leak_cnt | **0 / 0** | = 0 | ??|
-| V4 | non_stop_leak_cnt | **0** | = 0 | ??|
-| V5 | distinct_snapshots | **6,570** | ??6,935 | ??|
-| V5 | min_state_ts / max_state_ts | 2023-01-01 05:00 / 2023-12-31 22:00 | 2023 ?袁㏓럡揶?| ??|
-| V5 | rows_per_snapshot (min/avg/max) | 2,848 / 3,088.22 / 3,157 | 域뱀쥙???브쑵猷?| ??|
-| V6 | nodes_with_training_rows | 3,333 | ?紐껊굡 筌뤴뫁彛??4,116 餓?81% | 癰귣떯??|
-| V6 | rows_per_node (min/avg/max) | 18 / 6,087.49 / 6,570 | max=distinct_snapshots ??깊뒄 | ??|
-| V7 | nodes_without_any_training_row | **783** | ??| ?醫묓닔 (吏?-A 筌〓㈇?? |
-| V8 | negative_target_cnt | **0** | = 0 | ??|
-| V8 | next_boardings (min/max/avg) | 0 / 750 / 8.83 | ??| 癰귣떯??|
-| V8 | max_next_waiting | 674 | ??| 癰귣떯??|
+| V1 | num_nodes | **4,116** | ≤ 5,705 (graph_node_master STOP seed) | ✅ |
+| V1 | index_gap_check_zero_ok | **0** | = 0 | ✅ |
+| V2 | num_edges | **5,484** | = graph_edge_master v2 primary_edges | ✅ |
+| V2 | distinct_src / distinct_dst | 4,096 / 4,089 | < num_nodes | ✅ |
+| V2 | orphan_index_cnt / self_loop_cnt | **0 / 0** | = 0 | ✅ |
+| V2 | rank1_cnt / non_rank1_cnt | **5,484 / 0** | 100% primary | ✅ |
+| V3 | distinct_route_dirs | 301 | — | 보고 |
+| V3 | distance (min/avg/p50/p95/max) m | 6.88 / 571.4 / 404.2 / 1,475.8 / 17,438.65 | 대구 반경 17km 급 정상 | ✅ |
+| V3 | time_sec (min/avg/max) | 1.24 / 102.86 / 3,138.96 | 정상 (17km @ 20km/h ≈ 3060s) | ✅ |
+| V4 | **total_training_rows** | **20,289,600** | ≤ 20,490,432 (overnight/terminal 제외) | ✅ |
+| V4 | orphan_node_index_cnt | **0** | = 0 | ✅ |
+| V4 | overnight_leak_cnt / terminal_leak_cnt | **0 / 0** | = 0 | ✅ |
+| V4 | non_stop_leak_cnt | **0** | = 0 | ✅ |
+| V5 | distinct_snapshots | **6,570** | ≤ 6,935 | ✅ |
+| V5 | min_state_ts / max_state_ts | 2023-01-01 05:00 / 2023-12-31 22:00 | 2023 전구간 | ✅ |
+| V5 | rows_per_snapshot (min/avg/max) | 2,848 / 3,088.22 / 3,157 | 균일 분포 | ✅ |
+| V6 | nodes_with_training_rows | 3,333 | 노드 모집단 4,116 중 81% | 보고 |
+| V6 | rows_per_node (min/avg/max) | 18 / 6,087.49 / 6,570 | max=distinct_snapshots 일치 | ✅ |
+| V7 | nodes_without_any_training_row | **783** | — | ⚠️ (§4-A 참고) |
+| V8 | negative_target_cnt | **0** | = 0 | ✅ |
+| V8 | next_boardings (min/max/avg) | 0 / 750 / 8.83 | — | 보고 |
+| V8 | max_next_waiting | 674 | — | 보고 |
 
-**?怨쀫떊 ??鈺?*: `avg_rows_per_snapshot ??distinct_snapshots`
-= 3,088.22 ??6,570 = 20,289,605 ??**20,289,600** (total_training_rows). ????揶??類λ? ??
-##### 吏?-A.  V7 = 783 ?紐껊굡 ??곴퐤
+**산술 대조**: `avg_rows_per_snapshot × distinct_snapshots`
+= 3,088.22 × 6,570 = 20,289,605 ≈ **20,289,600** (total_training_rows). 두 뷰 간 정합 ✓
 
-4,116揶??紐껊굡 餓?783揶?(??9%) ??域밸챶????醫뤿쨨嚥≪뮇?(?節? ?臾먭국)?癒?뮉 鈺곕똻????筌?2023??365????덈툧 ?諭곷릭筌?疫꿸퀡以??0 ??곷선??`rl_stop_transition_features` ??????곕즲 ??용뼄.
-?????⑥쥓??isolated) ???袁⑤빍??**passenger-activity-zero stop** ???? ?????硫몃궦
-/ ??뽰サ??/ 2023??餓?揶쏆뮇苑???類ｌ첒?????쉘???봔?? PyG `Data` ?癒?퐣 `node_mask`
-= False 嚥??癒?짗 筌ｌ꼶????嚥??곕떽? 鈺곌퀣???븍뜇釉????dataset contract 吏?.2 ????? 筌뤿굞苑??
+##### §4-A.  V7 = 783 노드 해석
 
-#### 5. ??? 獄쏆뮄猿??????묒눖??筌왖??2??볦퍢 7??
-`create_views.log` ????쎈뻬 7,664.4s. ?癒?뵥?? `rl_stop_transition_features` ?癒?퍥揶쎛
-**??* ??욱? 域??袁⑹벥 `gatv2_snapshot_stop_features_train` ???됯퀣?졿묾??????筌??묒눖?곻쭕?덈뼄 21.6M row CTE 揶쎛 ???얍첎?뺣쭆?? ??덈뮸 ??PyG DataLoader 揶쎛 ???됯퀡?
-獄쏆꼶????쇳떔??롢늺 I/O 癰귣쵎?? **??쇱벉 ??ｍ?筌욊쑵六???materialization 野껉퀣???袁⑹뒄**:
+4,116개 노드 중 783개 (≈19%) 는 그래프 토폴로지(엣지 양끝)에는 존재하지만 2023년
+365일 동안 승하차 기록이 0 이어서 `rl_stop_transition_features` 에 한 행도 없다.
+이는 고립(isolated) 이 아니라 **passenger-activity-zero stop** 이다. 대구 외곽
+/ 시즌성 / 2023년 중 개설된 정류장 패턴과 부합. PyG `Data` 에서 `node_mask`
+= False 로 자동 처리되므로 추가 조치 불필요 — dataset contract §1.2 에 이미 명세됨.
 
-- **????A (亦낅슣??**: `CREATE TABLE gatv2_snapshot_stop_features_train_mat AS SELECT * FROM gatv2_snapshot_stop_features_train;`
-  ??`(state_ts, node_index)` 癰귣벏鍮 ?紐껊쑔?? ??甕?~2??볦퍢 椰꾨챶?곻쭪?筌???꾩뜎??O(1) 鈺곌퀬??
-- **????B**: ?醫롮? 疫꿸퀡而???볦퍢 ??덈즲?怨뺤쨮 ??롮뵬 ??덈뮉 ???뵠??嚥≪뮆??
+#### 5. 숨은 발견 — 뷰 쿼리 지연 2시간 7분
 
-#### 6. ??쇱벉 ??ｍ???`05_training/build_gatv2_dataset.py` 筌욊쑵六?揶쎛?????
+`create_views.log` 총 실행 7,664.4s. 원인은 `rl_stop_transition_features` 자체가
+**뷰** 이고, 그 위의 `gatv2_snapshot_stop_features_train` 도 뷰이기 때문에 매
+쿼리마다 21.6M row CTE 가 재전개된다. 학습 시 PyG DataLoader 가 이 뷰를
+반복 스캔하면 I/O 병목. **다음 단계 진행 전 materialization 결정 필요**:
 
-**YES ???됰뗀以????곸젫**. ???醫됯퍙 ?⑥눘??1 椰?亦낅슣??
+- **옵션 A (권장)**: `CREATE TABLE gatv2_snapshot_stop_features_train_mat AS SELECT * FROM gatv2_snapshot_stop_features_train;`
+  → `(state_ts, node_index)` 복합 인덱스. 한 번 ~2시간 걸리지만 이후는 O(1) 조회.
+- **옵션 B**: 날짜 기반 시간 윈도우로 잘라 읽는 파이썬 로더.
 
-| # | ?⑥눘??| ??쑴??| ?됰뗀以?? |
+#### 6. 다음 단계 — `05_training/build_gatv2_dataset.py` 진행 가능 여부
+
+**YES — 블로킹 해제**. 단 선결 과제 1 건 권장:
+
+| # | 과제 | 비용 | 블로킹? |
 |---|------|-----|---------|
-| 1 | `gatv2_snapshot_stop_features_train` materialize (吏? ????A) | ~2h (1?? | **亦낅슣??* (?源낅뮟 ?얜챷?ｆ에???덈뮸 筌????늺 ??곴컧????곷튊 ?? |
-| 2 | `build_gatv2_dataset.py` ??쇳렩??딅꽑 (contract 吏?) | - | ??곸벉 |
-| 3 | invariant C1~C8 assert | - | ??곸벉 |
-| 4 | ??볦퍢??split (train 01-10 / val 11 / test 12) | - | ??곸벉 |
+| 1 | `gatv2_snapshot_stop_features_train` materialize (§5 옵션 A) | ~2h (1회) | **권장** (성능 문제로 학습 못 돌면 어차피 해야 함) |
+| 2 | `build_gatv2_dataset.py` 스켈레톤 (contract §9) | - | 없음 |
+| 3 | invariant C1~C8 assert | - | 없음 |
+| 4 | 시간축 split (train 01-10 / val 11 / test 12) | - | 없음 |
 
-#### 7. ?봔?怨빿?/ ?類ｂ봺
+#### 7. 부산물 / 정리
 
-- ??DDL ?? `CREATE OR REPLACE VIEW` idempotent. ???????됱읈.
-- ????밴쉐 ?癒?퍥?????λ뜆?筌? readiness 筌ｋ똾寃?(R1~R8) 揶쎛 20M row 獄쏆꼶??筌욌쵌?????볦퍢 ???봔??筌△뫁?.
-- `05_training/` ?遺얠젂?怨뺚봺 ?醫됲뇣 ?袁⑹뿯. ??롮몵嚥?`build_gatv2_dataset.py`, `train_gatv2.py`,
-  `eval_gatv2.py`, `gatv2_model.py` 揶쎛 ????????됰퓠 ?癒?봺??れ뱽 ??됱젟.
-- `run_gatv2_views.ps1` ?? ASCII-only 嚥????숅뜮?(PS 5.1 CP949 ??곷뭼嚥??λ뜃由???? 甕곌쑴???  ???뼓 ??쎈솭 ???怨론??곗쨮 燁살꼹?? ?紐꾪맜???⑤벀爰쏙쭖???볤탢).
+- 뷰 DDL 은 `CREATE OR REPLACE VIEW` idempotent. 재실행 안전.
+- 뷰 생성 자체는 수 초지만, readiness 체크 (R1~R8) 가 20M row 반복 집계라 시간 대부분 차지.
+- `05_training/` 디렉터리 신규 도입. 앞으로 `build_gatv2_dataset.py`, `train_gatv2.py`,
+  `eval_gatv2.py`, `gatv2_model.py` 가 이 폴더 안에 자리잡을 예정.
+- `run_gatv2_views.ps1` 은 ASCII-only 로 재정비 (PS 5.1 CP949 이슈로 초기 한글 버전이
+  파싱 실패 → 영문으로 치환, 인코딩 공격면 제거).
 
 
-## ?諭?2026-04-18
-### RL ?怨밴묶 ?袁⑹뵠 ?諭苑?Stop Transition Features) 獄?SAR 筌뤿굞苑??類ㅼ젟
+## 📅 2026-04-18
+### RL 상태 전이 특성(Stop Transition Features) 및 SAR 명세 확정
 
-?袁⑥쨮??븍뱜??Phase 5???얠눖????怨쀬뵠??t, t+1 ??뤿선筌?????뤿선?? ??쇱젫 揶쏅벤???덈뮸 筌뤴뫀???雅뚯눘???**?怨밴묶(State), ??곕짗(Action), 癰귣똻湲?Reward) 筌뤿굞苑?*???⑥쥙???랁???? ??밴쉐??롫뮉 ???뵠?袁⑥뵬?紐꾩뱽 ?닌딇뀧?????
+프로젝트는 Phase 5의 물리적 데이터(t, t+1 페어링)를 넘어서, 실제 강화학습 모델에 주입할 **상태(State), 행동(Action), 보상(Reward) 명세**를 고정하고 이를 생성하는 파이프라인을 구축하였다.
 
-#### 1. SAR 筌뤿굞苑??⑥쥙??(`rl_sar_spec.md` [NEW])
-- **?怨밴묶(State)**: ?類ｌ첒????μ맄 ??륁뒄 ?얜챶???곗쨮 ?類ㅼ벥. `waiting_passenger_cnt`??揶쎛??餓λ쵐?????곸겫 ?類ｌ젾 ?醫륁깈(Primary Pressure Signal)嚥???쇱젟.
-- **??곕짗(Action)**: 甕곌쑴???癒?뵠?袁る뱜??筌△몿由?筌뤴뫚紐??類ｌ첒???醫뤾문(Target node selection)??곗쨮 揶쏆뮆???⑥쥙??
-- **癰귣똻湲?Reward)**: ??疫??諛댁뻤 ??ㅺ섯?怨? 揶쏅벤???????癰귣똻湲?Proxy Reward) ??블?
-- **??덈뮸 ??ｍ?*: ?袁⑹삺??'Graph-ready transition learning stage'嚥?域뱀뮇??(?袁⑹뵠 筌뤴뫀?쏙쭕?疫꿸퀡而?.
+#### 1. SAR 명세 고정 (`rl_sar_spec.md` [NEW])
+- **상태(State)**: 정류소 단위 수요 문맥으로 정의. `waiting_passenger_cnt`를 가장 중요한 운영 압력 신호(Primary Pressure Signal)로 설정.
+- **행동(Action)**: 버스 에이전트의 차기 목표 정류소 선택(Target node selection)으로 개념 고정.
+- **보상(Reward)**: 대기 승객 패널티를 강화한 대리 보상(Proxy Reward) 설계.
+- **학습 단계**: 현재를 'Graph-ready transition learning stage'로 규정 (전이 모델링 기반).
 
-#### 2. 筌뤴뫀?????깆퓗 ????밴쉐 (`02_ingest_jobs/create_rl_stop_transition_features.sql` [NEW])
-- **?怨쀬뵠??癰궰??*: ??륁뒄 ?怨쀬뵠?怨쀬벥 嚥≪뮄??癰궰??`ln(1+x)`), ??볦퍢/?遺우뵬????쀬넎 ?紐꾪맜??sin/cos) ?怨몄뒠.
-- **RL ?癒곕돗???굡 ?온??*: ??⑥퍢 ?⑤벉媛?4??볦퍢 ??곴맒)???紐???뤿연 `is_terminal_transition` 獄?`is_overnight_gap` ???삋域?雅뚯눘??
-- **?醫륁뒞 ??볦퍢 揶쏄쑨爰?*: ??⑥퍢 ?⑤벉媛????뽰뇚????쇱젫 ??곸겫 ?袁⑹뵠 ??볦퍢(`delta_t_hr_effective`) ?怨쀭뀱.
+#### 2. 모델용 피처 뷰 생성 (`02_ingest_jobs/create_rl_stop_transition_features.sql` [NEW])
+- **데이터 변환**: 수요 데이터의 로그 변환(`ln(1+x)`), 시간/요일의 순환 인코딩(sin/cos) 적용.
+- **RL 에피소드 관리**: 야간 공백(4시간 이상)을 인지하여 `is_terminal_transition` 및 `is_overnight_gap` 플래그 주입.
+- **유효 시간 간격**: 야간 공백을 제외한 실제 운영 전이 시간(`delta_t_hr_effective`) 산출.
 
-#### 3. ??깆퓗 ?얜떯猿??野꺜筌?獄???쎈뻬 (`03_validation_queries/rl_stop_transition_features_readiness.sql` [NEW])
-- **筌ㅼ뮇伊??癒?젟**: `final_decision = APPROVED` / `rl_stop_transition_features_ready = YES`
-- **野꺜筌?????*: Null safety, ???땾 ??륁뒄 筌△뫀?? ??볦퍢 ????揶쏅Ŋ?, ?袁⑹뵠 ?????筌ｋ똾寃?
-- **??쎈뻬 獄???뽰젟 ??鍮?(Remediation)**:
-    - **?紐꾪맜??????*: ??덈즲??`psql` ??띻펾??UTF8 ?紐꾪맜??沃섎챷?わ쭕?쇳뒄 ??욧퍙 (`SET client_encoding`).
-    - **????筌?Ŋ???*: `is_peak` (boolean) ????껊궢 ?類ㅻ땾 ??쑨???겸뫖猷????욧퍙??띾┛ ?袁る립 筌뤿굞???筌?Ŋ????怨몄뒠.
-    - **野껋럡??鈺곌퀗援?筌ｌ꼶??*: 2023-12-31(筌ㅼ뮇伊????筌띾뜆?筌?甕곌쑵沅?????뮞 ?怨밴묶嚥?鈺곕똻???? ??녿툡 獄쏆뮇源??롫뮉 甕곌쑵沅????봔鈺?18 vs 19) ?袁⑷맒????뽯뮞??野껋럡??鈺곌퀗援??곗쨮 ??곴퐤??뤿연, 筌띾뜆?筌??醫롫퓠 ??쀫퉸 `n-1` 甕곌쑵沅????됱뒠??롫즲嚥?野꺜筌?嚥≪뮇彛?癰귣똻??
+#### 3. 피처 무결성 검증 및 실행 (`03_validation_queries/rl_stop_transition_features_readiness.sql` [NEW])
+- **최종 판정**: `final_decision = APPROVED` / `rl_stop_transition_features_ready = YES`
+- **검증 항목**: Null safety, 음수 수요 차단, 시간 역전 감지, 전이 일관성 체크.
+- **실행 및 시정 사항 (Remediation)**:
+    - **인코딩 대응**: 윈도우 `psql` 환경의 UTF8 인코딩 미스매치 해결 (`SET client_encoding`).
+    - **타입 캐스팅**: `is_peak` (boolean) 타입과 정수 비교 충돌을 해결하기 위한 명시적 캐스팅 적용.
+    - **경계 조건 처리**: 2023-12-31(최종일)의 마지막 버킷이 소스 상태로 존재하지 않아 발생하는 버킷 수 부족(18 vs 19) 현상을 시스템 경계 조건으로 해석하여, 마지막 날에 한해 `n-1` 버킷을 허용하도록 검증 로직 보완.
 
-#### 4. ?袁⑹삺 ?怨쀬뵠???怨밴묶
+#### 4. 현재 데이터 상태
 - `row_count`: **21,612,482**
-- `rl_usable_row_count`: **20,490,432** (??⑥퍢 ?⑤벉媛?獄??怨????袁⑹뵠 ??뽰뇚 揶쎛???怨쀬뵠??
-- `active_days`: 365??- `final_status`: **APPROVED**
+- `rl_usable_row_count`: **20,490,432** (야간 공백 및 터미널 전이 제외 가용 데이터)
+- `active_days`: 365일
+- `final_status`: **APPROVED**
 
 ---
 
-## ?諭?2026-04-15
-### Phase 4 癰귣벀???袁⑥┷ 夷?Phase 5 ??낆젾 域뱀뮄爰??類ㅼ젟 ?袁⑥┷ ???????類ｂ봺
+## 📅 2026-04-15
+### Phase 4 복구 완료 · Phase 5 입력 규격 확정 완료 — 이력 정리
 
-??????? 2026-04-14 ?臾믩씜 ?紐꾨?癒?퐣 ??苑??Phase 4 / Phase 5 ?源껊궢??**????疫꿸퀡而??곗쨮 ?怨멸쉭 疫꿸퀡以?*??癰귣똻??嚥≪뮄?????
+이 항목은 2026-04-14 작업 세션에서 달성한 Phase 4 / Phase 5 성과를 **사실 기반으로 상세 기록**한 보완 로그이다.
 
-#### ?袁⑹삺 ?袁⑥쨮??븍뱜 ?怨밴묶 ?遺용튋
+#### 현재 프로젝트 상태 요약
 
-Phase 4(`graph_state_timeslice` ?怨몄삺)?? Phase 5(`rl_state_training_base` ??밴쉐) 筌뤴뫀紐?筌ㅼ뮇伊?APPROVED????苑?????
-????2023 observed 疫꿸퀡而???볧???怨밴묶 ??됱뵠??21.6M???? ??쇱벉 ?온筌???뽰젎 疫꿸퀡而???덈뮸 甕곗쥙???21.6M??揶쎛 ?類ｋ궖??뤿???거?
-?袁⑥쨮??븍뱜???怨쀬뵠??癰귣벀?꾩쮯?怨몄삺 ??ｍ롧몴?鈺곕챷毓??랁?**筌뤴뫀?쏙쭕???ｍ?*嚥?筌욊쑴??????
+Phase 4(`graph_state_timeslice` 적재)와 Phase 5(`rl_state_training_base` 생성) 모두 최종 APPROVED를 달성하였다.
+대구 2023 observed 기반 시계열 상태 레이어(21.6M행)와 다음 관측 시점 기반 학습 베이스(21.6M행)가 확보되었으며,
+프로젝트는 데이터 복구·적재 단계를 졸업하고 **모델링 단계**로 진입하였다.
 
-??쇱벉 ??ｍ???袁⑥삋?? 揶쏆늾??
+다음 단계는 아래와 같다.
 
-1. ?怨밴묶(State)夷??곕짗(Action)夷뚩퉪?곴맒(Reward) 筌뤿굞苑??⑥쥙??2. PyTorch ??낆젾 ?怨쀬뵠?怨쀫??怨뚭퍙
-3. 域밸챶????닌듼?edge) 癰귣벀??獄?GAT/RL ??덈뮸 ???뵠?袁⑥뵬???類ㅼ삢
+1. 상태(State)·행동(Action)·보상(Reward) 명세 고정
+2. PyTorch 입력 데이터셋 연결
+3. 그래프 구조(edge) 복구 및 GAT/RL 학습 파이프라인 확장
 
 ---
 
-## ?諭?2026-04-14
-### Phase 4 `graph_state_timeslice` 癰귣벀???袁⑥┷ (APPROVED)
+## 📅 2026-04-14
+### Phase 4 `graph_state_timeslice` 복구 완료 (APPROVED)
 
-#### 野껉퀣???鍮?????쎄텕筌?獄????대???
-| ????| ?類ㅼ뵥 野껉퀗??|
+#### 결정사항 — 스키마 및 키 교훈
+
+| 항목 | 확인 결과 |
 | --- | --- |
-| `fact_stop_usage_hourly` ??쇱젫 ??쎄텕筌?| `service_date(date)`, `service_hour(integer)`, `stop_id`, `boardings`, `alightings` |
-| `service_hour` ????| **?類ㅻ땾 ??볦퍢??**(0??3), timestamp ?袁⑤뻷 |
-| `state_ts` ??밴쉐 域뱀뮇??| `service_date + service_hour` 鈺곌퀬鍮??곗쨮 timestamp ???문 |
-| ?紐껊굡 筌띾뜆???| `graph_node` ???뵠?됰뗄? 鈺곕똻???? ??놁벉 ????쇱젫 筌띾뜆??怨뺣뮉 `graph_node_master` |
-| 揶쏄쑴苑?筌띾뜆???| `graph_edge_master` ???袁⑹삺 0????edge 疫꿸퀡而?癰귣벀???븍뜃? |
-| STOP ?紐껊굡 ??뺣굡 | `dim_stop` 疫꿸퀣???곗쨮 `graph_node_master` ??`STOP` ?紐껊굡 **5,705椰?* ??뺣굡 ?袁⑥┷ |
+| `fact_stop_usage_hourly` 실제 스키마 | `service_date(date)`, `service_hour(integer)`, `stop_id`, `boardings`, `alightings` |
+| `service_hour` 타입 | **정수 시간대**(0–23), timestamp 아님 |
+| `state_ts` 생성 규칙 | `service_date + service_hour` 조합으로 timestamp 파생 |
+| 노드 마스터 | `graph_node` 테이블은 존재하지 않음 → 실제 마스터는 `graph_node_master` |
+| 간선 마스터 | `graph_edge_master` 는 현재 0행 → edge 기반 복구 불가 |
+| STOP 노드 시드 | `dim_stop` 기준으로 `graph_node_master` 에 `STOP` 노드 **5,705건** 시드 완료 |
 
-#### ??쎈뻬野껉퀗????`graph_state_timeslice` ?怨몄삺 野꺜筌?
-| 筌왖??| 揶?|
+#### 실행결과 — `graph_state_timeslice` 적재 검증
+
+| 지표 | 값 |
 | --- | --- |
 | `row_cnt` | **21,615,863** |
 | `distinct_time_buckets` | 6,935 |
@@ -815,190 +811,206 @@ Phase 4(`graph_state_timeslice` ?怨몄삺)?? Phase 5(`rl_state_training_base` ?
 | `negative_boardings` | 0 |
 | `invalid_hour` | 0 |
 
-**Readiness 筌ㅼ뮇伊??癒?젟**: `APPROVED` / `gat_rl_input_ready = YES`
+**Readiness 최종 판정**: `APPROVED` / `gat_rl_input_ready = YES`
 
-#### Phase 4 ??륁젟/?類ㅼ젟 ???뵬
+#### Phase 4 수정/확정 파일
 
-| ???뵬 | ???뼎 ??륁젟 ?????|
+| 파일 | 핵심 수정 포인트 |
 | --- | --- |
-| `02_ingest_jobs/create_graph_state_timeslice.sql` | UTF-8 ?類ｂ봺, `graph_node_master` 筌〓챷?? `state_ts = service_date + service_hour` |
-| `02_ingest_jobs/load_graph_state_timeslice_initial.sql` | `boardings/alightings` ??쇱젫 ?뚎됱쓥筌?獄쏆꼷?? 2023 observed only ?袁り숲 |
-| `03_validation_queries/graph_state_timeslice_readiness.sql` | 0?브쑬??獄쎻뫗堉?division-by-zero guard) ?곕떽? |
+| `02_ingest_jobs/create_graph_state_timeslice.sql` | UTF-8 정리, `graph_node_master` 참조, `state_ts = service_date + service_hour` |
+| `02_ingest_jobs/load_graph_state_timeslice_initial.sql` | `boardings/alightings` 실제 컬럼명 반영, 2023 observed only 필터 |
+| `03_validation_queries/graph_state_timeslice_readiness.sql` | 0분모 방어(division-by-zero guard) 추가 |
 
 ---
 
-### Phase 5 ??낆젾 域뱀뮄爰??類ㅼ젟 ?袁⑥┷ (APPROVED)
+### Phase 5 입력 규격 확정 완료 (APPROVED)
 
-#### 野껉퀣???鍮?????깆퓗 ?브쑬履?
-`graph_state_timeslice` 疫꿸퀣???곗쨮 RL ??낆젾 ?諭苑?feature) ?브쑬履잏몴??袁⑥┷?????
+#### 결정사항 — 피처 분류
 
-#### 筌앸맩??????揶쎛?????뼎 ??낆젾 (Core Features)
+`graph_state_timeslice` 기준으로 RL 입력 특성(feature) 분류를 완료하였다.
 
-| ??깆퓗 | ??쑨??|
+#### 즉시 사용 가능 핵심 입력 (Core Features)
+
+| 피처 | 비고 |
 | --- | --- |
-| `boardings_recent` | ?袁⑹삺 ??뽰젎 ?諭媛?|
-| `alightings_recent` | ?袁⑹삺 ??뽰젎 ??뤾컧 |
-| `waiting_passenger_cnt` | ??疫??諛댁뻤 ??|
-| `hour_of_day` | ??볦퍢?? (0??3) |
-| `day_of_week` | ?遺우뵬 (0??) |
-| `is_peak` | 筌ｂ뫀紐????? |
+| `boardings_recent` | 현재 시점 승차 |
+| `alightings_recent` | 현재 시점 하차 |
+| `waiting_passenger_cnt` | 대기 승객 수 |
+| `hour_of_day` | 시간대 (0–23) |
+| `day_of_week` | 요일 (0–6) |
+| `is_peak` | 첨두시 여부 |
 
-#### ?袁⑸꺗 ?類ㅼ삢 癰귣?履??뚎됱쓥
+#### 후속 확장 보류 컬럼
 
-| ??깆퓗 | 癰귣?履???? |
+| 피처 | 보류 사유 |
 | --- | --- |
-| `predicted_demand_10m` | ??됰? 筌뤴뫀??沃섎㈇?꾤빊?|
-| `predicted_demand_30m` | ??됰? 筌뤴뫀??沃섎㈇?꾤빊?|
-| `nearest_bus_eta_sec` | ??쇰뻻揶??袁⑺뒄 ?癒?퓝 ??곸벉 |
-| `active_bus_cnt_nearby` | ??쇰뻻揶??袁⑺뒄 ?癒?퓝 ??곸벉 |
-| `link_travel_time_sec` | `graph_edge_master` 0??|
-| `link_speed_kmh` | `graph_edge_master` 0??|
-| `link_congestion_index` | `graph_edge_master` 0??|
-| `link_flow_proxy` | `graph_edge_master` 0??|
-| `incident_flag` | ?????癒?퓝 ??곸벉 |
+| `predicted_demand_10m` | 예측 모델 미구축 |
+| `predicted_demand_30m` | 예측 모델 미구축 |
+| `nearest_bus_eta_sec` | 실시간 위치 원천 없음 |
+| `active_bus_cnt_nearby` | 실시간 위치 원천 없음 |
+| `link_travel_time_sec` | `graph_edge_master` 0행 |
+| `link_speed_kmh` | `graph_edge_master` 0행 |
+| `link_congestion_index` | `graph_edge_master` 0행 |
+| `link_flow_proxy` | `graph_edge_master` 0행 |
+| `incident_flag` | 사고 원천 없음 |
 
-#### Phase 5 ?醫됲뇣 ?怨쀭뀱??
-| ???뵬 | ??釉?|
+#### Phase 5 신규 산출물
+
+| 파일 | 역할 |
 | --- | --- |
-| `04_model_inputs/graph_state_feature_spec.md` | RL ?怨밴묶 ?⑤벀而???깆퓗 筌뤿굞苑??|
-| `02_ingest_jobs/create_rl_state_training_base.sql` | ??덈뮸 甕곗쥙???DDL + `LEAD()` 疫꿸퀡而?(t, t+1) ??뤿선筌?|
-| `03_validation_queries/rl_state_training_base_readiness.sql` | ??덈뮸 甕곗쥙????얜떯猿??野꺜筌???묐뱜 |
+| `04_model_inputs/graph_state_feature_spec.md` | RL 상태 공간 피처 명세서 |
+| `02_ingest_jobs/create_rl_state_training_base.sql` | 학습 베이스 DDL + `LEAD()` 기반 (t, t+1) 페어링 |
+| `03_validation_queries/rl_state_training_base_readiness.sql` | 학습 베이스 무결성 검증 수트 |
 
-#### ??쎈뻬野껉퀗????`rl_state_training_base` ??밴쉐 獄?野꺜筌?
-| 筌왖??| 揶?|
+#### 실행결과 — `rl_state_training_base` 생성 및 검증
+
+| 지표 | 값 |
 | --- | --- |
 | `row_count` | **21,612,482** |
 
-#### ?類ㅼ젟 ?뚎됱쓥 ?닌듼?
-| ?뚎됱쓥 | ??살구 |
+#### 확정 컬럼 구조
+
+| 컬럼 | 설명 |
 | --- | --- |
-| `state_ts` | ?袁⑹삺 ?온筌???볦퍟 |
-| `next_state_ts` | ??쇱벉 ?온筌???볦퍟 (next observed, strict +1h ?袁⑤뻷) |
-| `node_uid` | ?紐껊굡 ?⑥쥙? ID |
-| `node_type` | ?紐껊굡 ?醫륁굨 |
-| `boardings_recent` | ?袁⑹삺 ?諭媛?|
-| `alightings_recent` | ?袁⑹삺 ??뤾컧 |
-| `waiting_passenger_cnt` | ?袁⑹삺 ??疫??諛댁뻤 |
-| `hour_of_day` | ??볦퍢?? |
-| `day_of_week` | ?遺우뵬 |
-| `is_peak` | 筌ｂ뫀紐??|
-| `next_boardings_recent` | ??쇱벉 ??뽰젎 ?諭媛?|
-| `next_alightings_recent` | ??쇱벉 ??뽰젎 ??뤾컧 |
-| `next_waiting_passenger_cnt` | ??쇱벉 ??뽰젎 ??疫??諛댁뻤 |
+| `state_ts` | 현재 관측 시각 |
+| `next_state_ts` | 다음 관측 시각 (next observed, strict +1h 아님) |
+| `node_uid` | 노드 고유 ID |
+| `node_type` | 노드 유형 |
+| `boardings_recent` | 현재 승차 |
+| `alightings_recent` | 현재 하차 |
+| `waiting_passenger_cnt` | 현재 대기 승객 |
+| `hour_of_day` | 시간대 |
+| `day_of_week` | 요일 |
+| `is_peak` | 첨두시 |
+| `next_boardings_recent` | 다음 시점 승차 |
+| `next_alightings_recent` | 다음 시점 하차 |
+| `next_waiting_passenger_cnt` | 다음 시점 대기 승객 |
 
-> **??곴퐤**: `next_state_ts`??strict one-hour future揶쎛 ?袁⑤빍??**next observed timestamp**(??쇱벉 ?온筌???볦퍟)????  
-> ??롳펷 19揶???곸겫 甕곌쑵沅?05~23?? 疫꿸퀣???곗쨮 ??⑥퍢 ?⑤벉媛??鈺곕똻???????덈뼄.
+> **해석**: `next_state_ts`는 strict one-hour future가 아니라 **next observed timestamp**(다음 관측 시각)이다.  
+> 하루 19개 운영 버킷(05~23시) 기준으로 야간 공백이 존재할 수 있다.
 
-#### Phase 5 Readiness 野꺜筌?野껉퀗??
-| 野꺜??????| 野껉퀗??|
+#### Phase 5 Readiness 검증 결과
+
+| 검사 항목 | 결과 |
 | --- | --- |
 | `time_inversion_cnt` | 0 |
 | `null_next_state_ts_cnt` | 0 |
 | `null_next_boardings_cnt` | 0 |
 | `null_next_alightings_cnt` | 0 |
 | `null_next_waiting_cnt` | 0 |
-| 筌뤴뫀諭????땾 野꺜??| 0 |
+| 모든 음수 검사 | 0 |
 | `invalid_hour_cnt` | 0 |
 
-**筌ㅼ뮇伊??癒?젟**: `final_decision = APPROVED` / `rl_training_base_ready = YES`
+**최종 판정**: `final_decision = APPROVED` / `rl_training_base_ready = YES`
 
 ---
 
-### ?類ｋ궖 ?온??獄???쎄텢(Agent Skill) ?癒?텦 筌ㅼ뮇???
-- **?醫됲뇣 ??륁춿 ?????쎈뱜??됱뵠????쎄텢 ??뽰젟**: ?紐꾧퐨 筌띻낱寃??袁⑷퍥 ??륁춿 ?癒?짗?遺? 筌왖??묐릭??`bus_route_link_bulk_collect_orchestrator` ??쎄텢 ?얜챷苑?.agents/skills) ?醫됲뇣 ??뽰젟.
-  - 疫꿸퀣????μ뵬 ?紐꾧퐨 ?怨몄삺 癰귣똾???關??`bus_route_link_ingest_guard`)?? 筌ｌ쥙?????釉???브쑬???뤿연, API ?룐뫂遊???뽯선, Manifest 嚥≪뮄??(??륁춿/?怨몄삺 ?브쑬??, Missing Route ?怨쀭뀱???袁⑤뼖??롫즲嚥???블?
-- **?癒?퓝 ?얜챷苑?獄???쎈읃 野꺜筌?*: NotebookLM???怨뺣짗??뤿연 ?袁⑥쨮??븍뱜 ??블??獄??온???怨뚮럡 ?얜챷苑뚨몴??대Ŋ媛?野꺜筌앹빜釉?? 疫꿸퀣??UrbanBus RL ?온???癒?┷???袁⑥쨮??븍뱜 ?뚢뫂???쎈뱜????녿┛??
-- **?袁⑥쨮??븍뱜 筌왖獄쏄퀗?꾥??Governance) 揶쏅벤??*: `project_log.md`??筌ㅼ뮇??酉釉??筌왖??48??볦퍢??疫꿸퀣???野껉퀣????鍮?獄??臾믩씜 ?源껊궢?????? 疫꿸퀡以?
-- **?臾믩씜 ?袁れ넺 ??녿┛??*: `02_ingest_jobs`?? `03_validation_queries`???醫됲뇣 ???뵬 獄???뽯뮞???怨밴묶???癒???랁??怨쀪퐨??뽰맄 ?????
+### 정보 관리 및 스킬(Agent Skill) 자산 최신화
 
-### ???뵠?袁⑥뵬????됱읈筌?Guard/Orchestrator) ??쎄텢 ?袁ⓦ늺 ?브쑵釉?(COMPLETED)
+- **신규 수집 오케스트레이터 스킬 제정**: 노선 링크 전체 수집 자동화를 지휘하는 `bus_route_link_bulk_collect_orchestrator` 스킬 문서(.agents/skills) 신규 제정.
+  - 기존 단일 노선 적재 보호 장치(`bus_route_link_ingest_guard`)와 철저히 역할을 분리하여, API 루프 제어, Manifest 로깅 (수집/적재 분리), Missing Route 산출을 전담하도록 설계.
+- **원천 문서 및 스펙 검증**: NotebookLM을 연동하여 프로젝트 설계서 및 관련 연구 문서를 교차 검증하고, 기존 UrbanBus RL 관련 자료를 프로젝트 컨텍스트에 동기화.
+- **프로젝트 지배구조(Governance) 강화**: `project_log.md`를 최신화하여 지난 48시간의 기술적 결정 사항 및 작업 성과를 통합 기록.
+- **작업 현황 동기화**: `02_ingest_jobs`와 `03_validation_queries`의 신규 파일 및 태스크 상태를 점검하고 우선순위 재정렬.
 
-- **4?? ???뼎 ?癒?뵠?袁る뱜 ??쎄텢 ?醫됲뇣 ??뽰젟**: ?怨쀬뵠?????뵠?袁⑥뵬??揶??袁れ넎 ??ｍ??癰귣쵎?됪??얜떯猿???袁れ굤??筌띾맦由??袁る퉸 4揶쏆뮇???諭????쎄텢???브쑵釉??醫롪퐬.
-  - `route_link_promotion_guard`: Staging ??Sequence ?諛닿봄 ??癰귣벏鍮???겸뫖猷?獄?Sequence ??μ쟿 獄쎻뫗堉?
-  - `spatial_graph_mapping_guard`: 150m-500m Fallback 疫꿸퀡而?STOP-LINK ?⑤벀而?筌띲끋釉? `geom_5187` ?癒?퓝 ?ル슦紐닸??怨몄뒠 ??롊??
-  - `fact_usage_promotion_orchestrator`: ?袁⑷퍥 ???뻬 ?μ빜鍮 ????Reconciliation) 獄????문 ?怨쀪텦 餓????땾 ??륁뒄(Negative) ??곴맒燁??醫롮뿯 筌△뫀??
-  - `graph_state_timeslice_bulk_loader`: ??륁퓝筌?椰??????????몄쎗 IO ?紐껋삏????筌띾뜄??Locking)??筌띾맦由??袁る립 ?袁り텕??우퓗(TRUNCATE+?紐껊쑔??筌왖????밴쉐) 揶쎛??諭?
+### 파이프라인 안전망(Guard/Orchestrator) 스킬 전면 분할 (COMPLETED)
 
-### ?怨몄삺 ?源낅뮟 ?λ뜃??袁れ넅 (COMPLETED)
+- **4대 핵심 에이전트 스킬 신규 제정**: 데이터 파이프라인 각 전환 단계의 병목과 무결성 위협을 막기 위해 4개의 특수 스킬을 분할 신설.
+  - `route_link_promotion_guard`: Staging → Sequence 승격 시 복합키 충돌 및 Sequence 단절 방어.
+  - `spatial_graph_mapping_guard`: 150m-500m Fallback 기반 STOP-LINK 공간 매핑, `geom_5187` 원천 좌표계 적용 의무화.
+  - `fact_usage_promotion_orchestrator`: 전체 통행 총합 대사(Reconciliation) 및 파생 연산 중 음수 수요(Negative) 이상치 유입 차단.
+  - `graph_state_timeslice_bulk_loader`: 수천만 건 수준의 대용량 IO 트랜잭션 마비(Locking)를 막기 위한 아키텍처(TRUNCATE+인덱스 지연 생성) 가이드.
 
-- ??μ뵬 ?紐껋삏????`BEGIN`~`COMMIT`) ??곷퓠??`TRUNCATE` ???紐껊쑔??PK ??깅뻻 ??볤탢 ????????뚯뿯(Bulk Insert) ???紐껊쑔??PK ??源???닌듼쒐몴??怨몄뒠??뤿연, 2,160筌?椰꾨똻???怨밴묶 ?怨쀬뵠?怨? `DataFileExtend` IO 癰귣쵎??獄?Lock 筌왖????곸뵠 ?⑥쥙???怨몄삺 ?怨몄뒠?遺용퓠 ?源껊궗.
+### 적재 성능 초고도화 (COMPLETED)
 
----
-
-## ?諭?2026-04-13 - ????甕곌쑴????곸뒠?????뵠?袁⑥뵬????됱젟??
-### ????甕곌쑴????곸뒠??Usage) ?怨쀬뵠?????뵠?袁⑥뵬????됱젟??
-- **??곸뒠???怨쀬뵠???怨몄삺 ?袁⑥┷**:
-  - ????甕곌쑴????곸뒠 ??쇱읅 ?怨쀬뵠??2023???袁⑷퍥 獄?2025???遺얩??怨쀬뵠????Staging ?怨몄삺 ???뵠?袁⑥뵬???닌딇뀧.
-  - ??덈즲???紐꾪맜??UHC/EUC-KR) 筌ｌ꼶??獄?SQL ??쎈뻬 ??띻펾(PowerShell ??띻펾 癰궰???? 筌ㅼ뮇??遺? ???퉸 ?怨몄삺 ??됱젟???類ｋ궖.
-- **Staging Gate 野꺜筌????궢**:
-  - `stg_daegu_stop_usage_*` ???뵠?됰뗄肉??????怨쀬뵠?????? ?袁⑸땾揶? 餓λ쵎??筌ｋ똾寃??袁⑥쨮?紐꾨뮞 揶쎛??
-- **Fact ???뵠???諛닿봄 獄?筌욌쵌??*:
-  - `promote_fact_stop_usage_hourly_from_2023_file.sql` ?源놁뱽 ???퉸 ?癒?퓝 ???뻬 ?怨쀬뵠?怨? 1??볦퍢 ??μ맄 ?類ｌ첒?貫???諭곷릭筌△뫀???怨쀬뵠?怨뺤쨮 癰궰???怨몄삺.
-- **?怨쀬뵠???類λ???野꺜筌?Reconciliation)**:
-  - `reconcile_usage_sums_2023.sql` 獄?`reconcile_usage_sums_2025_monthly.sql`???닌뗭겱??뤿연 Staging ?μ빜鍮??Fact ?μ빜鍮 揶쏄쑴???븍뜆?ょ㎉??????0椰꾨똻?앮에?野꺜筌?
+- 단일 트랜잭션(`BEGIN`~`COMMIT`) 내에서 `TRUNCATE` → 인덱스/PK 일시 제거 → 대량 삽입(Bulk Insert) → 인덱스/PK 재생성 구조를 적용하여, 2,160만 건의 상태 데이터를 `DataFileExtend` IO 병목 및 Lock 지연 없이 고속 적재 상용화에 성공.
 
 ---
 
-## ?諭?2026-04-10 - Graph State Timeslice ??블?
-### Integrated Graph Master Phase 4 ??Graph State Timeslice ??블?獄??닌딇뀧
+## 📅 2026-04-13 - 대구 버스 이용량 파이프라인 안정화
 
-#### ?怨밴묶 ???뵠????블?
-- `public.graph_state_timeslice` ??? ??쎄텕筌??類ㅼ젟.
-  - (state_ts, node_uid) 癰귣벏鍮 PK 筌ｋ떯??獄?10????μ맄 ??볦퍢 ??곴맒??筌?쑵源?
-  - STOP(??륁뒄)??LINK(??곕꽰) ?紐껊굡 ???? ?온?귐? ?袁る립 ??μ뵬 ?怨밴묶 ???뵠???닌듼?
+### 대구 버스 이용량(Usage) 데이터 파이프라인 안정화
 
-#### Hourly Allocation ?袁⑥셽
-
-- 1??볦퍢 ??μ맄 ??륁뒄 ?怨쀬뵠??`fact_stop_usage_hourly`)??10????μ맄 ???문 甕곌쑵沅??곗쨮 獄쏄퀡???롫뮉 嚥≪뮇彛??닌뗭겱.
-- `boardings_recent`, `alightings_recent` 筌왖??뽯퓠 ????1/6 ?醫딅뼣 ?怨몄뒠.
-
-#### ?醫됲뇣 ???뵬 ??밴쉐
-
-- `01_data_contracts/graph_state_timeslice_spec.md`: ?怨밴묶 ?뚎됱쓥 ?類ㅼ벥 獄???곴퐤 揶쎛??諭?
-- `02_ingest_jobs/create_graph_state_timeslice.sql`: ?怨밴묶 ???뵠??DDL.
-- `02_ingest_jobs/load_graph_state_timeslice_initial.sql`: 筌ㅼ뮇??揶쎛??뱀뵬(service_date) 疫꿸퀣? ?λ뜃由??怨몄삺 ??쎄쾿?깆???
-- `03_validation_queries/graph_state_timeslice_readiness.sql`: ?怨몄삺 ?類λ???獄?野껉퀣瑜ョ㎉?野꺜筌???묐뱜.
-
-#### ???뼎 野껉퀣????鍮?
-- LINK ?紐껊굡????쇰뻻揶??怨밴묶揶???얜즲, ETA ???? ?袁⑹삺 ???뮞 ?봔??以??紐낅퉸 `NULL + TODO` 筌ｌ꼶???렽??館?????뵠?袁⑥뵬???怨뚰???됱젟.
-- ?遺우뵬(`day_of_week`), 筌ｂ뫀紐??볦퍢(`is_peak`) ??AI ??덈뮸????깆퓗 ?뚎됱쓥 疫꿸퀡????釉?
+- **이용량 데이터 적재 완료**:
+  - 대구 버스 이용 실적 데이터(2023년 전체 및 2025년 월별 데이터)의 Staging 적재 파이프라인 구축.
+  - 윈도우 인코딩(UHC/EUC-KR) 처리 및 SQL 실행 환경(PowerShell 환경 변수 등) 최적화를 통해 적재 안정성 확보.
+- **Staging Gate 검증 통과**:
+  - `stg_daegu_stop_usage_*` 테이블에 대한 데이터 타입, 필수값, 중복 체크 프로세스 가동.
+- **Fact 테이블 승격 및 집계**:
+  - `promote_fact_stop_usage_hourly_from_2023_file.sql` 등을 통해 원천 통행 데이터를 1시간 단위 정류장별 승하차량 데이터로 변환/적재.
+- **데이터 정합성 검증(Reconciliation)**:
+  - `reconcile_usage_sums_2023.sql` 및 `reconcile_usage_sums_2025_monthly.sql`을 구현하여 Staging 총합과 Fact 총합 간의 불일치 여부를 0건으로 검증.
 
 ---
 
-## ?諭?2026-04-11 - Integrated Graph Master Bootstrap & Phase 4 Status Report
+## 📅 2026-04-10 - Graph State Timeslice 설계
 
-### ?袁⑥┷ ??鍮?- **???? ?봔?紐꾨뮞?紐껋삫 ??쎈뻬**: `bootstrap_graph_master.ps1`?????립 Phase 1~4 ??⑦겣 ?닌딇뀧 ??뺣즲.
-- **DB ?④쑴??獄??臾믩꺗 筌ㅼ뮇???*: `ryujo` -> `postgres` ??????袁れ넎 獄?`urbanbus` DB ??野껋옖????됱젟??
-- **Phase 1~3 APPROVED**: ?紐껊굡/揶쏄쑴苑?筌띲끋釉???됱뵠??곸벥 筌뤴뫀諭?野꺜筌?野껊슣??????궢 獄??닌딇뀧 ?袁⑥┷.
-- **Phase 4 HOLD**: `fact_stop_usage_hourly` ?怨쀬뵠???봔??0椰?嚥??紐낅립 ??볧???怨밴묶 ?怨몄삺 ?醫딅궖.
+### Integrated Graph Master Phase 4 — Graph State Timeslice 설계 및 구축
 
-### ?袁⑹삺 ?怨쀬뵠?怨뺤퓢??곷뮞 ?怨밴묶
-- `graph_node_master`: ?怨몄삺 ?袁⑥┷
-- `graph_edge_master`: ?怨몄삺 ?袁⑥┷
-- `stop_link_mapping_master`: 2筌??類? 癰귣똻?숁틦?? ?袁⑥┷
-- `fact_stop_usage_hourly`: ???뵠????밴쉐 ?袁⑥┷ (?怨쀬뵠????疫?餓?
+#### 상태 테이블 설계
 
-### 疫꿸퀣??野껉퀣????鍮?- **Single Session Auth**: psql???紐낃숲??됰뼒???紐꾩쵄 ??곷뭼 ??욧퍙???袁る립 `PGPASSWORD` ??띻펾 癰궰??疫꿸퀡而???μ뵬 ?紐꾨???쎄쾿?깆???筌?쑵源?
-- **Conditional Load**: ?癒?퓝 ?怨쀬뵠???봔?????브쑴苑????뵠????밴쉐??椰꾨?瑗?怨뺣뮉 ?怨쀬뵠??疫꿸퀡而???뽯선 嚥≪뮇彛??類ｂ뵲.
+- `public.graph_state_timeslice` 표준 스키마 확정.
+  - (state_ts, node_uid) 복합 PK 체계 및 10분 단위 시간 해상도 채택.
+  - STOP(수요)과 LINK(소통) 노드 통합 관리를 위한 단일 상태 테이블 구조.
 
-### ?館???臾믩씜
-- `fact_stop_usage_hourly` ?怨쀬뵠???怨몄삺 ???뵠?袁⑥뵬??揶쎛??
-- ?怨쀬뵠???怨몄삺 ??Phase 4 ??ㅻ즴 ??쎈뻬 獄?筌ㅼ뮇伊??諭??
-- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 筌띲끋釉??醫륁굨 ?類ㅼ삢 獄쏆꼷??- ???? 域밸챶?????블??얜챷苑?`integrated_graph_master_spec.md` ??Phase 2~3 疫꿸퀣???곗쨮 揶쏆뮇???袁⑥┷
+#### Hourly Allocation 전략
 
-#### ?醫됲뇣/??륁젟 ???뵬
-- ?醫됲뇣: `02_ingest_jobs/prepare_source_spatial_columns.sql`
+- 1시간 단위 수요 데이터(`fact_stop_usage_hourly`)를 10분 단위 파생 버킷으로 배분하는 로직 구현.
+- `boardings_recent`, `alightings_recent` 지표에 대해 1/6 할당 적용.
+
+#### 신규 파일 생성
+
+- `01_data_contracts/graph_state_timeslice_spec.md`: 상태 컬럼 정의 및 해석 가이드.
+- `02_ingest_jobs/create_graph_state_timeslice.sql`: 상태 테이블 DDL.
+- `02_ingest_jobs/load_graph_state_timeslice_initial.sql`: 최신 가용일(service_date) 기준 초기 적재 스크립트.
+- `03_validation_queries/graph_state_timeslice_readiness.sql`: 적재 정합성 및 결측치 검증 수트.
+
+#### 핵심 결정 사항
+
+- LINK 노드의 실시간 상태값(속도, ETA 등)은 현재 소스 부재로 인해 `NULL + TODO` 처리하며 향후 파이프라인 연계 예정.
+- 요일(`day_of_week`), 첨두시간(`is_peak`) 등 AI 학습용 피처 컬럼 기본 포함.
 
 ---
 
-## ?諭?2026-04-11 - Trip-level Synthetic Card Data Pipeline Redesign [COMPLETED]
+## 📅 2026-04-11 - Integrated Graph Master Bootstrap & Phase 4 Status Report
 
-### ?袁⑥┷ ??鍮?- **Ingestion ?袁⑥셽 ??륁젟 ?袁⑥┷**: ??밴쉐 ?怨쀬뵠??API揶쎛 揶쏆뮆?????뻬(Trip-level) ?怨쀬뵠?怨쀬뿫???類ㅼ뵥??랁?2??ｍ??怨몄삺 筌ｋ떯???닌딇뀧.
-- **Deduplication 筌롫뗄鍮??됱촿**: `record_hash` (SHA256) 疫꿸퀡而??Staging 餓λ쵎??獄쎻뫗? 嚥≪뮇彛??怨몄뒠.
-- **Cross-Layer 野꺜筌???블?*: Staging??`UTZTN_NOPE` ?μ빜鍮??Fact???諭곷릭筌△뫀???μ빜鍮 ??깊뒄 ?????野꺜筌앹빜釉??Readiness SQL ?닌뗭겱.
-- **Unmapped ID ?온??*: 筌띲끋釉???쎈솭???類ｌ첒??ID 筌뤴뫖以??癰귢쑬猷꾣에??곕뗄???????덈뮉 ?묒눖????釉?
+### 완료 사항
+- **통합 부트스트랩 실행**: `bootstrap_graph_master.ps1`을 통한 Phase 1~4 일괄 구축 시도.
+- **DB 계정 및 접속 최적화**: `ryujo` -> `postgres` 사용자 전환 및 `urbanbus` DB 타겟팅 안정화.
+- **Phase 1~3 APPROVED**: 노드/간선/매핑 레이어의 모든 검증 게이트 통과 및 구축 완료.
+- **Phase 4 HOLD**: `fact_stop_usage_hourly` 데이터 부재(0건)로 인한 시계열 상태 적재 유보.
 
-### ??밴쉐/??륁젟 ???뵬 筌뤴뫖以?- `01_data_contracts/daegu_transport_card_synth_trip_api_spec.md` [NEW]
+### 현재 데이터베이스 상태
+- `graph_node_master`: 적재 완료
+- `graph_edge_master`: 적재 완료
+- `stop_link_mapping_master`: 2차 정밀 보정까지 완료
+- `fact_stop_usage_hourly`: 테이블 생성 완료 (데이터 대기 중)
+
+### 기술 결정 사항
+- **Single Session Auth**: psql의 인터랙티브 인증 이슈 해결을 위한 `PGPASSWORD` 환경 변수 기반 단일 세션 스크립트 채택.
+- **Conditional Load**: 원천 데이터 부재 시 분석 테이블 생성을 건너뛰는 데이터 기반 제어 로직 확립.
+
+### 향후 작업
+- `fact_stop_usage_hourly` 데이터 적재 파이프라인 가동.
+- 데이터 적재 후 Phase 4 단독 실행 및 최종 승인.
+- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 매핑 유형 확장 반영
+- 통합 그래프 설계 문서 `integrated_graph_master_spec.md` 를 Phase 2~3 기준으로 개정 완료
+
+#### 신규/수정 파일
+- 신규: `02_ingest_jobs/prepare_source_spatial_columns.sql`
+
+---
+
+## 📅 2026-04-11 - Trip-level Synthetic Card Data Pipeline Redesign [COMPLETED]
+
+### 완료 사항
+- **Ingestion 전략 수정 완료**: 합성 데이터 API가 개별 통행(Trip-level) 데이터임을 확인하고 2단계 적재 체계 구축.
+- **Deduplication 메커니즘**: `record_hash` (SHA256) 기반의 Staging 중복 방지 로직 적용.
+- **Cross-Layer 검증 설계**: Staging의 `UTZTN_NOPE` 총합과 Fact의 승하차량 총합 일치 여부를 검증하는 Readiness SQL 구현.
+- **Unmapped ID 관리**: 매핑 실패한 정류장 ID 목록을 별도로 추출할 수 있는 쿼리 포함.
+
+### 생성/수정 파일 목록
+- `01_data_contracts/daegu_transport_card_synth_trip_api_spec.md` [NEW]
 - `01_data_contracts/fact_stop_usage_hourly_spec.md` [NEW]
 - `02_ingest_jobs/create_stg_daegu_transport_card_usage_synth_trip.sql` [NEW]
 - `02_ingest_jobs/load_daegu_transport_card_usage_synth_trip.ps1` [NEW]
@@ -1007,216 +1019,242 @@ Phase 4(`graph_state_timeslice` ?怨몄삺)?? Phase 5(`rl_state_training_base` ?
 - `03_validation_queries/daegu_transport_card_synth_trip_readiness.sql` [NEW]
 - `03_validation_queries/fact_stop_usage_hourly_from_synth_trip_readiness.sql` [NEW]
 
-### ???뼎 ??블?野껉퀣??- **UTZTN_NOPE 筌욌쵌??*: ??볦퍢??癰?筌욌쵌?????紐꾩뜚???袁⑤굡??揶쎛餓λ쵐?귝에???밴텦??뤿연 ??륁뒄 ?類λ????類ｋ궖.
-- **Source-Agnostic ??븍뱜**: `source_system`??PK????釉??뤿연 ??쇰펶???癒?퓝 ?怨쀬뵠????밴쉐/??쇰?)??癰귣쵑六??온?귐? 揶쎛?館釉?袁⑥쨯 ??블?
+### 핵심 설계 결정
+- **UTZTN_NOPE 집계**: 시간대별 집계 시 인원수 필드를 가중치로 합산하여 수요 정합성 확보.
+- **Source-Agnostic 팩트**: `source_system`을 PK에 포함하여 다양한 원천 데이터(합성/실측)의 병행 관리가 가능하도록 설계.
 
 ---
 
-## ?諭?2026-04-10 - Integrated Graph Master Phase 2~3 ??블?獄?獄쏆꼷??
-#### ?袁⑥┷ ??鍮?- Integrated Graph Master Phase 2 筌△뫗??獄?獄쏆꼷??餓Β???袁⑥┷
-- ?癒?퓝 ???뵠?됰뗄???⑤벀而??뚎됱쓥 筌욊낯???????癒?뒅????곸겫 疫꿸퀣???곗쨮 ?類ㅼ젟
-- `geom_5187` ?怨대럡 ?뚎됱쓥 疫꿸퀡而?椰꾧퀡???④쑴沅??癒?뒅 筌?쑵源?- ?癒?퓝 餓Β????ｍ?? 域밸챶????怨몄삺 ??ｍ롧몴??브쑬??????뵠?袁⑥뵬?紐꾩몵嚥??類ｂ봺
-- STOP(?類ｌ첒?? ?紐껊굡 ?怨몄삺 獄??類ｌ첒??筌띻낱寃?1筌??⑤벀而?筌띲끋釉?嚥≪뮇彛???블??袁⑥┷
-- `150m` 1筌??癒?퉳 + `500m` fallback (fallback=??筌?癰귣똻??野껋럥以? ?袁⑥셽 筌?쑵源?- `row_number()` 疫꿸퀡而??類ｌ첒?貫????μ뵬 primary(primary=雅뚯눖??? 筌띻낱寃??醫뤾문 疫꿸퀣? ?類ㅼ젟
-- `STOP_TO_LINK`, `LINK_TO_STOP` ??뺥돩??揶쏄쑴苑???밴쉐 疫꿸퀣? ?類ㅼ젟
-- ?類ｌ첒??筌띻낱寃?2筌??類? 筌띲끋釉?Phase 3 ?λ뜆釉??臾믨쉐 ?袁⑥┷
-- `route_id + move_dir_code + sequence(sequence=??뽮퐣)` 疫꿸퀡而?route-aware(route-aware=?紐꾧퐨 ?紐??? 癰귣똻??嚥≪뮇彛??λ뜆釉??臾믨쉐 ?袁⑥┷
-- 疫꿸퀣??`SNAP_NEAREST` 1筌?筌띲끋釉?癰귣똻???癒?뒅 ?類ㅼ젟
-- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 筌띲끋釉??醫륁굨 ?類ㅼ삢 獄쏆꼷??- ???? 域밸챶?????블??얜챷苑?`integrated_graph_master_spec.md` ??Phase 2~3 疫꿸퀣???곗쨮 揶쏆뮇???袁⑥┷
+## 📅 2026-04-10 - Integrated Graph Master Phase 2~3 설계 및 반영
 
-#### ?醫됲뇣/??륁젟 ???뵬
-- ?醫됲뇣: `02_ingest_jobs/prepare_source_spatial_columns.sql`
-- ??륁젟: `02_ingest_jobs/load_graph_master_phase_2.sql`
-- ?醫됲뇣: `03_validation_queries/graph_mapping_quality_check.sql`
-- ?醫됲뇣: `02_ingest_jobs/refine_stop_link_mapping_phase_3.sql`
-- ?醫됲뇣: `03_validation_queries/stop_link_mapping_phase_3_quality_check.sql`
-- ??륁젟: `01_data_contracts/integrated_graph_master_spec.md`
+#### 완료 사항
+- Integrated Graph Master Phase 2 착수 및 반영 준비 완료
+- 원천 테이블의 공간 컬럼 직접 사용 원칙을 운영 기준으로 확정
+- `geom_5187` 영구 컬럼 기반 거리 계산 원칙 채택
+- 원천 준비 단계와 그래프 적재 단계를 분리한 파이프라인으로 정리
+- STOP(정류장) 노드 적재 및 정류장-링크 1차 공간 매핑 로직 설계 완료
+- `150m` 1차 탐색 + `500m` fallback (fallback=대체 보완 경로) 전략 채택
+- `row_number()` 기반 정류장별 단일 primary(primary=주매핑) 링크 선택 기준 확정
+- `STOP_TO_LINK`, `LINK_TO_STOP` 서비스 간선 생성 기준 확정
+- 정류장-링크 2차 정밀 매핑 Phase 3 초안 작성 완료
+- `route_id + move_dir_code + sequence(sequence=순서)` 기반 route-aware(route-aware=노선 인지형) 보정 로직 초안 작성 완료
+- 기존 `SNAP_NEAREST` 1차 매핑 보존 원칙 확정
+- `ROUTE_INFERRED`, `ROUTE_CONFIRMED`, `MANUAL_REVIEW` 매핑 유형 확장 반영
+- 통합 그래프 설계 문서 `integrated_graph_master_spec.md` 를 Phase 2~3 기준으로 개정 완료
 
-#### ???뼎 ??블?野껉퀣??1. 椰꾧퀡???④쑴沅?? view ??? ?袁⑸뻻 `ST_Transform` ???袁⑤빍?????貫留?`geom_5187` 筌욊낯????????癒?뒅??곗쨮 ??뺣뼄.
-2. `geom_5187` 揶쎛 ?癒?퓝 ???뵠?됰뗄肉???곸뱽 野껋럩?? ?믪눘? ?怨대럡 ?뚎됱쓥 ?곕떽? 獄?獄쏄퉲釉?backfill=疫꿸퀣???怨쀬뵠??筌?쑴??묾? ???????뺣뼄.
-3. ?類ｌ첒??筌띻낱寃?1筌?筌띲끋釉?? ?⑤벀而?域뱀눘??疫꿸퀡而?`SNAP_NEAREST` 嚥???묐뻬??뺣뼄.
-4. 1筌?筌띲끋釉?? `150m` ?怨쀪퐨 ?癒?퉳, 沃섎챶????類ｌ첒?關肉???쀫퉸 `500m` fallback ????됱뒠??뺣뼄.
-5. ?類ｌ첒?貫??primary 筌띻낱寃??醫뤾문?? `row_number()` 疫꿸퀡而?筌ㅼ뮄???1椰꾨똻?앮에???묐뻬??뺣뼄.
-6. 2筌??類? 筌띲끋釉?? `route_id + move_dir_code + stop_seq/link_seq` ?類λ??源놁뱽 獄쏆꼷???롫뮉 route-aware 癰귣똻????ｍ롦에??브쑬???뺣뼄.
-7. 疫꿸퀣??1筌?筌띲끋釉?? ?????? ??꾪?癰귣똻??野껉퀗?든몴??袁⑹읅/?諛닿봄??롫뮉 獄쎻뫗???곗쨮 ?온?귐뗫립??
+#### 신규/수정 파일
+- 신규: `02_ingest_jobs/prepare_source_spatial_columns.sql`
+- 수정: `02_ingest_jobs/load_graph_master_phase_2.sql`
+- 신규: `03_validation_queries/graph_mapping_quality_check.sql`
+- 신규: `02_ingest_jobs/refine_stop_link_mapping_phase_3.sql`
+- 신규: `03_validation_queries/stop_link_mapping_phase_3_quality_check.sql`
+- 수정: `01_data_contracts/integrated_graph_master_spec.md`
 
-#### 野꺜筌?疫꿸퀣?
+#### 핵심 설계 결정
+1. 거리 계산은 view 내부 임시 `ST_Transform` 이 아니라 저장된 `geom_5187` 직접 사용을 원칙으로 한다.
+2. `geom_5187` 가 원천 테이블에 없을 경우, 먼저 영구 컬럼 추가 및 백필(backfill=기존 데이터 채우기) 후 사용한다.
+3. 정류장-링크 1차 매핑은 공간 근접 기반 `SNAP_NEAREST` 로 수행한다.
+4. 1차 매핑은 `150m` 우선 탐색, 미매핑 정류장에 한해 `500m` fallback 을 허용한다.
+5. 정류장별 primary 링크 선택은 `row_number()` 기반 최근접 1건으로 수행한다.
+6. 2차 정밀 매핑은 `route_id + move_dir_code + stop_seq/link_seq` 정합성을 반영하는 route-aware 보정 단계로 분리한다.
+7. 기존 1차 매핑은 삭제하지 않고 보정 결과를 누적/승격하는 방식으로 관리한다.
+
+#### 검증 기준
 - `duplicate primary mappings = 0`
-- `node-edge integrity ??살첒 = 0`
-- `STOP_TO_LINK`, `LINK_TO_STOP` 揶쏄쑴苑??類ㅺ맒 ??밴쉐
-- `unmapped stops` 筌ㅼ뮇???- `distance_to_link_m > 100m` 野껋럡??椰꾨똻???癒?
-- `distance_to_link_m > 250m` ??롫짗 野꺜???????브쑬??- Phase 3?癒?퐣 獄쏆꼶? 獄쎻뫚堉?筌띻낱寃???뤿뼎 椰꾨똻??獄?sequence ??곴맒燁??癒?
+- `node-edge integrity 오류 = 0`
+- `STOP_TO_LINK`, `LINK_TO_STOP` 간선 정상 생성
+- `unmapped stops` 최소화
+- `distance_to_link_m > 100m` 경고 건수 점검
+- `distance_to_link_m > 250m` 수동 검토 대상 분리
+- Phase 3에서 반대 방향 링크 의심 건수 및 sequence 이상치 점검
 
-#### ?袁⑹삺 ??ｍ??癒?젟
-- Integrated Graph Master Phase 2: ?닌뗭겱/野꺜筌?筌욊쑵六???ｍ?- Integrated Graph Master Phase 3: ?λ뜆釉??臾믨쉐 ?袁⑥┷, ??쎈뻬 獄?野껉퀗???癒?즴 ??疫?
-#### ??쇱벉 ?臾믩씜
-- Phase 2 ??쎈뻬:
+#### 현재 단계 판정
+- Integrated Graph Master Phase 2: 구현/검증 진행 단계
+- Integrated Graph Master Phase 3: 초안 작성 완료, 실행 및 결과 판독 대기
+
+#### 다음 작업
+- Phase 2 실행:
   1. `prepare_source_spatial_columns.sql`
   2. `load_graph_master_phase_2.sql`
   3. `graph_mapping_quality_check.sql`
-- Phase 3 ??쎈뻬:
+- Phase 3 실행:
   4. `refine_stop_link_mapping_phase_3.sql`
   5. `stop_link_mapping_phase_3_quality_check.sql`
-- 野껉퀗????怨뺤뵬 `APPROVED / HOLD / MANUAL_REVIEW` ?癒?젟
-- ??꾩뜎 `graph_state_timeslice` ??블롦에?筌욊쑴??
+- 결과에 따라 `APPROVED / HOLD / MANUAL_REVIEW` 판정
+- 이후 `graph_state_timeslice` 설계로 진입
+
 ---
 
-## ?諭?2026-04-10 - Integrated Graph Master Phase Kick-off
+## 📅 2026-04-10 - Integrated Graph Master Phase Kick-off
 
-- route_link_sequence ??곸겫 疫꿸퀣???疫꿸퀡而??곗쨮 ???? 域밸챶???筌띾뜆???1筌???블???뽰삂
-- stop / link ?브쑬???紐껊굡 ?醫륁굨 ?袁⑥셽 筌?쑵源?- 獄쎻뫚堉??域밸챶???疫꿸퀣? ??`(route_id, move_dir_code, link_seq)` ?醫? ?類ㅼ젟
-- `graph_node_master`, `graph_edge_master`, `stop_link_mapping_master` DDL ?λ뜆釉??臾믨쉐
-- `route_link_graph_edge_vw` 獄?LINK_TO_LINK ?怨몄삺 SQL ?λ뜆釉??臾믨쉐
-- readiness 野꺜筌?SQL ?λ뜆釉??臾믨쉐
-- `integrated_graph_master_spec.md` ?얜챷苑??λ뜆釉??臾믨쉐
+- route_link_sequence 운영 기준을 기반으로 통합 그래프 마스터 1차 설계 시작
+- stop / link 분리 노드 유형 전략 채택
+- 방향성 그래프 기준 키 `(route_id, move_dir_code, link_seq)` 유지 확정
+- `graph_node_master`, `graph_edge_master`, `stop_link_mapping_master` DDL 초안 작성
+- `route_link_graph_edge_vw` 및 LINK_TO_LINK 적재 SQL 초안 작성
+- readiness 검증 SQL 초안 작성
+- `integrated_graph_master_spec.md` 문서 초안 작성
 
 *Notes:*
-- ????ｍ??LINK 餓λ쵐??1筌?域밸챶????諛닿봄繹먮슣???甕곕뗄?욄에???- STOP_TO_LINK / LINK_TO_STOP 揶쏄쑴苑묉??怨밴묶 ??볧?????뵠?됰뗄? ?袁⑸꺗 ??ｍ롦에??브쑬??- ??쇱젫 筌띻낱寃?椰꾧퀡??/ ??猷??볦퍢 / ??깆삜?袁⑤뮉 筌띻낱寃??癒?퓝 筌띾뜆???野껉퀬鍮 ??癰귣떯而???됱젟
+- 현 단계는 LINK 중심 1차 그래프 승격까지를 범위로 함
+- STOP_TO_LINK / LINK_TO_STOP 간선과 상태 시계열 테이블은 후속 단계로 분리
+- 실제 링크 거리 / 이동시간 / 혼잡도는 링크 원천 마스터 결합 시 보강 예정
 
 ---
 
-## ?諭?2026-04-10 - 筌ㅼ뮇伊????텕筌??怨쀭뀱????밴쉐
+## 📅 2026-04-10 - 최종 패키징 산출물 생성
 
-- ??곸겫 ??? ?얜챷苑??類ｂ봺 ?袁⑥┷
-- 筌ㅼ뮇伊??怨쀭뀱?????텕筌??袁⑥┷
-- 獄쏄퀬猷?癰귣떯???筌ㅼ뮇伊??類ㅽ뀧癰???밴쉐:
+- 운영 표준 문서 정리 완료
+- 최종 산출물 패키징 완료
+- 배포/보관용 최종 압축본 생성:
   - `urbanbus_rl_project_final_2026-04-10.zip`
-- 癰??類ㅽ뀧癰귣챷? 2026-04-10 疫꿸퀣? ??곸겫 ?諭????산퉬?猷뱀몵嚥?癰귣떯?
+- 본 압축본은 2026-04-10 기준 운영 승인 스냅샷으로 보관
 
 ---
 
-## ?諭?2026-04-10 - 疫뀀떯???怨쀬뵠???類ｍ돩(Remediation) ?ル굝利?獄???곸겫 ??됱젟??筌욊쑴??
-- **Remediation ?ル굝利?*: `route_id='1000'` ??쇰옘 ??볤탢 獄?餓λ쵎???怨쀬뵠??dedup) 筌ｌ꼶???袁⑥┷.
-- **筌ㅼ뮇伊??諭??*: 39,247???諛닿봄 ???類λ???野꺜筌?PASS ?類ㅼ뵥 獄?筌ㅼ뮇伊??諭??**APPROVED**).
-- **??곸겫 疫꿸퀣? SQL ?類ㅼ젟**:
-  - ?諛닿봄: `promote_route_link_sequence_dedup.sql`
-  - 野꺜筌? `route_link_promotion_readiness_dedup.sql`
-- **??곸겫 ?袁⑥쨮?紐꾨뮞 ?類ｂ뵲**:
-  - `01_data_contracts/route_link_operational_checklist.md` [?醫됲뇣]: 獄쏄퀣???臾믩씜 ??? 筌ｋ똾寃뺟뵳?????곕떽?.
-- **?怨밴묶 ?袁れ넎**: ?얜챷????뽰젟 ??ｍ?癒?퐣 ?類?뇣 ??곸겫 獄????텕筌???ｍ롦에??袁れ넎.
+## 📅 2026-04-10 - 긴급 데이터 정비(Remediation) 종료 및 운영 안정화 진입
+
+- **Remediation 종료**: `route_id='1000'` 오염 제거 및 중복 데이터(dedup) 처리 완료.
+- **최종 승인**: 39,247행 승격 후 정합성 검증 PASS 확인 및 최종 승인(**APPROVED**).
+- **운영 기준 SQL 확정**:
+  - 승격: `promote_route_link_sequence_dedup.sql`
+  - 검증: `route_link_promotion_readiness_dedup.sql`
+- **운영 프로세스 정립**:
+  - `01_data_contracts/route_link_operational_checklist.md` [신규]: 배치 작업 표준 체크리스트 추가.
+- **상태 전환**: 문제 시정 단계에서 정규 운영 및 패키징 단계로 전환.
 
 ---
 
-## ?諭?2026-04-10 - ?諛닿봄 ??곸겫 ??됯컧 ?????獄?Runbook ?臾믨쉐 (??쎈뻬 ??
+## 📅 2026-04-10 - 승격 운영 절차 표준화 및 Runbook 작성 (실행 전)
 
-- **`02_ingest_jobs/route_link_promotion_execution_runbook.md`** [?醫됲뇣]: `route_link_sequence` ?諛닿봄 獄?野꺜筌앹빘???袁る립 ??? ??곸겫 ??됯컧(Runbook) ?臾믨쉐 ?袁⑥┷.
-- **`02_ingest_jobs/README.md`** ??낅쑓??꾨뱜: ?諛닿봄 ??쎈뻬 Runbook ?怨뚭퍙 獄?揶쎛??諭??곕떽?.
-- **?諭???鍮?*: ??쎈뻬 ????곸겫 ??됯컧 ?얜챷苑?遺? ?袁⑥┷?????거? ??쇱젫 ?諛닿봄 ??쎈뻬?? ?袁⑹춦 筌욊쑵六??? ??놁벉.
-
----
-
-## ?諭?2026-04-10 - 獄쏄퉮毓???????뽯뮞??癰궰野껋럩???브쑴苑?(Diff ?귐뗫７???遺용튋)
-
-#### 1. ?紐꾧퐨 筌띻낱寃??諛닿봄 野꺜筌??袁⑥쟿?袁⑹뜖??Validation Framework) ?袁⑷쉐
-- **`03_validation_queries/route_link_promotion_readiness.sql`** [?醫됲뇣]: Staging ??Promoted ?諛닿봄 ?얜떯猿?源놁뱽 野꺜筌앹빜釉???ル굟鍮 野꺜筌?SQL ?묒눖???곕떽?.
-- **`01_data_contracts/route_link_promotion_result_guide.md`** [?醫됲뇣]: ??됱춳 野꺜筌??묒눖??野껉퀗??PASS/WARN/FAIL) ?癒?즴 疫꿸퀣????곕떽?.
-- **`01_data_contracts/route_link_promotion_result_report_template.md`** [?醫됲뇣]: 筌ㅼ뮇伊??諭???????疫꿸퀡以??롫뮉 筌띾뜇寃??쇱뒲 ?귐뗫７???臾믩뻼 ?袁⑥┷.
-- **`03_validation_queries/README.md`**: ?怨대┛ ??뽯뮞??筌뤿굞苑???낅쑓??꾨뱜.
-
-#### 2. 野꺜筌앹빘???臾믩씜 ?袁㏓럡 ?곕떽?
-- **`scripts/compare_with_zip.ps1`** [?醫됲뇣]: 獄쏄퉮毓??類ㅽ뀧???뵬(`urbanbus_rl_project (2).zip`)??筌ㅼ뮇???臾믩씜 ????揶쏄쑴?????뵬 ??μ맄 ??곸뒠 ??쑨??Diff) ?癒?짗????쎄쾿?깆????臾믨쉐.
+- **`02_ingest_jobs/route_link_promotion_execution_runbook.md`** [신규]: `route_link_sequence` 승격 및 검증을 위한 표준 운영 절차(Runbook) 작성 완료.
+- **`02_ingest_jobs/README.md`** 업데이트: 승격 실행 Runbook 연결 및 가이드 추가.
+- **특이사항**: 실행 전 운영 절차 문서화를 완료하였으며, 실제 승격 실행은 아직 진행하지 않음.
 
 ---
 
-## ?諭?2026-04-10 - ?諛닿봄 野껉퀗???귐뗫７????쀫탣???醫됲뇣 ?곕떽?
+## 📅 2026-04-10 - 백업 대비 시스템 변경점 분석 (Diff 리포트 요약)
 
-#### 1. ?諭??/ 癰귣?履?/ 筌△뫀??疫꿸퀡以???쀫탣???얜챷苑??- **`01_data_contracts/route_link_promotion_result_report_template.md`** [?醫됲뇣]: `route_link_promotion_readiness.sql` ??쎈뻬 野껉퀗?든몴?癰귣벉???뤿연 筌ㅼ뮇伊??癒?젟??疫꿸퀡以??롫뮉 野껉퀗???귐뗫７????쀫탣???臾믨쉐.
-  - summary 疫꿸퀡?揶?/ ??쇱젫揶?/ ?癒?젟 ????釉?
-  - ?怨멸쉭 ?묒눖?곮퉪????? ?癒?젟, ??쑨??疫꿸퀡以?????釉?
-  - 野껉퀗???癒??癰귣똻???닌덉퍢??筌ㅼ뮇伊??怨밴묶(?諭??/ 癰귣?履?/ 筌△뫀??, ?袁⑸꺗 鈺곌퀣?? ?諭??疫꿸퀡以??諭????釉?
+#### 1. 노선 링크 승격 검증 프레임워크(Validation Framework) 완성
+- **`03_validation_queries/route_link_promotion_readiness.sql`** [신규]: Staging → Promoted 승격 무결성을 검증하는 종합 검증 SQL 쿼리 추가.
+- **`01_data_contracts/route_link_promotion_result_guide.md`** [신규]: 품질 검증 쿼리 결과(PASS/WARN/FAIL) 판독 기준표 추가.
+- **`01_data_contracts/route_link_promotion_result_report_template.md`** [신규]: 최종 승인 여부를 기록하는 마크다운 리포트 양식 완료.
+- **`03_validation_queries/README.md`**: 상기 시스템 명세 업데이트.
 
-#### 2. 野꺜筌?README ?類ㅼ삢
-- **`03_validation_queries/README.md`** ??낅쑓??꾨뱜: 野껉퀗???귐뗫７????쀫탣???얜챷苑??袁⑺뒄 獄?????筌뤴뫗???곕떽?.
-
----
-
-## ?諭?2026-04-10 - ???뵠?袁⑥뵬????됱젟??獄??袁⑷퍥 ?紐꾧퐨 ?諛닿봄 餓Β???臾믩씜
-
-#### 1. PowerShell ???뵠?袁⑥뵬??疫꿸퀣????봔筌???욧퍙
-- **`scripts/run_promote_route_link_sequence.ps1`** ??륁젟:
-  - `psql` ?紐꾪뀱 ??`NOTICE` 筌롫뗄?놅쭪?揶쎛 PowerShell ?ル굝利???살첒嚥???쇱퓗?귐됰┷???얜챷????욧퍙.
-  - `try/finally` ?됰뗀以??곗쨮 `ErrorActionPreference` ?怨밴묶 癰귣벀??癰귣똻??
-  - `stderr` ?곗뮆???Verbose 嚥≪뮄?뉑에??브쑬履??뤿연 揶쎛??녾쉐 揶쏆뮇苑?
-- **`scripts/validate_route_link_sequence.sql`** ??륁젟:
-  - `route_id` 鈺곌퀣????獄쏆뮇源??롫쐲 `text` vs `integer` ?????븍뜆?ょ㎉???살첒 ??륁젟 (Type casting ?怨몄뒠).
-
-#### 2. 野꺜筌?獄??袁⑥쨮?醫???꾨릅
-- **??묐탣 野꺜筌??源껊궗**: `route_id=1000` ?紐꾧퐨??????`Pre-validation -> Promotion -> Post-validation -> Final Report` ???⑥눘??`PASS` ?類ㅼ뵥.
-- **?怨몄삺 ?袁れ넺 ?癒?**:
-  - `stg_daegu_route_links_api`: ?袁⑹삺 1揶??紐꾧퐨(287椰? ?怨몄삺 ?怨밴묶.
-  - `api_snapshots`: 1揶????뵬 鈺곕똻???類ㅼ뵥.
-- **筌△몿由??⑥눘??*: ?袁⑷퍥 ?紐꾧퐨 ?????怨쀬뵠????륁춿(getLink02 API) 獄????컳燁?5-10揶? ?諛닿봄 ???뮞??餓Β??
+#### 2. 검증용 작업 도구 추가
+- **`scripts/compare_with_zip.ps1`** [신규]: 백업 압축파일(`urbanbus_rl_project (2).zip`)과 최신 작업 폴더 간의 파일 단위 내용 비교(Diff) 자동화 스크립트 작성.
 
 ---
 
-## ?諭?2026-04-10 - ?紐꾧퐨 筌띻낱寃??諛닿봄 野꺜筌??癒?즴 疫꿸퀣? 揶쎛??諭??類ｂ봺
+## 📅 2026-04-10 - 승격 결과 리포트 템플릿 신규 추가
 
-#### 1. 野꺜筌?野껉퀗???癒?즴 疫꿸퀣????얜챷苑??- **`01_data_contracts/route_link_promotion_result_guide.md`** [?醫됲뇣]: `route_link_promotion_readiness.sql` ??쎈뻬 野껉퀗?든몴?PASS / WARN / FAIL 嚥???곴퐤??롫뮉 疫꿸퀣????臾믨쉐.
-  - summary 疫꿸퀡?揶?`238 / 4 / 234 / 234 / 234`) 筌뤿굞??
-  - `unexpected_route_in_staging` ?癒?퐣 legacy sample `route_id='1000'` ?遺욍???WARN ??곗쨮 ??곴퐤??롫뮉 ??곸겫 疫꿸퀣? ?類ｂ봺.
-  - promoted ??쇰옘, ?癒?염??餓λ쵎?? 椰꾨똻???븍뜆?ょ㎉? key gap, ?怨쀫꺗????μ쟿, `link_id` ?겸뫖猷?? 筌뤴뫀紐?FAIL 嚥??브쑬履?
+#### 1. 승인 / 보류 / 차단 기록 템플릿 문서화
+- **`01_data_contracts/route_link_promotion_result_report_template.md`** [신규]: `route_link_promotion_readiness.sql` 실행 결과를 복붙하여 최종 판정을 기록하는 결과 리포트 템플릿 작성.
+  - summary 기대값 / 실제값 / 판정 표 포함.
+  - 상세 쿼리별 행 수, 판정, 비고 기록 표 포함.
+  - 결과 원문 보존 구간과 최종 상태(승인 / 보류 / 차단), 후속 조치, 승인 기록 섹션 포함.
 
-#### 2. 野꺜筌?README 癰귣떯而?- **`03_validation_queries/README.md`** ??낅쑓??꾨뱜: ?癒?즴 疫꿸퀣????얜챷苑??袁⑺뒄 獄?????筌뤴뫗???곕떽?.
-
----
-
-## ?諭?2026-04-09
-### ????甕곌쑴??API ??륁춿/野꺜筌??諛댄닋 ???뵠?袁⑥뵬???닌딇뀧
-
-#### 1. ?怨쀬뵠????륁춿 ?癒?짗??(Ingest)
-- **`scripts/load_route_links_api_csv.ps1`** [?醫됲뇣]: getLink02 API ??산퉬??CSV ??`stg_daegu_route_links_api` ?怨몄삺 ?癒?짗??
-  - ???뵬筌?疫꿸퀡而?餓λ쵎??嚥≪뮆諭?獄쎻뫗?.
-  - ?뚎됱쓥 筌띲끋釉?獄?`route_id` 雅뚯눘??
-  - `psql \copy`????곸뒠???⑥쥙??嚥≪뮆諭?
-- **`scripts/create_stg_daegu_route_links_api.sql`** [?醫됲뇣]: Staging ???뵠??DDL.
-
-#### 2. 野꺜筌???뽯뮞??(Guard)
-- **`scripts/validate_route_link_sequence.sql`** [?醫됲뇣]: 738餓?域뱀뮆????ル굟鍮 野꺜筌???쎄쾿?깆???
-  - **Pre-validation**: ????筌ｋ똾寃? ?袁⑸땾揶? Natural Key 餓λ쵎??
-  - **Post-validation**: PK 餓λ쵎?? 筌띻낱寃???뺤쓰 ?怨쀫꺗????μ쟿, Key Collision, Count Mismatch.
-  - **Guard 疫꿸퀡??*: ??살첒 獄쏆뮄猿???`RAISE EXCEPTION`??곗쨮 ???뵠?袁⑥뵬??餓λ쵎??
-  - psql 癰궰??`route_id_raw`, `snapshot_file`, `phase`)嚥???쇳맜????뽯선 揶쎛??
-
-#### 3. ?諛댄닋 ???뵠?袁⑥뵬??(Promotion)
-- **`scripts/create_route_link_sequence.sql`** [?醫됲뇣]: ?브쑴苑?????뵠??DDL 獄???뽯튋鈺곌퀗援?
-- **`scripts/promote_route_link_sequence.sql`** [?醫됲뇣]: Staging ???브쑴苑?????뵠??Upsert 嚥≪뮇彛?
-  - `ON CONFLICT (route_id, move_dir_code, link_seq) DO UPDATE` ?怨몄뒠.
-
-#### 4. ???뵠?袁⑥뵬???????쎈뱜??됱뵠??- **`scripts/run_promote_route_link_sequence.ps1`** [?醫됲뇣]: ?袁⑷퍥 ??곌쾿???쨮???癒?짗??
-  - 5??ｍ???쎈뻬: Scope ?類ㅼ뵥 ??DDL ??Pre-check ??Promote ??Post-check.
-  - ?諭??`route_id` ?癒?뮉 `snapshot_file` 疫꿸퀣? Scoped Execution 筌왖??
-  - ?臾믩씜 嚥≪뮄???癒?짗 ??밴쉐 (`Start-Transcript`).
-
-#### 5. ?紐낅늄??- **`mcp_config.json`** ??륁젟: JSON ???뼓 ??살첒 癰귣벀??獄?MCP ??뺤쒔 ?類ㅺ맒??
-- **`.agents/skills/bus_route_link_ingest_guard`** [?醫됲뇣]: ?紐꾧퐨 筌띻낱寃??怨몄삺 ?袁⑹뒠 ??쎄텢.
-- **`.agents/skills/data-contract-audit-skill`** ??낅쑓??꾨뱜.
+#### 2. 검증 README 확장
+- **`03_validation_queries/README.md`** 업데이트: 결과 리포트 템플릿 문서 위치 및 사용 목적 추가.
 
 ---
 
-## ?諭?2026-04-08
-### ?⑤벀而??怨쀬뵠??筌뤴뫀?쏙쭕?獄??類ｌ첒??疫꿸퀣???怨쀬뵠???怨몄삺
+## 📅 2026-04-10 - 파이프라인 안정화 및 전체 노선 승격 준비 작업
 
-#### 1. ?⑤벀而??怨쀬뵠???袁⑥쨮???뵬筌?- `bs_20250903`, `link_20250903`, `node_20250903` Shapefile ??됱뵠???브쑴苑?
-- Geometry ???? SRID, Row Count, ?袁⑤궖 ???뚎됱쓥 ?얜챷苑??
-- **`01_data_contracts/shape_layer_profile.md`** [?醫됲뇣] ?臾믨쉐.
+#### 1. PowerShell 파이프라인 기술적 부채 해결
+- **`scripts/run_promote_route_link_sequence.ps1`** 수정:
+  - `psql` 호출 시 `NOTICE` 메시지가 PowerShell 종료 오류로 오처리되는 문제 해결.
+  - `try/finally` 블록으로 `ErrorActionPreference` 상태 복구 보장.
+  - `stderr` 출력을 Verbose 로그로 분류하여 가독성 개선.
+- **`scripts/validate_route_link_sequence.sql`** 수정:
+  - `route_id` 조인 시 발생하던 `text` vs `integer` 타입 불일치 오류 수정 (Type casting 적용).
 
-#### 2. ?類ｌ첒???癒?퓝 ?怨쀬뵠??DB ?怨몄삺
-- ??덈즲???紐꾪맜??UHC/UTF-8) ?겸뫖猷???욧퍙: `geopandas` + SQLAlchemy 獄쎻뫗??????
-- 5,705椰??類ｌ첒???怨쀬뵠????`public.bs_20250903` ?怨몄삺 ?袁⑥┷.
-- ?⑤벀而?筌롫???怨쀬뵠??EPSG:5187 ??깊뒄 ?類ㅼ뵥.
+#### 2. 검증 및 프로토타이핑
+- **샘플 검증 성공**: `route_id=1000` 노선에 대해 `Pre-validation -> Promotion -> Post-validation -> Final Report` 전 과정 `PASS` 확인.
+- **적재 현황 점검**:
+  - `stg_daegu_route_links_api`: 현재 1개 노선(287건) 적재 상태.
+  - `api_snapshots`: 1개 파일 존재 확인.
+- **차기 과제**: 전체 노선 대상 데이터 수집(getLink02 API) 및 소배치(5-10개) 승격 테스트 준비.
 
-#### 3. dim_stop 筌△뫁?????뵠???諛닿봄
-- **`scripts/create_dim_stop.sql`** [?醫됲뇣]: 筌△뫁?????뵠????밴쉐 ??쎄쾿?깆???
-- `ST_SetSRID`嚥??ル슦紐닸?筌뤿굞???봔??????곸㉦ ?ル슦紐닸?`geom_5187`, `geom_4326`) 獄?野껋럩????곕뗄??
-- **?얜떯猿??野꺜筌?野껉퀗??*:
-  - PK(`stop_id`) NULL/餓λ쵎?? **0椰?* ??  - ?袁㏐펾??????亦낅슣肉???꾧퉱: **0椰?* ??  - ?醫륁뒞??? ??? Geometry: **0椰?* ??  - `stop_name` 餓λ쵎?? **250椰?* ??**??已?疫꿸퀡而?鈺곌퀣??疫뀀뜆? ?癒?뒅 ??롡뵲** ?醫묓닔
+---
 
-#### 4. ?怨쀬뵠???④쑴鍮?獄?野꺜筌??袁⑥쟿?袁⑹뜖??- **`01_data_contracts/keys.md`** [?醫됲뇣]: ???類ㅼ벥 獄?鈺곌퀣??域뱀뮇???얜챷苑??
-- **`01_data_contracts/source_registry.md`** [?醫됲뇣]: ?癒?퓝 ?怨쀬뵠???곗뮇荑??源낆쨯.
-- **`01_data_contracts/schema_draft.sql`** [?醫됲뇣]: PostgreSQL ??쎄텕筌??λ뜆釉?
-- **`02_ingest_jobs/`** [?醫됲뇣]: ?怨몄삺 ??쎄쾿?깆????遺얠젂?醫듼봺 (`load_daegu_stops.ps1`, `fetch_bus_api.ps1`).
-- **`03_validation_queries/`** [?醫됲뇣]: SQL 野꺜筌??묒눖??(`basic_checks.sql`, `join_checks.sql`).
-- **`.agents/skills/shape-inspection-skill`** [?醫됲뇣]: ?⑤벀而???됱뵠??野꺜????쎄텢.
-- **`.agents/skills/data-contract-audit-skill`** [?醫됲뇣]: ?怨쀬뵠???④쑴鍮???삳뎀 ??쎄텢.
+## 📅 2026-04-10 - 노선 링크 승격 검증 판독 기준 가이드 정리
+
+#### 1. 검증 결과 판독 기준표 문서화
+- **`01_data_contracts/route_link_promotion_result_guide.md`** [신규]: `route_link_promotion_readiness.sql` 실행 결과를 PASS / WARN / FAIL 로 해석하는 기준표 작성.
+  - summary 기대값(`238 / 4 / 234 / 234 / 234`) 명시.
+  - `unexpected_route_in_staging` 에서 legacy sample `route_id='1000'` 잔존 시 WARN 으로 해석하는 운영 기준 정리.
+  - promoted 오염, 자연키 중복, 건수 불일치, key gap, 연속성 단절, `link_id` 충돌은 모두 FAIL 로 분류.
+
+#### 2. 검증 README 보강
+- **`03_validation_queries/README.md`** 업데이트: 판독 기준표 문서 위치 및 사용 목적 추가.
+
+---
+
+## 📅 2026-04-09
+### 대구 버스 API 수집/검증/승급 파이프라인 구축
+
+#### 1. 데이터 수집 자동화 (Ingest)
+- **`scripts/load_route_links_api_csv.ps1`** [신규]: getLink02 API 스냅샷 CSV → `stg_daegu_route_links_api` 적재 자동화.
+  - 파일명 기반 중복 로드 방지.
+  - 컬럼 매핑 및 `route_id` 주입.
+  - `psql \copy`를 이용한 고속 로드.
+- **`scripts/create_stg_daegu_route_links_api.sql`** [신규]: Staging 테이블 DDL.
+
+#### 2. 검증 시스템 (Guard)
+- **`scripts/validate_route_link_sequence.sql`** [신규]: 738줄 규모의 종합 검증 스크립트.
+  - **Pre-validation**: 타입 체크, 필수값, Natural Key 중복.
+  - **Post-validation**: PK 중복, 링크 순번 연속성 단절, Key Collision, Count Mismatch.
+  - **Guard 기능**: 오류 발견 시 `RAISE EXCEPTION`으로 파이프라인 중단.
+  - psql 변수(`route_id_raw`, `snapshot_file`, `phase`)로 스코프 제어 가능.
+
+#### 3. 승급 파이프라인 (Promotion)
+- **`scripts/create_route_link_sequence.sql`** [신규]: 분석용 테이블 DDL 및 제약조건.
+- **`scripts/promote_route_link_sequence.sql`** [신규]: Staging → 분석용 테이블 Upsert 로직.
+  - `ON CONFLICT (route_id, move_dir_code, link_seq) DO UPDATE` 적용.
+
+#### 4. 파이프라인 오케스트레이션
+- **`scripts/run_promote_route_link_sequence.ps1`** [신규]: 전체 워크플로우 자동화.
+  - 5단계 실행: Scope 확인 → DDL → Pre-check → Promote → Post-check.
+  - 특정 `route_id` 또는 `snapshot_file` 기준 Scoped Execution 지원.
+  - 작업 로그 자동 생성 (`Start-Transcript`).
+
+#### 5. 인프라
+- **`mcp_config.json`** 수정: JSON 파싱 오류 복구 및 MCP 서버 정상화.
+- **`.agents/skills/bus_route_link_ingest_guard`** [신규]: 노선 링크 적재 전용 스킬.
+- **`.agents/skills/data-contract-audit-skill`** 업데이트.
+
+---
+
+## 📅 2026-04-08
+### 공간 데이터 모델링 및 정류장 기초 데이터 적재
+
+#### 1. 공간 데이터 프로파일링
+- `bs_20250903`, `link_20250903`, `node_20250903` Shapefile 레이어 분석.
+- Geometry 타입, SRID, Row Count, 후보 키 컬럼 문서화.
+- **`01_data_contracts/shape_layer_profile.md`** [신규] 작성.
+
+#### 2. 정류장 원천 데이터 DB 적재
+- 윈도우 인코딩(UHC/UTF-8) 충돌 해결: `geopandas` + SQLAlchemy 방식 사용.
+- 5,705건 정류장 데이터 → `public.bs_20250903` 적재 완료.
+- 공간 메타데이터 EPSG:5187 일치 확인.
+
+#### 3. dim_stop 차원 테이블 승격
+- **`scripts/create_dim_stop.sql`** [신규]: 차원 테이블 생성 스크립트.
+- `ST_SetSRID`로 좌표계 명시 부여 → 이중 좌표계(`geom_5187`, `geom_4326`) 및 경위도 추출.
+- **무결성 검증 결과**:
+  - PK(`stop_id`) NULL/중복: **0건** ✅
+  - 위경도 대구 권역 이탈: **0건** ✅
+  - 유효하지 않은 Geometry: **0건** ✅
+  - `stop_name` 중복: **250건** → **이름 기반 조인 금지 원칙 수립** ⚠️
+
+#### 4. 데이터 계약 및 검증 프레임워크
+- **`01_data_contracts/keys.md`** [신규]: 키 정의 및 조인 규칙 문서화.
+- **`01_data_contracts/source_registry.md`** [신규]: 원천 데이터 출처 등록.
+- **`01_data_contracts/schema_draft.sql`** [신규]: PostgreSQL 스키마 초안.
+- **`02_ingest_jobs/`** [신규]: 적재 스크립트 디렉토리 (`load_daegu_stops.ps1`, `fetch_bus_api.ps1`).
+- **`03_validation_queries/`** [신규]: SQL 검증 쿼리 (`basic_checks.sql`, `join_checks.sql`).
+- **`.agents/skills/shape-inspection-skill`** [신규]: 공간 레이어 검사 스킬.
+- **`.agents/skills/data-contract-audit-skill`** [신규]: 데이터 계약 오딧 스킬.
 
 ---

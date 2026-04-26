@@ -73,6 +73,14 @@ passenger_flow:
   boarding_policy: fifo_until_capacity
   alighting_mode: reconstructed_expected_alightings
   destination_required: false
+  use_shared_exogenous_demand_profile: true
+  shared_base_arrival_lambda_per_agent_step: 1.5
+  condition_specific_demand_allowed: false
+  arrival_lambda_policy:
+    method: shared_base_lambda_times_empirical_time_band_multiplier
+    formula: arrival_lambda = shared_base_arrival_lambda_per_agent_step * arrival_multiplier_by_time_band[time_band]
+    note: The base lambda is a skeleton-scale simulator parameter. The time-band multiplier
+      is empirical and shared across B0R/B1/B2/A.
 action_space:
   action_type_dim: 4
   action_types:
@@ -150,3 +158,8 @@ shared_exogenous_demand_profile:
   profile_name: empirical_2023_time_band_demand_profile
   status: ADOPTED_EMPIRICAL
   condition_specific_demand_allowed: false
+fleet_sensitivity_profile:
+  path: 05_training/configs/fleet_sensitivity_v1.yaml
+  artifact_version: fleet_sensitivity_v1
+  profile_name: fleet_constrained_service_quality_policy
+  status: ADOPTED

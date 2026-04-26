@@ -1,0 +1,87 @@
+artifact_version: fleet_sensitivity_v1
+phase: Phase-2
+profile_name: fleet_constrained_service_quality_policy
+status: ADOPTED
+research_hypothesis:
+  primary_statement: A_pure_mappo may achieve comparable service quality to B0R_current_ops_reconstructed
+    with fewer active buses, even if on_time_rate is slightly lower.
+  interpretation: Success does not require A_pure_mappo to dominate B0R on every KPI.
+    The main target is fleet reduction and energy reduction under explicit service-quality
+    constraints.
+baseline_condition: B0R_current_ops_reconstructed
+primary_target_condition: A_pure_mappo
+fleet_ratios:
+  A_pure_mappo_fleet_100: 1.0
+  A_pure_mappo_fleet_90: 0.9
+  A_pure_mappo_fleet_80: 0.8
+  A_pure_mappo_fleet_70: 0.7
+planned_fleet_conditions:
+- condition_id: A
+  condition_name: A_pure_mappo_fleet_100
+  fleet_ratio_vs_b0r: 1.0
+  description: Same fleet size as B0R.
+- condition_id: A90
+  condition_name: A_pure_mappo_fleet_90
+  fleet_ratio_vs_b0r: 0.9
+  description: 10 percent fleet reduction compared with B0R.
+- condition_id: A80
+  condition_name: A_pure_mappo_fleet_80
+  fleet_ratio_vs_b0r: 0.8
+  description: 20 percent fleet reduction compared with B0R.
+- condition_id: A70
+  condition_name: A_pure_mappo_fleet_70
+  fleet_ratio_vs_b0r: 0.7
+  description: 30 percent fleet reduction compared with B0R.
+success_constraints:
+  max_avg_wait_increase_ratio_vs_b0r: 1.1
+  min_passenger_service_rate_ratio_vs_b0r: 0.98
+  max_on_time_rate_drop_percentage_points_vs_b0r: 10.0
+  max_p95_wait_increase_ratio_vs_b0r: 1.2
+  max_bunching_rate_increase_percentage_points_vs_b0r: 5.0
+  require_energy_proxy_reduction_vs_b0r: true
+  require_fleet_reduction_for_fleet_90_80_70: true
+primary_success_definition: A fleet-reduced A_pure_mappo variant is successful if
+  it reduces active bus count and energy_proxy relative to B0R while keeping avg_wait_seconds,
+  passenger_service_rate, on_time_rate, p95 wait, and bunching_rate within the declared
+  service-quality constraints.
+required_extended_kpis:
+- active_bus_count
+- fleet_size_required
+- fleet_reduction_ratio
+- passengers_served
+- passenger_service_rate
+- passenger_wait_p95_seconds
+- energy_proxy_per_passenger
+- passenger_wait_saved_per_bus
+- response_time_seconds
+- pickup_wait_seconds
+- in_vehicle_time_seconds
+- detour_ratio
+current_status:
+  shared_canonical_kpis_already_available:
+  - cv_headway
+  - avg_wait_seconds
+  - bunching_rate
+  - on_time_rate
+  - intervention_rate
+  - energy_proxy
+  extended_kpis_status: planned_for_phase2_extension
+  note: The existing canonical KPI aggregator remains unchanged at this step. Extended
+    fleet and passenger-service KPIs will be added after A_pure_mappo placeholder
+    and fleet-aware simulator state are wired.
+fairness_constraints:
+  same_initial_state: true
+  same_exogenous_events: true
+  same_eval_window: true
+  same_shared_exogenous_demand_profile: true
+  condition_specific_demand_allowed: false
+  fleet_size_is_controlled_experimental_variable: true
+interpretation_rules:
+  on_time_rate: A_pure_mappo may be considered successful with a slightly lower on_time_rate
+    if the drop remains within the allowed percentage-point threshold and fleet/energy
+    benefits are achieved.
+  intervention_rate: Intervention_rate is not minimized directly. It is interpreted
+    as operational control activity and must be evaluated together with wait time,
+    service rate, energy proxy, and fleet size.
+  energy_proxy: Energy_proxy should be evaluated both as total energy_proxy and energy_proxy_per_passenger
+    when passenger-service KPIs become available.

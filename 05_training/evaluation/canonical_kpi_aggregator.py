@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +16,19 @@ EXPECTED_SHARED_KPIS = [
 ]
 
 VALID_TIME_BANDS = {"peak", "offpeak", "night"}
+
+OPTIONAL_EXTENDED_KPIS = [
+    "active_bus_count",
+    "base_num_agents_b0r",
+    "fleet_ratio_vs_b0r",
+    "fleet_reduction_ratio",
+    "passengers_served",
+    "passenger_demand_generated",
+    "passenger_service_rate",
+    "passenger_wait_p95_seconds",
+    "energy_proxy_per_passenger",
+    "intervention_events",
+]
 
 NON_CAUSAL_SOURCE_MODES = {
     "historical",
@@ -290,6 +303,8 @@ def run_legacy_b0_passthrough(
         df["effective_replay_step_minutes"] = 60
 
     df["input_source_path"] = str(legacy_path)
+
+    optional_extended_cols = [c for c in OPTIONAL_EXTENDED_KPIS if c in df.columns]
 
     out_cols = [
         "condition_id",
@@ -569,6 +584,8 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
         errors="coerce",
     )
 
+    optional_extended_cols = [c for c in OPTIONAL_EXTENDED_KPIS if c in df.columns]
+
     out_cols = [
         "condition_id",
         "seed",
@@ -596,6 +613,7 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
         "intervention_count",
         "decision_step_count",
         "energy_proxy_total",
+        *optional_extended_cols,
         "input_source_path",
     ]
 

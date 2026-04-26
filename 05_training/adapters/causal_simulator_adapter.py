@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import hashlib
+
 import numpy as np
 
 from simulator_adapter_interface import (
@@ -97,6 +99,14 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
         self.feature_weight_profile = self._load_feature_weight_profile(
             self.feature_weight_profile_path
         )
+
+        self.shared_exogenous_demand_profile_path = str(
+            self.config.get("shared_exogenous_demand_profile_path", "")
+        )
+        self.shared_exogenous_demand_profile = self._load_shared_exogenous_demand_profile(
+            self.shared_exogenous_demand_profile_path
+        )
+        self.base_arrival_lambda = float(self.config.get("base_arrival_lambda", 1.5))
 
         self._reset_internal_state()
 
@@ -357,6 +367,171 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             )["pressure_score"]
         )
 
+
+    def _default_shared_exogenous_demand_profile(self) -> Dict[str, Any]:
+        """
+        Fallback only. Normal Phase-2 path should load the empirical profile
+        from 05_training/configs/shared_exogenous_demand_profile_v1.yaml.
+        """
+        return {
+            "artifact_version": "shared_exogenous_demand_profile_v1_builtin_default",
+            "arrival_multiplier_by_time_band": {
+                "night": 1.0,
+                "offpeak": 0.764451,
+                "peak": 0.977582,
+            },
+            "constraints": {
+                "condition_specific_demand_allowed": False,
+                "same_exogenous_events": True,
+            },
+        }
+
+    def _load_shared_exogenous_demand_profile(self, path: str) -> Dict[str, Any]:
+        if not path:
+            return self._default_shared_exogenous_demand_profile()
+
+        profile_path = Path(path)
+        if not profile_path.is_absolute():
+            profile_path = Path.cwd() / profile_path
+
+        if not profile_path.exists():
+            raise FileNotFoundError(
+                f"shared exogenous demand profile not found: {profile_path}"
+            )
+
+        try:
+            import yaml
+        except Exception as exc:
+            raise RuntimeError(
+                f"PyYAML is required to load shared exogenous demand profile: {exc}"
+            )
+
+        with profile_path.open("r", encoding="utf-8-sig") as f:
+            profile = yaml.safe_load(f)
+
+        self._validate_shared_exogenous_demand_profile(profile)
+        return profile
+
+    def _validate_shared_exogenous_demand_profile(self, profile: Dict[str, Any]) -> None:
+        multipliers = profile.get("arrival_multiplier_by_time_band", {})
+        required = ["night", "offpeak", "peak"]
+
+        missing = [tb for tb in required if tb not in multipliers]
+        if missing:
+            raise RuntimeError(f"shared demand profile missing time bands: {missing}")
+
+        for tb in required:
+            value = float(multipliers[tb])
+            if not np.isfinite(value) or value <= 0:
+                raise RuntimeError(f"invalid demand multiplier for {tb}: {value}")
+
+        constraints = profile.get("constraints", {})
+        if constraints.get("condition_specific_demand_allowed") is not False:
+            raise RuntimeError(
+                "condition_specific_demand_allowed must be false in shared demand profile"
+            )
+
+    def _demand_multiplier_for_time_band(self) -> float:
+        tb = self._time_band()
+        multipliers = self.shared_exogenous_demand_profile.get(
+            "arrival_multiplier_by_time_band",
+            {},
+        )
+        return float(multipliers.get(tb, 1.0))
+
+    def _arrival_lambda_for_time_band(self) -> float:
+        return float(self.base_arrival_lambda * self._demand_multiplier_for_time_band())
+
+
+    def _stable_demand_seed(self, *parts: Any) -> int:
+        """
+        Deterministic seed for exogenous passenger demand.
+
+        This seed intentionally excludes condition_id and active_bus_count so
+        B0R/B1/B2/A/A90/A80/A70 receive the same city-level demand process for
+        the same scenario, seed, time_band, and simulator step.
+        """
+        payload = "|".join(str(x) for x in parts)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16) % (2**32 - 1)
+
+    def _base_demand_cell_count(self) -> int:
+        base = int(
+            self.config.get(
+                "base_num_agents_b0r",
+                self.config.get("num_agents", self.num_agents_val),
+            )
+        )
+        return max(base, int(self.num_agents_val), 1)
+
+    def _scenario_demand_key(self) -> str:
+        scenario = getattr(self, "current_scenario", {}) or {}
+        return "|".join(
+            [
+                str(scenario.get("window_id", "")),
+                str(scenario.get("state_ts", "")),
+                str(scenario.get("service_date", "")),
+                str(scenario.get("time_band", "")),
+            ]
+        )
+
+    def _shared_initial_waiting_by_agent(self, *, base_wait: float) -> np.ndarray:
+        """
+        Create initial waiting passengers from fixed city-level demand cells,
+        then map those cells onto the currently active bus agents.
+
+        The total city demand is independent of active_bus_count.
+        """
+        demand_cell_count = self._base_demand_cell_count()
+        cells = np.full((demand_cell_count,), float(base_wait), dtype=np.float32)
+
+        per_agent = np.zeros((int(self.num_agents_val),), dtype=np.float32)
+        for cell_idx, value in enumerate(cells):
+            per_agent[int(cell_idx) % int(self.num_agents_val)] += float(value)
+
+        return per_agent
+
+    def _shared_exogenous_arrivals_vector_for_step(self) -> np.ndarray:
+        """
+        Generate one city-level exogenous demand vector per simulator step.
+
+        The generated cells are the same for all conditions under the same
+        seed/window/time_band. Fleet-reduced conditions receive the same total
+        demand, but the demand cells are folded onto fewer active bus agents.
+        """
+        step_key = int(self.step_idx)
+
+        if not hasattr(self, "_shared_exogenous_arrival_cache"):
+            self._shared_exogenous_arrival_cache = {}
+
+        if step_key in self._shared_exogenous_arrival_cache:
+            return self._shared_exogenous_arrival_cache[step_key]
+
+        demand_cell_count = self._base_demand_cell_count()
+        lam = float(self._arrival_lambda_for_time_band())
+
+        seed_value = self._stable_demand_seed(
+            "exogenous_arrivals_v1",
+            int(getattr(self, "shared_demand_seed", 0)),
+            self._scenario_demand_key(),
+            self._time_band(),
+            step_key,
+        )
+        rng = np.random.default_rng(seed_value)
+
+        cell_arrivals = rng.poisson(lam, size=demand_cell_count).astype(np.float32)
+
+        per_agent = np.zeros((int(self.num_agents_val),), dtype=np.float32)
+        for cell_idx, value in enumerate(cell_arrivals):
+            per_agent[int(cell_idx) % int(self.num_agents_val)] += float(value)
+
+        self._shared_exogenous_arrival_cache[step_key] = per_agent
+        return per_agent
+
+    def _shared_exogenous_arrivals_for_agent(self, agent_idx: int) -> float:
+        vec = self._shared_exogenous_arrivals_vector_for_step()
+        return float(vec[int(agent_idx)])
+
     def _reset_internal_state(self) -> None:
         self.step_idx = 0
         self.sim_elapsed_seconds = 0
@@ -386,6 +561,11 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
         self.wait_total_passenger_seconds = 0.0
         self.wait_passenger_count = 0
         self.energy_proxy_total = 0.0
+
+        # Extended KPI accumulators.
+        self.passengers_served_total = 0.0
+        self.passenger_demand_generated_total = 0.0
+        self.passenger_wait_observation_seconds: List[float] = []
 
         self.last_rewards: Dict[int, float] = {
             agent_id: 0.0 for agent_id in self.agent_ids
@@ -490,6 +670,17 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             dtype=np.float32,
         ) + jitter
 
+        # Shared demand fairness:
+        # Initial city-level passenger demand must not shrink when active buses shrink.
+        self.shared_demand_seed = int(seed or 0)
+        self._shared_exogenous_arrival_cache = {}
+        self.base_num_agents_b0r = self._base_demand_cell_count()
+        self.waiting_by_agent_area = self._shared_initial_waiting_by_agent(
+            base_wait=float(base_wait)
+        ).astype(np.float32)
+        self.initial_waiting_passenger_count = float(np.sum(self.waiting_by_agent_area))
+        self.passenger_demand_generated_total = self.initial_waiting_passenger_count
+
         return self._build_obs()
 
     def _parse_action_type(self, action: Any) -> int:
@@ -569,7 +760,7 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
                 "base_energy_per_agent_step": 0.7,
             }
 
-        if cid == "A":
+        if cid.startswith("A"):
             return {
                 "arrival_lambda": 1.5,
                 "boarding_limit": 5.5,
@@ -614,10 +805,16 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
                 step_invalid_penalty += 1.0
                 action_type = 0
 
-            exogenous_arrivals = float(self.rng.poisson(profile["arrival_lambda"]))
+            # Shared demand fairness:
+            # Exogenous city demand is generated from base demand cells and then
+            # mapped to active agents. Total generated demand is independent of
+            # active_bus_count.
+            exogenous_arrivals = float(self._shared_exogenous_arrivals_for_agent(i))
+            self.passenger_demand_generated_total += exogenous_arrivals
             self.waiting_by_agent_area[i] += exogenous_arrivals
 
             boarded = 0.0
+            served_this_agent = 0.0
             headway = float(max(1.0, target_headway + profile["headway_bias"] + self.rng.normal(0.0, profile["headway_noise_std"])))
 
             if action_type == 0:
@@ -626,6 +823,7 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
                 boarded = min(float(self.waiting_by_agent_area[i]), available_capacity, float(profile["boarding_limit"]))
                 self.waiting_by_agent_area[i] -= boarded
                 self.onboard_by_agent[i] += boarded
+                served_this_agent += boarded
 
             elif action_type == 1:
                 # hold: keep bus waiting, passenger queue continues to grow.
@@ -648,6 +846,7 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
                 step_intervention_penalty += 1.0
                 reduced = min(float(self.waiting_by_agent_area[i]), 3.0)
                 self.waiting_by_agent_area[i] -= reduced
+                served_this_agent += reduced
                 step_energy_penalty += 1.0
 
             self.remaining_hold_seconds[i] = max(
@@ -679,6 +878,12 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
                 self.ontime_event_count += 1
 
             current_waiting = float(self.waiting_by_agent_area[i])
+            self.passengers_served_total += max(float(served_this_agent), 0.0)
+            estimated_wait_seconds = (
+                current_waiting * float(self.sim_step_seconds)
+                / max(float(exogenous_arrivals + served_this_agent), 1.0)
+            )
+            self.passenger_wait_observation_seconds.append(float(estimated_wait_seconds))
             self.wait_total_passenger_seconds += current_waiting * float(self.sim_step_seconds)
             # Denominator for avg_wait_seconds should represent served/new passengers,
             # not the same queued passengers counted repeatedly every simulator tick.
@@ -714,6 +919,8 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             "evaluation_horizon_minutes": self.evaluation_horizon_minutes,
             "sim_step_seconds": self.sim_step_seconds,
             "decision_interval_seconds": self.decision_interval_seconds,
+            "demand_multiplier": float(self._demand_multiplier_for_time_band()),
+            "shared_arrival_lambda": float(self._arrival_lambda_for_time_band()),
             "causal_comparison_allowed": True,
             "intervention_count": int(self.intervention_count),
             "decision_step_count": int(self.decision_step_count),
@@ -806,6 +1013,33 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             headway_mean = self._target_headway_for_time_band()
             headway_std = 0.0
 
+        base_num_agents_b0r = int(
+            self.config.get("base_num_agents_b0r", self.config.get("num_agents", self.num_agents_val))
+        )
+        active_bus_count = int(self.num_agents_val)
+        fleet_ratio_vs_b0r = float(
+            self.config.get("fleet_ratio_vs_b0r", active_bus_count / max(float(base_num_agents_b0r), 1.0))
+        )
+        fleet_reduction_ratio = float(max(0.0, 1.0 - fleet_ratio_vs_b0r))
+        passengers_served = float(self.passengers_served_total)
+        passenger_demand_generated = float(self.passenger_demand_generated_total)
+        passenger_service_rate = float(
+            passengers_served / max(passenger_demand_generated, 1.0)
+        )
+        passenger_service_rate = float(min(max(passenger_service_rate, 0.0), 1.0))
+        if self.passenger_wait_observation_seconds:
+            passenger_wait_p95_seconds = float(
+                np.percentile(
+                    np.array(self.passenger_wait_observation_seconds, dtype=np.float32),
+                    95,
+                )
+            )
+        else:
+            passenger_wait_p95_seconds = 0.0
+        energy_proxy_per_passenger = float(
+            self.energy_proxy_total / max(passengers_served, 1.0)
+        )
+
         return {
             "condition_id": self.condition_id,
             "seed": int(seed),
@@ -828,6 +1062,16 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             "intervention_count": int(self.intervention_count),
             "decision_step_count": int(self.decision_step_count),
             "energy_proxy_total": float(self.energy_proxy_total),
+            "active_bus_count": active_bus_count,
+            "base_num_agents_b0r": base_num_agents_b0r,
+            "fleet_ratio_vs_b0r": fleet_ratio_vs_b0r,
+            "fleet_reduction_ratio": fleet_reduction_ratio,
+            "passengers_served": passengers_served,
+            "passenger_demand_generated": passenger_demand_generated,
+            "passenger_service_rate": passenger_service_rate,
+            "passenger_wait_p95_seconds": passenger_wait_p95_seconds,
+            "energy_proxy_per_passenger": energy_proxy_per_passenger,
+            "intervention_events": int(self.intervention_count),
             "source_mode": self.source_mode,
         }
 

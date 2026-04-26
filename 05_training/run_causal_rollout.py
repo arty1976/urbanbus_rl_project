@@ -45,6 +45,9 @@ CONDITION_KEY_BY_ID = {
     "B1": "B1_noop",
     "B2": "B2_rulebased",
     "A": "A_pure_mappo",
+    "A90": "A_pure_mappo_fleet_90",
+    "A80": "A_pure_mappo_fleet_80",
+    "A70": "A_pure_mappo_fleet_70",
 }
 
 
@@ -116,11 +119,18 @@ def build_adapter_config(
     headway = policy_cfg.get("headway", {})
     kpi = policy_cfg.get("kpi", {})
     action_space = policy_cfg.get("action_space", {})
+    passenger_flow = policy_cfg.get("passenger_flow", {})
 
     feature_profile = policy_cfg.get("feature_weight_profile", {})
     feature_profile_path = (
         feature_profile.get("path")
         or contract.get("input_artifacts", {}).get("feature_weight_profile", "")
+    )
+
+    shared_demand_profile = policy_cfg.get("shared_exogenous_demand_profile", {})
+    shared_demand_profile_path = (
+        shared_demand_profile.get("path")
+        or contract.get("input_artifacts", {}).get("shared_exogenous_demand_profile", "")
     )
 
     target_headway_by_time_band = headway.get(
@@ -134,6 +144,8 @@ def build_adapter_config(
 
     cfg = {
         "feature_weight_profile_path": feature_profile_path,
+        "shared_exogenous_demand_profile_path": shared_demand_profile_path,
+        "base_arrival_lambda": float(passenger_flow.get("shared_base_arrival_lambda_per_agent_step", 1.5)),
         "condition_id": condition["condition_id"],
         "condition_name": condition.get("condition_name", condition_id),
         "source_mode": condition["source_mode"],
@@ -173,6 +185,20 @@ def build_adapter_config(
         cfg["low_headway_threshold_seconds"] = float(rule_params.get("low_headway_threshold_seconds", 360))
         cfg["high_headway_threshold_seconds"] = float(rule_params.get("high_headway_threshold_seconds", 900))
         cfg["max_hold_seconds"] = float(rule_params.get("max_hold_seconds", 120))
+
+    # A-family placeholder policies.
+    # These are NOT trained MAPPO policies yet. They only open the causal
+    # rollout and canonical aggregation path for A/A90/A80/A70.
+    if condition_id in {"A", "A90", "A80", "A70"}:
+        fleet_ratio = float(condition.get("fleet_ratio_vs_b0r", 1.0))
+        base_agents = int(policy_cfg.get("num_agents", 10))
+        cfg["fleet_ratio_vs_b0r"] = fleet_ratio
+        cfg["base_num_agents_b0r"] = base_agents
+        cfg["num_agents"] = max(1, int(round(base_agents * fleet_ratio)))
+        cfg["allow_hold"] = True
+        cfg["allow_skip"] = True
+        cfg["allow_dispatch"] = False
+        cfg["qwen_trigger_rate"] = 0.0
 
     return cfg
 
@@ -233,16 +259,19 @@ def build_policy_actions(
     obs: Dict[str, Any],
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Step-12 policy action generator.
+    Step-17 policy action generator.
 
-    B0R/B1/A:
-      proceed-only at this skeleton stage.
+    B0R/B1:
+      proceed-only.
 
     B2:
-      pressure_score-based rule controller.
-      - highest pressure agent: hold 60 sec
-      - lowest pressure agent: occasional skip
-      - others: proceed
+      pressure_score-based rule baseline.
+
+    A/A90/A80/A70:
+      placeholder pressure-aware policy.
+      This is not a trained MAPPO policy yet. It only validates the
+      causal rollout path, fleet-ratio handling, Qwen-disabled contract,
+      and canonical KPI aggregation for A-family conditions.
     """
     cid = str(condition_id).upper()
     actions = build_proceed_actions(agent_ids)
@@ -254,7 +283,7 @@ def build_policy_actions(
         actions[int(agent_id)]["pressure_score"] = float(pressure_scores.get(int(agent_id), 0.0))
         actions[int(agent_id)]["pressure_rank"] = int(ranks.get(int(agent_id), -1))
 
-    if cid != "B2":
+    if cid in {"B0R", "B1"}:
         return actions
 
     if not agent_ids:
@@ -269,24 +298,49 @@ def build_policy_actions(
         key=lambda aid: (float(pressure_scores.get(int(aid), 0.0)), int(aid)),
     )
 
-    # High pressure: hold to stabilize headway under pressure-aware rule control.
-    actions[int(high_agent)].update(
-        {
-            "action_type": 1,
-            "hold_bucket": 2,
-            "rule_reason": "high_pressure_hold",
-        }
-    )
-
-    # Low pressure: occasional skip if different from high pressure agent.
-    if len(agent_ids) > 1 and int(low_agent) != int(high_agent) and sim_step_idx % 5 == 0:
-        actions[int(low_agent)].update(
+    if cid == "B2":
+        actions[int(high_agent)].update(
             {
-                "action_type": 2,
-                "hold_bucket": 0,
-                "rule_reason": "low_pressure_skip",
+                "action_type": 1,
+                "hold_bucket": 2,
+                "rule_reason": "high_pressure_hold",
             }
         )
+
+        if len(agent_ids) > 1 and int(low_agent) != int(high_agent) and sim_step_idx % 5 == 0:
+            actions[int(low_agent)].update(
+                {
+                    "action_type": 2,
+                    "hold_bucket": 0,
+                    "rule_reason": "low_pressure_skip",
+                }
+            )
+
+        return actions
+
+    if cid.startswith("A"):
+        # Placeholder MAPPO-like behavior:
+        # - keep high-pressure bus moving to serve demand
+        # - occasionally skip low-pressure area to save fleet/energy
+        # - no Qwen intervention
+        actions[int(high_agent)].update(
+            {
+                "action_type": 0,
+                "hold_bucket": 0,
+                "rule_reason": "placeholder_high_pressure_proceed",
+            }
+        )
+
+        if len(agent_ids) > 1 and int(low_agent) != int(high_agent) and sim_step_idx % 4 == 0:
+            actions[int(low_agent)].update(
+                {
+                    "action_type": 2,
+                    "hold_bucket": 0,
+                    "rule_reason": "placeholder_low_pressure_skip",
+                }
+            )
+
+        return actions
 
     return actions
 
@@ -328,6 +382,11 @@ def run_one_window(adapter: Any, *, seed: int, scenario_config: Dict[str, Any]) 
                     "pressure_score": float(action_payload.get("pressure_score", 0.0)),
                     "pressure_rank": int(action_payload.get("pressure_rank", -1)),
                     "rule_reason": str(action_payload.get("rule_reason", "proceed_default")),
+                    "demand_multiplier": float(info.get("demand_multiplier", 1.0)),
+                    "shared_arrival_lambda": float(info.get("shared_arrival_lambda", 1.5)),
+                    "fleet_ratio_vs_b0r": float(getattr(adapter, "config", {}).get("fleet_ratio_vs_b0r", 1.0)),
+                    "active_bus_count": int(getattr(adapter, "num_agents", 0)),
+                    "qwen_trigger_rate": 0.0,
                     "reward": float(step_result.rewards.get(agent_id, 0.0)),
                     "terminated": bool(step_result.terminated),
                     "truncated": bool(step_result.truncated),
@@ -378,7 +437,7 @@ def parse_args() -> argparse.Namespace:
         description="Phase-2 causal rollout runner skeleton"
     )
     parser.add_argument("--contract", required=True)
-    parser.add_argument("--condition-id", required=True, choices=["B0R", "B1", "B2", "A"])
+    parser.add_argument("--condition-id", required=True, choices=["B0R", "B1", "B2", "A", "A90", "A80", "A70"])
     parser.add_argument("--policy-config", required=True)
     parser.add_argument("--scenario-index", required=True)
     parser.add_argument("--output-root", required=True)
