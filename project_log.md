@@ -1392,3 +1392,175 @@ A 계열 정책은 아직 실제 학습된 MAPPO inference가 아니다. 그러�
 - 이후 `run_causal_rollout.py` 내부의 placeholder A-family 경로를 actual MAPPO inference 경로로 단계적으로 교체한다.
 - 논문용 성능 주장은 `source_mode=causal_*`이며 actual checkpoint가 연결된 결과에 한해 사용한다.
 
+
+---
+## 📅 2026-04-26
+### Phase 2 Step 32~39 MAPPO Actual-Inference Preparation
+
+오늘 작업에서는 A/A90/A80/A70 placeholder 기반 검증 경로를 실제 MAPPO 연결 준비 경로로 확장했다.  
+MAPPO (Multi-Agent Proximal Policy Optimization=다중 에이전트 근접 정책 최적화) 실제 학습은 아직 H200 서버에서 수행하지 않았지만, checkpoint 존재 검증, policy interface, action field, canonical KPI 집계 경로까지의 연결 안전장치를 갤럭시북5 Pro에서 모두 사전 검증했다.
+
+#### Step 32 — actual MAPPO checkpoint preflight 확인
+- 명령:
+  - `python .\05_training\run_causal_rollout.py --a-family-bridge --policy-kind mappo --checkpoint-path artifacts/experiment_A_v1/checkpoints/best.pt --require-existing-checkpoint --write-parquet`
+- 결과:
+  - checkpoint가 없을 때 `FileNotFoundError`로 중단됨.
+  - placeholder fallback이 발생하지 않음을 확인.
+- 의미:
+  - actual MAPPO 경로가 checkpoint 존재 여부를 강제한다.
+  - checkpoint 없는 상태에서 A/A90/A80/A70 결과를 실수로 생성하지 않는다.
+
+#### Step 33 — friendly MAPPO checkpoint STOP message 추가
+- 수정 파일:
+  - `05_training/run_causal_rollout_a_family_bridge_v1.py`
+  - `05_training/test_step33_friendly_checkpoint_stop.py`
+- 기존 긴 traceback을 사람이 읽기 쉬운 STOP 메시지로 정리.
+- 최종 출력 예:
+  - `[STOP] MAPPO checkpoint does not exist: artifacts/experiment_A_v1/checkpoints/best.pt`
+  - `This is expected before actual MAPPO training.`
+  - `No placeholder fallback was used.`
+- 의미:
+  - 실제 학습 전에는 checkpoint 없음이 정상 STOP 상태임을 명확히 전달.
+  - 운영 중 traceback 혼동을 줄임.
+
+#### Step 34 — fake checkpoint MAPPO boundary smoke 추가
+- 생성 파일:
+  - `05_training/evaluation/run_fake_checkpoint_mappo_boundary_smoke_v1.py`
+  - `05_training/evaluation/README_fake_checkpoint_mappo_boundary_smoke.md`
+  - `05_training/evaluation/test_fake_checkpoint_mappo_boundary_smoke_v1.py`
+- fake checkpoint를 만들어 `--policy-kind mappo --require-existing-checkpoint` 경로가 통과하는지 검증.
+- 검증 항목:
+  - `policy_source = mappo_policy`
+  - `source_mode = causal_*_mappo_policy_v1`
+  - placeholder/stub/smoke marker 없음
+  - `qwen_trigger_rate = 0.0`
+  - canonical KPI (Key Performance Indicator=핵심성과지표) 집계 통과
+- 주의:
+  - fake checkpoint는 성능 주장용이 아니다.
+  - boundary와 artifact path 검증용이다.
+
+#### Step 35 — MAPPO policy inference interface contract 추가
+- 생성 파일:
+  - `05_training/policies/mappo_policy_interface_v1.py`
+  - `05_training/policies/README_mappo_policy_interface.md`
+  - `05_training/policies/test_mappo_policy_interface_v1.py`
+- 정의한 계약:
+  - checkpoint metadata contract
+  - observation dict contract
+  - action dict contract
+- 필수 checkpoint metadata:
+  - `artifact_type = urbanbus_mappo_checkpoint`
+  - `interface_version = mappo_policy_interface_v1`
+  - `policy_kind = mappo`
+  - `trained_model = true`
+  - `action_space_version = bus_control_action_v1`
+  - `observation_space_version = urbanbus_observation_v1`
+- 현재 action은 conservative mock action이다.
+- 의미:
+  - 실제 H200 checkpoint가 생성되면 어떤 입출력 형식으로 붙일지 사전에 고정했다.
+
+#### Step 36 — MAPPO policy interface를 A-family bridge row에 연결
+- 생성 파일:
+  - `05_training/rollouts/a_family_policy_interface_bridge_v1.py`
+  - `05_training/rollouts/README_a_family_policy_interface_bridge.md`
+  - `05_training/rollouts/test_a_family_policy_interface_bridge_v1.py`
+- Step 35의 action dict를 실제 rollout row에 반영.
+- 추가·검증된 action fields:
+  - `action_version`
+  - `dispatch_delta`
+  - `hold_seconds`
+  - `skip_stop_flag`
+  - `target_headway_ratio`
+  - `policy_debug`
+  - `policy_action_debug`
+  - `policy_interface_version`
+  - `performance_claim_allowed`
+- `performance_claim_allowed = false` 유지.
+- 의미:
+  - neural MAPPO가 아니더라도 action interface가 rollout row 구조에 안전하게 들어갈 수 있음을 확인.
+
+#### Step 37 — policy interface scenario writer 추가
+- 생성 파일:
+  - `05_training/rollouts/run_a_family_policy_interface_scenario_writer_v1.py`
+  - `05_training/rollouts/README_a_family_policy_interface_scenario_writer.md`
+  - `05_training/rollouts/test_a_family_policy_interface_scenario_writer_v1.py`
+- scenario_index 기반으로 다중 window에 policy interface action fields를 붙임.
+- 검증 구조:
+  - `scenario_index.parquet`
+  - seed
+  - A/A90/A80/A70
+  - base rollout row
+  - policy observation
+  - action dict
+  - extended `window_rollup`
+- 의미:
+  - 단일 row가 아니라 여러 window/condition에 대해 MAPPO interface row 생성이 가능해졌다.
+
+#### Step 38 — policy-interface canonical KPI smoke 추가
+- 생성 파일:
+  - `05_training/evaluation/run_policy_interface_canonical_smoke_v1.py`
+  - `05_training/evaluation/README_policy_interface_canonical_smoke.md`
+  - `05_training/evaluation/test_policy_interface_canonical_smoke_v1.py`
+- 검증 경로:
+  - Step 37 policy-interface scenario writer
+  - A/A90/A80/A70 window_rollup 생성
+  - action fields 포함 확인
+  - `canonical_kpi_aggregator.py --mode official_rollup`
+  - condition별 canonical_eval 생성
+- 결과:
+  - `passed = True`
+- 의미:
+  - action fields가 붙은 MAPPO-interface rollout도 canonical KPI 집계 경로와 호환됨을 확인했다.
+
+#### Step 39 — H200 MAPPO training/inference runbook 작성
+- 생성 파일:
+  - `05_training/runbooks/H200_MAPPO_training_runbook_v1.md`
+  - `05_training/runbooks/h200_mappo_training_commands_v1.sh`
+  - `05_training/runbooks/h200_mappo_inference_smoke_commands_v1.sh`
+  - `05_training/runbooks/test_h200_mappo_runbook_v1.py`
+- 목적:
+  - 갤럭시북5 Pro에서 만든 검증 경로를 H200 서버 실제 학습·추론 절차로 이전하기 위한 runbook 작성.
+- 포함 내용:
+  - H200 git clone 절차
+  - Python virtual environment 설정
+  - GPU (Graphics Processing Unit=그래픽처리장치) / CUDA (Compute Unified Device Architecture=엔비디아 병렬 컴퓨팅 플랫폼) 확인
+  - Step 21~38 regression test 실행
+  - 실제 MAPPO checkpoint 출력 위치
+  - checkpoint metadata sidecar 요구사항
+  - inference smoke 명령
+  - canonical KPI 집계 절차
+- 실제 checkpoint 목표:
+  - `artifacts/experiment_A_v1/checkpoints/best.pt`
+  - `artifacts/experiment_A_v1/checkpoints/best.pt.metadata.json`
+
+#### 현재 확정 상태
+- A/A90/A80/A70은 여전히 Qwen 비활성화 상태다.
+- actual MAPPO 경로는 checkpoint가 없으면 STOP한다.
+- fake checkpoint는 boundary 검증용이며 성능 주장에 사용할 수 없다.
+- policy interface 경로는 아직 conservative mock action이다.
+- canonical KPI 집계 경로까지 mock-action rollout 호환성은 확인됐다.
+- H200 서버에서 실제 trained checkpoint 생성 후 metadata sidecar가 필요하다.
+
+#### 논문용 결과 사용 조건
+논문용 성능 주장은 아래 조건이 모두 만족될 때만 가능하다.
+
+1. `policy_source = mappo_policy`
+2. `source_mode = causal_*_mappo_policy_v1`
+3. checkpoint metadata의 `trained_model = true`
+4. placeholder/stub/smoke marker 없음
+5. `qwen_trigger_rate = 0.0`
+6. A/A90/A80/A70이 동일 window에서 동일 `passenger_demand_generated` 사용
+7. canonical KPI aggregation 통과
+8. 실제 H200 학습 checkpoint 기반 결과
+
+#### 다음 단계
+Step 40부터는 새창에서 시작한다.
+
+권장 목표:
+- actual neural MAPPO inference adapter 자리 만들기
+- 추천 파일:
+  - `05_training/policies/mappo_neural_policy_adapter_v1.py`
+  - `05_training/policies/README_mappo_neural_policy_adapter.md`
+  - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
+- conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
