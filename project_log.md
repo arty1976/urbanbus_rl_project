@@ -36,6 +36,343 @@ demand_intensity =
 |---
 
 ## 📅 2026-04-27
+### Step 54~56 policy metadata 검증, canonical KPI 보존, A-family MAPPO smoke matrix 구축
+
+오늘 작업에서는 Step 52에서 생성되기 시작한 A-family rollout 산출물이 canonical KPI 집계까지 이동하는 동안 policy metadata가 손실되지 않는지 검증하고, A/A90/A80/A70 네 조건을 한 번에 실행하는 `mappo_smoke` matrix 경로를 구축했다.
+
+핵심 목표는 다음과 같다.
+
+- `window_rollup.parquet` 안에 policy metadata가 빠짐없이 들어 있는지 검증한다.
+- canonical KPI 집계 이후 `kpi_by_window.parquet`에서도 policy metadata가 보존되는지 확인한다.
+- A/A90/A80/A70 다조건 `mappo_smoke` rollout matrix를 생성한다.
+- B2 같은 비 A-family 조건이 matrix에 섞이면 즉시 차단한다.
+- smoke checkpoint 결과가 actual 성능 주장으로 오해되지 않도록 `actual_policy_claim_ready=false`, `causal_policy_claim_ready=false`를 유지한다.
+
+#### 1. Step 54 — window_rollup policy metadata validator 생성
+
+생성 파일:
+
+- `05_training/policies/validate_window_rollup_policy_metadata.py`
+- `05_training/policies/test_validate_window_rollup_policy_metadata.py`
+
+Step 54에서는 `window_rollup.parquet`가 canonical KPI 집계로 넘어가기 전에 policy metadata가 빠지거나 오염되지 않았는지 자동 검증하는 validator를 만들었다.
+
+검증 대상 핵심 필드:
+
+```text
+policy_metadata_version
+condition_id
+source_mode
+policy_source
+policy_action_source_version
+policy_action_source_mode
+checkpoint_path
+checkpoint_validation_mode
+checkpoint_validator_ran
+checkpoint_loaded
+trained_model
+performance_claim_allowed
+placeholder_fallback_used
+mock_action_used
+qwen_train
+qwen_inference
+qwen_trigger_rate
+reward_version
+energy_proxy_model_version
+k_dist_kwh_per_m
+k_acc_kwh_per_event
+k_idle_kwh_per_sec
+actual_policy_claim_ready
+causal_policy_claim_ready
+```
+
+검증 규칙:
+
+```text
+mappo_policy row:
+- checkpoint_validator_ran = true
+- checkpoint_loaded = true
+- mock_action_used = false
+- placeholder_fallback_used = false
+- qwen_train = false
+- qwen_inference = false
+- qwen_trigger_rate = 0.0
+- reward_version = mappo_reward_v1
+- energy_proxy_model_version = daegu_energy_proxy_v1
+- K_DIST/K_ACC/K_IDLE 상수 일치
+
+mock_policy row:
+- allow_mock=true일 때만 허용
+- mock_action_used = true
+- placeholder_fallback_used = true
+- actual_policy_claim_ready = false
+- causal_policy_claim_ready = false
+```
+
+self-test 결과:
+
+```text
+mappo_smoke window_rollup 검증 PASS
+mock_smoke + allow_mock 검증 PASS
+mock_policy인데 allow_mock 없음 → FAIL 정상
+mappo_smoke인데 require_actual_ready 적용 → FAIL 정상
+qwen_trigger_rate = 0.5 → FAIL 정상
+policy_source 컬럼 삭제 → FAIL 정상
+mappo_policy row인데 mock_action_used = true → FAIL 정상
+```
+
+최종 결과:
+
+```text
+[OK] Step 54 window_rollup policy metadata self-test PASS
+[DONE] Step 54 window_rollup policy metadata validator complete.
+```
+
+해석:
+
+Step 54는 rollout 산출물이 canonical KPI 집계로 들어가기 전, 정책 출처 정보가 온전한지 확인하는 입구 검문소다.
+
+#### 2. Step 55 — canonical KPI aggregation 이후 policy metadata 보존 검증
+
+수정/생성 파일:
+
+- `05_training/evaluation/canonical_kpi_aggregator.py`
+- `05_training/policies/test_canonical_kpi_preserves_policy_metadata.py`
+
+Step 55에서는 `canonical_kpi_aggregator.py`가 `window_rollup.parquet`를 읽고 `kpi_by_window.parquet`를 만들 때 policy metadata를 보존하는지 검증했다.
+
+초기 실패:
+
+처음 실행에서는 rollout 단계의 `window_rollup.parquet` metadata 검증은 PASS했지만, canonical output인 `kpi_by_window.parquet` 검증은 FAIL했다.
+
+원인:
+
+```text
+canonical_kpi_aggregator.py가 KPI 계산 후 out_cols를 다시 고르면서
+policy metadata columns를 kpi_by_window.parquet에 포함하지 않았음
+```
+
+즉, 아래 필드들이 canonical output에서 사라졌다.
+
+```text
+policy_source
+checkpoint_loaded
+checkpoint_validator_ran
+mock_action_used
+placeholder_fallback_used
+qwen_train
+qwen_inference
+reward_version
+energy_proxy_model_version
+actual_policy_claim_ready
+causal_policy_claim_ready
+```
+
+수정:
+
+`canonical_kpi_aggregator.py`에 `POLICY_METADATA_PRESERVE_COLUMNS`를 추가하고, `compute_official_kpi_by_window()`에서 KPI 필수 컬럼 외에도 입력에 존재하는 policy metadata columns를 output columns에 보존하도록 수정했다.
+
+보존 대상 예:
+
+```text
+policy_metadata_version
+policy_source
+policy_action_source_version
+policy_action_source_mode
+checkpoint_path
+checkpoint_validation_mode
+checkpoint_validator_ran
+checkpoint_loaded
+trained_model
+performance_claim_allowed
+placeholder_fallback_used
+mock_action_used
+qwen_train
+qwen_inference
+reward_version
+energy_proxy_model_version
+k_dist_kwh_per_m
+k_acc_kwh_per_event
+k_idle_kwh_per_sec
+actual_policy_claim_ready
+causal_policy_claim_ready
+policy_action_count
+policy_nonzero_action_count
+distance_m
+acceleration_event_count
+hold_seconds
+passenger_served_count
+energy_proxy_per_passenger
+```
+
+재실행 결과:
+
+```text
+A + mappo_smoke rollout 생성 PASS
+pre-canonical window_rollup metadata validation PASS
+canonical_kpi_aggregator.py official_rollup PASS
+post-canonical kpi_by_window metadata validation PASS
+```
+
+최종 결과:
+
+```text
+[OK] Step 55 canonical policy metadata preservation self-test PASS
+[DONE] Step 55 canonical KPI policy metadata preservation complete.
+```
+
+해석:
+
+Step 55는 canonical KPI 집계 후에도 policy provenance가 사라지지 않도록 만든 단계다. 이제 KPI 결과를 볼 때도 해당 수치가 mock인지, MAPPO smoke인지, actual checkpoint인지, Qwen이 섞였는지 추적할 수 있다.
+
+#### 3. Step 56 — A/A90/A80/A70 mappo_smoke rollout matrix 생성
+
+생성 파일:
+
+- `05_training/run_a_family_mappo_smoke_matrix.py`
+- `05_training/policies/test_a_family_mappo_smoke_matrix.py`
+
+Step 56에서는 A-family 네 조건을 한 번에 실행하는 `mappo_smoke` matrix runner를 만들었다.
+
+대상 조건:
+
+```text
+A
+A90
+A80
+A70
+```
+
+runner의 역할:
+
+```text
+smoke checkpoint 생성 또는 입력 checkpoint 사용
+→ A/A90/A80/A70 조건 반복
+→ 각 조건별 mappo_smoke rollout 생성
+→ 각 window_rollup.parquet policy metadata 검증
+→ canonical KPI aggregation 실행
+→ canonical kpi_by_window.parquet policy metadata 검증
+→ matrix_manifest.json / status.json 저장
+```
+
+실행 성공 경로:
+
+```text
+A, A90, A80, A70
++ seed 56
++ mappo_smoke
++ smoke checkpoint
+→ rollout 4개 생성
+→ window_rollup metadata validation
+→ canonical KPI aggregation
+→ post-canonical metadata validation
+→ PASS
+```
+
+의도적 실패 테스트:
+
+```text
+--conditions A,B2
+→ B2는 A-family 조건이 아니므로 RuntimeError 발생
+→ expected failure로 정상 처리
+```
+
+B2가 거부되는 이유:
+
+```text
+Step 56 matrix는 A-family 전용이다.
+허용 조건은 A, A90, A80, A70뿐이다.
+B2는 rule-based baseline이므로 이 matrix에 섞이면 안 된다.
+```
+
+최종 결과:
+
+```text
+[OK] Step 56 A-family mappo_smoke matrix self-test PASS
+[DONE] Step 56 A-family mappo_smoke rollout matrix complete.
+```
+
+#### 4. Step 54~56 이후 구조
+
+현재 A-family smoke inference/evaluation 경로는 다음과 같다.
+
+```text
+MAPPO smoke checkpoint
+→ MAPPOPolicyActionSource
+→ A/A90/A80/A70 rollout writer
+→ window_rollup.parquet
+→ validate_window_rollup_policy_metadata.py
+→ canonical_kpi_aggregator.py
+→ kpi_by_window.parquet
+→ post-canonical metadata validation
+→ matrix_manifest.json / status.json
+```
+
+#### 5. 현재 policy metadata 보존 상태
+
+이제 다음 값들이 rollout과 canonical KPI 양쪽에서 유지된다.
+
+```text
+policy_source = mappo_policy
+source_mode = noncausal_*_mappo_policy_smoke_v1
+checkpoint_loaded = true
+checkpoint_validator_ran = true
+mock_action_used = false
+placeholder_fallback_used = false
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+reward_version = mappo_reward_v1
+energy_proxy_model_version = daegu_energy_proxy_v1
+actual_policy_claim_ready = false
+causal_policy_claim_ready = false
+```
+
+#### 6. 연구적으로 중요한 점
+
+Step 54~56은 성능을 낸 단계가 아니라, 성능 결과가 나중에 들어올 때 실험 오염을 막는 계층을 구축한 단계다.
+
+방지하는 문제:
+
+```text
+window_rollup 단계에서 policy metadata 누락
+canonical KPI 집계 과정에서 policy metadata 손실
+mock action이 MAPPO action으로 오해되는 문제
+smoke checkpoint가 actual checkpoint로 오해되는 문제
+Qwen 개입 checkpoint가 A-family 경로에 섞이는 문제
+B2 rule-based baseline이 A-family matrix에 섞이는 문제
+noncausal smoke 결과가 causal claim으로 오해되는 문제
+```
+
+#### 7. 현재 판정
+
+```text
+Step 54: COMPLETED
+Step 55: COMPLETED
+Step 56: COMPLETED
+
+window_rollup policy metadata validator: READY
+canonical KPI policy metadata preservation: READY
+A-family mappo_smoke matrix runner: READY
+
+actual H200 trained checkpoint: NOT YET
+actual performance claim: NOT YET
+causal performance claim: NOT YET
+```
+
+#### 8. 다음 단계 후보
+
+다음 단계는 아래 순서가 적절하다.
+
+1. Step 57 기록 커밋 및 GitHub push
+2. Step 58 H200 actual checkpoint preflight checklist 작성
+3. Step 59 A-family mappo_actual execution plan 작성
+4. Step 60 actual checkpoint가 들어왔을 때 Step 56 matrix를 mappo_actual로 승격하는 경로 준비
+5. Step 61 causal simulator adapter 준비 전, noncausal/smoke claim guard 재점검
+
+---
+
+## 📅 2026-04-27
 ### Step 51~52 A-family rollout policy integration plan 및 policy-source selectable rollout writer 구축
 
 오늘 작업에서는 Step 48~49에서 만든 MAPPO policy action source bridge와 policy metadata propagation 계약을 실제 A-family rollout writer에 연결하기 위한 통합 계획과 smoke writer를 구축했다.
@@ -2844,6 +3181,7 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
 
 
