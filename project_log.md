@@ -1,4 +1,4 @@
-﻿## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
 
 ### 1. Phase 2 causal simulator 구조 확장
 Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
@@ -1793,6 +1793,142 @@ KPI relationship analyzer와 Qwen의 역할은 분리한다.
 
 이 문서는 프로젝트의 진행 상황을 일자별로 기록하는 통합 로그입니다.  
 **"오늘 한 일 저장"** 요청 시 최신 날짜가 상단에 추가됩니다.
+
+---
+## 📅 2026-04-27
+### H200 actual MAPPO checkpoint 실행 게이트 Step 58~62 완료
+
+오늘 작업에서는 A-family MAPPO actual 실행을 실제 H200 checkpoint 도착 이후 안전하게 수행하기 위한 최종 guard 체계를 완성했다. 핵심 목표는 smoke 결과와 actual 결과가 섞이지 않도록 막고, 실제 checkpoint가 들어왔을 때 preflight부터 실행 계획, dry-run 검증까지 일관된 절차로 연결하는 것이다.
+
+#### 1. Step 58 — H200 actual checkpoint preflight checklist 확정
+- **생성 파일**
+  - `05_training/policies/H200_actual_checkpoint_preflight_checklist.md`
+  - `05_training/policies/h200_actual_checkpoint_preflight_checklist.py`
+  - `05_training/policies/test_h200_actual_checkpoint_preflight_checklist.py`
+- **핵심 기능**
+  - 실제 H200 학습 checkpoint가 `mappo_actual` 후보가 되기 위한 입구 검사를 고정했다.
+  - checkpoint 파일 존재 여부, `trained_model=true`, `performance_claim_allowed=true`, Qwen 비활성화, reward/energy proxy 버전, 에너지 상수 일치 여부를 검사한다.
+  - `validate_mappo_checkpoint.py --mode actual` 통과 여부를 actual 인정 조건으로 포함했다.
+- **중요 판정**
+  - smoke/fake/scaffold checkpoint는 actual 성능 주장용으로 승격될 수 없다.
+  - HistoricalReplayAdapter 기반 실행은 actual policy path 검증은 가능하지만 causal performance claim은 불가하다.
+
+#### 2. Step 59 — A-family mappo_actual execution plan 생성기 확정
+- **생성 파일**
+  - `05_training/policies/a_family_mappo_actual_execution_plan.md`
+  - `05_training/policies/a_family_mappo_actual_execution_plan.py`
+  - `05_training/policies/test_a_family_mappo_actual_execution_plan.py`
+- **핵심 기능**
+  - Step 58 preflight report가 PASS일 때만 A-family actual 실행 계획을 생성한다.
+  - 대상 조건은 `A`, `A90`, `A80`, `A70`이며, seed는 `1, 2, 3`으로 고정한다.
+  - 총 12개 run 계획을 생성한다.
+- **차단 조건**
+  - preflight report가 BLOCKED이면 차단.
+  - 입력 checkpoint path와 preflight report 내부 checkpoint path가 다르면 차단.
+  - B2 등 A-family가 아닌 조건이 섞이면 차단.
+  - HistoricalReplayAdapter에서 causal claim을 요구하면 차단.
+
+#### 3. Step 60 — mappo_actual matrix runner guard 검증 완료
+- **생성 파일**
+  - `05_training/policies/run_a_family_mappo_actual_matrix_from_plan.py`
+  - `05_training/policies/test_run_a_family_mappo_actual_matrix_from_plan.py`
+- **핵심 기능**
+  - Step 59의 execution plan JSON을 입력으로 받아 실행 가능 여부를 검증한다.
+  - self-test에서는 실제 H200 matrix를 실행하지 않고 dry-run command validation만 수행한다.
+  - `READY_TO_EXECUTE` plan만 dry-run 또는 execute 모드로 진입할 수 있다.
+  - 각 run의 명령 순서를 아래와 같이 강제한다.
+
+```text
+rollout_command
+→ metadata_validation_command
+→ canonical_command
+→ post_canonical_validation_command
+```
+
+- **Step 60 중 발견 및 수정**
+  - 최초 self-test에서 `causal_claim_guard.require_causal_claim=true`가 plan 최상위에 있을 때, run 내부의 false 값이 이를 덮어써 차단되지 않는 문제가 발견되었다.
+  - 이를 strict OR semantics로 수정했다.
+  - 이제 plan 최상위 또는 run 내부 중 하나라도 causal claim을 요구하면 true로 취급하며, HistoricalReplayAdapter 기반에서는 즉시 차단된다.
+
+#### 4. Step 61 — H200 actual MAPPO final runbook 확정
+- **생성 파일**
+  - `05_training/policies/H200_actual_mappo_final_runbook.md`
+  - `05_training/policies/test_h200_actual_mappo_final_runbook.py`
+- **핵심 기능**
+  - 실제 실행 직전 운영자가 따라야 할 최종 절차서를 작성했다.
+  - Step 58 preflight, Step 59 plan, Step 60 dry-run, Step 60 execute의 순서를 문서화했다.
+  - 실행 전 operator checklist를 추가했다.
+- **해석 기준**
+  - `A-family actual MAPPO checkpoint execution path validated under non-causal replay`는 허용된다.
+  - `A-family actual MAPPO causally outperformed baselines`는 HistoricalReplayAdapter 기반에서는 금지된다.
+
+#### 5. Step 62 — actual checkpoint arrival workflow 확정
+- **생성 파일**
+  - `05_training/policies/H200_actual_checkpoint_arrival_workflow.md`
+  - `05_training/policies/run_h200_actual_checkpoint_arrival_workflow.py`
+  - `05_training/policies/test_h200_actual_checkpoint_arrival_workflow.py`
+- **핵심 기능**
+  - 실제 H200 checkpoint가 도착했을 때 실행할 자동 연결 workflow를 만들었다.
+  - 순서는 다음과 같다.
+
+```text
+checkpoint existence check
+→ Step 58 actual preflight
+→ preflight PASS check
+→ checkpoint_path consistency check
+→ Step 59 execution plan generation
+→ READY_TO_EXECUTE check
+→ Step 60 dry-run
+→ DRY_RUN_VALIDATED check
+→ arrival workflow report 작성
+```
+
+- **성공 상태**
+  - `arrival_workflow_status = READY_FOR_MANUAL_EXECUTE`
+  - `preflight_status = PASS`
+  - `plan_status = READY_TO_EXECUTE`
+  - `dry_run_status = DRY_RUN_VALIDATED`
+- **중요 제한**
+  - Step 62는 실제 12개 matrix run을 실행하지 않는다.
+  - Step 62 PASS는 manual execute 준비 완료를 뜻하며, causal performance 증명을 뜻하지 않는다.
+
+#### 6. 현재 확정된 actual 실행 체계
+
+```text
+Step 58:
+실제 H200 checkpoint가 actual 자격이 있는지 preflight 검증
+
+Step 59:
+PASS checkpoint만으로 A/A90/A80/A70 × seeds 1,2,3 실행 계획 생성
+
+Step 60:
+READY_TO_EXECUTE plan만 dry-run/execute 가능한 matrix runner guard 검증
+
+Step 61:
+실제 실행 직전 운영자용 final runbook 확정
+
+Step 62:
+checkpoint 도착 시 preflight → plan → dry-run까지 자동 연결하는 arrival workflow 확정
+```
+
+#### 7. 현재 claim boundary
+
+- actual policy path 검증 가능:
+  - 실제 H200 checkpoint가 preflight를 통과하고, plan과 dry-run이 통과한 경우.
+- causal performance claim 불가:
+  - HistoricalReplayAdapter 또는 historical/replay/noncausal adapter 기반인 경우.
+- causal 성능 비교는 Phase 2 causal simulator adapter가 준비된 뒤에만 가능하다.
+
+#### 8. 다음 단계
+
+- 실제 H200 checkpoint가 아직 없다면, 다음 단계는 H200 학습 실행 준비 또는 H200 training runbook 작성이다.
+- 실제 checkpoint가 생기면 Step 62 arrival workflow를 실행한다.
+- 별도로 남아 있는 작업트리 변경:
+  - `.claude/worktrees/*`
+  - `05_training/run_experiment_A_neural_inference_smoke.py`
+  - `05_training/policies/test_neural_inference_strict_checkpoint.py`
+  는 Step 63 커밋 대상에서 제외한다.
+
 
 ---
 ## 📅 2026-04-24
