@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,6 +12,8 @@ from simulator_adapter_interface import (
     SimulatorAdapterInterface,
     StepResult,
 )
+
+from rewards.mappo_reward_v1 import compute_total_reward
 
 
 ACTION_HOLD = 0
@@ -458,6 +460,13 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             "note": "toy causal simulator: actions change queues, positions, headways, and KPI rollups",
         }
 
+        reward_total, reward_info, _reward_metrics = self._compute_step_reward()
+        rewards = {
+            agent_id: reward_total
+            for agent_id in range(self.num_agents_val)
+        }
+        info.update(reward_info)
+
         return StepResult(
             obs=obs,
             rewards=rewards,
@@ -512,6 +521,86 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
             "intervention_rate": intervention_rate,
             "energy_proxy": float(self.state.energy_proxy_total),
         }
+
+
+    def _condition_active_bus_ratio(self) -> float:
+        condition = str(self.condition_id).upper()
+        if condition == "A90":
+            return 0.9
+        if condition == "A80":
+            return 0.8
+        if condition == "A70":
+            return 0.7
+        return 1.0
+
+    def _build_reward_metrics(self) -> Dict[str, float]:
+        if self.state is None:
+            raise RuntimeError("reset() must be called before _build_reward_metrics()")
+
+        kpis = self.compute_kpis()
+
+        demand = float(max(0, int(self.state.demand_generated_total)))
+        served = float(max(0, int(self.state.passenger_served_total)))
+
+        service_rate = served / max(demand, 1.0)
+        service_rate = float(min(1.0, max(0.0, service_rate)))
+
+        avg_wait = kpis.get("avg_wait_seconds")
+        avg_wait_seconds = float(avg_wait) if avg_wait is not None else 0.0
+        avg_wait_seconds = float(max(0.0, avg_wait_seconds))
+
+        queue_pressure = float(self.state.queues.sum()) / max(1.0, float(self.num_nodes_val))
+        passenger_wait_p95_seconds = float(max(avg_wait_seconds * 1.65, avg_wait_seconds + queue_pressure))
+
+        energy_proxy = float(max(0.0, float(kpis.get("energy_proxy") or self.state.energy_proxy_total)))
+        energy_proxy_per_passenger = float(energy_proxy / max(served, 1.0))
+
+        baseline_bus_count = float(self.config.get("baseline_bus_count", 8.0))
+        if baseline_bus_count <= 0:
+            baseline_bus_count = 8.0
+        active_bus_count = baseline_bus_count * self._condition_active_bus_ratio()
+        fleet_reduction_ratio = 1.0 - (active_bus_count / max(baseline_bus_count, 1.0))
+        fleet_reduction_ratio = float(min(1.0, max(0.0, fleet_reduction_ratio)))
+
+        bunching_rate = float(kpis.get("bunching_rate") or 0.0)
+        on_time_rate = float(kpis.get("on_time_rate") or 0.0)
+        intervention_rate = float(kpis.get("intervention_rate") or 0.0)
+
+        return {
+            "cv_headway": float(kpis["cv_headway"]) if kpis.get("cv_headway") is not None else 0.0,
+            "avg_wait_seconds": avg_wait_seconds,
+            "bunching_rate": float(min(1.0, max(0.0, bunching_rate))),
+            "on_time_rate": float(min(1.0, max(0.0, on_time_rate))),
+            "intervention_rate": float(min(1.0, max(0.0, intervention_rate))),
+            "energy_proxy": energy_proxy,
+            "passenger_demand_generated": demand,
+            "passenger_served_count": served,
+            "passenger_service_rate": service_rate,
+            "passenger_wait_p95_seconds": passenger_wait_p95_seconds,
+            "energy_proxy_per_passenger": energy_proxy_per_passenger,
+            "fleet_reduction_ratio": fleet_reduction_ratio,
+            "baseline_bus_count": float(baseline_bus_count),
+            "active_bus_count": float(active_bus_count),
+            "qwen_trigger_rate": 0.0,
+        }
+
+    def _compute_step_reward(self) -> tuple[float, Dict[str, Any], Dict[str, float]]:
+        reward_metrics = self._build_reward_metrics()
+        reward_result = compute_total_reward(reward_metrics)
+
+        reward_total = float(reward_result["reward_total"])
+        reward_info: Dict[str, Any] = {
+            "reward_version": reward_result.get("reward_version", "mappo_reward_v1"),
+            "reward_claim_boundary": reward_result.get(
+                "reward_claim_boundary",
+                "toy_causal_training_reward_contract_not_paper_performance_claim",
+            ),
+            "reward_total": reward_total,
+            "reward_components": reward_result.get("reward_components", {}),
+            "reward_debug": reward_result.get("reward_debug", {}),
+            "reward_metrics": reward_metrics,
+        }
+        return reward_total, reward_info, reward_metrics
 
     def build_window_rollup_row(self) -> Dict[str, Any]:
         if self.state is None:
