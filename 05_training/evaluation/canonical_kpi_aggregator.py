@@ -65,6 +65,42 @@ REQUIRED_OFFICIAL_COLUMNS = [
 ]
 
 
+# Step 55: preserve policy provenance metadata from window_rollup inputs.
+# These columns are not KPI inputs, but they are required to prove whether
+# a canonical KPI row came from mock, MAPPO smoke, or actual MAPPO policy.
+POLICY_METADATA_PRESERVE_COLUMNS = [
+    "policy_metadata_version",
+    "policy_source",
+    "policy_action_source_version",
+    "policy_action_source_mode",
+    "checkpoint_path",
+    "checkpoint_validation_mode",
+    "checkpoint_validator_ran",
+    "checkpoint_loaded",
+    "trained_model",
+    "performance_claim_allowed",
+    "placeholder_fallback_used",
+    "mock_action_used",
+    "qwen_train",
+    "qwen_inference",
+    "reward_version",
+    "energy_proxy_model_version",
+    "k_dist_kwh_per_m",
+    "k_acc_kwh_per_event",
+    "k_idle_kwh_per_sec",
+    "actual_policy_claim_ready",
+    "causal_policy_claim_ready",
+    "policy_action_count",
+    "policy_nonzero_action_count",
+    "distance_m",
+    "acceleration_event_count",
+    "hold_seconds",
+    "passenger_served_count",
+    "energy_proxy_per_passenger",
+]
+
+
+
 class AggregationError(RuntimeError):
     pass
 
@@ -616,6 +652,12 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
         *optional_extended_cols,
         "input_source_path",
     ]
+
+    preserve_cols = [
+        c for c in POLICY_METADATA_PRESERVE_COLUMNS
+        if c in df.columns and c not in out_cols
+    ]
+    out_cols = [*out_cols, *preserve_cols]
 
     return df[out_cols].copy()
 
