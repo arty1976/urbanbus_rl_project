@@ -35,6 +35,273 @@ demand_intensity =
 | time_band | demand_intensity | multiplier_vs_night |
 |---
 
+## 📅 2026-04-27
+### Step 41~43 MAPPO checkpoint contract, strict inference gate, Daegu energy proxy model 정착
+
+오늘 작업에서는 Step 40에서 만든 neural MAPPO inference adapter scaffold 위에, 실제 H200 학습 checkpoint가 들어오기 전에 반드시 필요한 안전 계약과 검증 장치를 추가했다. 또한 대구버스 에너지 프록시 K 상수를 실제 계산 가능한 독립 모듈로 분리하였다.
+
+이번 작업의 핵심은 다음과 같다.
+
+- 아무 `.pt` 파일이나 actual MAPPO checkpoint로 인정하지 않는다.
+- Qwen이 섞인 checkpoint는 Experiment A 조건에서 차단한다.
+- fake/mock/smoke checkpoint는 actual mode에서 절대 통과하지 못하게 한다.
+- energy proxy model version과 K 상수를 checkpoint 계약에 고정한다.
+- energy proxy는 바로 reward에 넣지 않고, 먼저 KPI-side diagnostic lens로 검증한다.
+
+#### 1. Step 41 — MAPPO checkpoint contract v1 정의 및 validator 생성
+
+생성 파일:
+
+- `05_training/policies/mappo_checkpoint_contract.md`
+- `05_training/policies/validate_mappo_checkpoint.py`
+- `05_training/policies/test_validate_mappo_checkpoint.py`
+
+Step 41에서는 실제 MAPPO checkpoint로 인정할 수 있는 `.pt` 파일의 필수 조건을 계약으로 고정했다.
+
+필수 조건:
+
+- `artifact_version = mappo_policy_checkpoint_v1`
+- `contract_version = mappo_checkpoint_contract_v1`
+- `condition_id = A`
+- `qwen_train = false`
+- `qwen_inference = false`
+- `qwen_trigger_rate = 0.0`
+- `policy_architecture = ActorCriticMLP`
+- `actor_obs_dim = 16`
+- `critic_obs_dim = 64`
+- `action_dim = 2`
+- `hidden_dim = 128`
+- `shared_policy = true`
+- `ctde_enabled = true`
+- `model_state_dict` 존재
+- `trained_model` 명시
+- `performance_claim_allowed` 명시
+- `reward_version = mappo_reward_v1`
+- `rollout_schema_version = rollout_schema_v1`
+- `policy_interface_version = mappo_policy_interface_v1`
+- `action_space_version = bus_control_action_v1`
+- `observation_space_version = urbanbus_observation_v1`
+- `energy_proxy_model_version = daegu_energy_proxy_v1`
+- `energy_proxy_unit = kwh_equivalent`
+- `k_dist_kwh_per_m = 0.0012`
+- `k_acc_kwh_per_event = 0.1800`
+- `k_idle_kwh_per_sec = 0.0080`
+
+중요한 판정 원칙:
+
+- smoke mode에서는 fake checkpoint가 boundary validation 용도로만 통과 가능하다.
+- actual mode에서는 `trained_model = true`와 `performance_claim_allowed = true`가 반드시 필요하다.
+- actual mode에서는 fake/mock/stub/smoke/placeholder/scaffold marker가 있으면 실패한다.
+- Qwen 관련 값이 Experiment A 조건과 다르면 실패한다.
+- energy proxy K 상수가 하나라도 다르면 실패한다.
+- `model_state_dict`가 neural MAPPO adapter 구조에 로드되지 않으면 실패한다.
+
+검증 결과:
+
+- fake smoke checkpoint는 smoke mode에서 PASS.
+- 같은 fake checkpoint는 actual mode에서 의도적으로 FAIL.
+- `qwen_train = true` checkpoint는 FAIL.
+- energy constant mismatch checkpoint는 FAIL.
+- 최종 self-test PASS.
+
+해석:
+
+중간의 FAIL은 오류가 아니라 validator가 위험한 checkpoint를 제대로 거부했음을 의미한다. 즉, Step 41은 “checkpoint 형식과 실험 조건을 지키지 않는 파일을 actual MAPPO checkpoint로 인정하지 않는 안전장치”를 만든 단계다.
+
+#### 2. Step 42 — neural inference smoke runner에 strict checkpoint validator 연결
+
+수정/생성 파일:
+
+- `05_training/run_experiment_A_neural_inference_smoke.py`
+- `05_training/policies/test_neural_inference_strict_checkpoint.py`
+
+Step 42에서는 Step 40의 neural MAPPO inference smoke runner와 Step 41의 checkpoint validator를 연결했다.
+
+기존 Step 40 흐름:
+
+```text
+checkpoint_path 입력
+→ neural adapter가 직접 torch.load 시도
+```
+
+Step 42 이후 흐름:
+
+```text
+checkpoint_path 입력
+→ Step 41 validator 실행
+→ validator PASS
+→ neural adapter checkpoint 로드
+→ action 생성
+```
+
+validator가 실패하면:
+
+```text
+checkpoint_path 입력
+→ validator FAIL
+→ 즉시 STOP
+→ neural adapter 로드 안 함
+→ placeholder fallback 없음
+```
+
+새 CLI 옵션:
+
+- `--checkpoint-path`
+- `--require-checkpoint`
+- `--checkpoint-validation-mode actual|smoke`
+- `--checkpoint-validation-report`
+- `--skip-checkpoint-validator`
+
+주의:
+
+- `--skip-checkpoint-validator`는 developer escape hatch이며 actual claim에는 사용 금지.
+- `actual` mode는 H200 trained checkpoint 전용.
+- `smoke` mode는 boundary test 전용.
+
+검증 결과:
+
+- fake smoke checkpoint + smoke mode:
+  - validator ran
+  - checkpoint loaded
+  - SMOKE PASS
+- fake smoke checkpoint + actual mode:
+  - trained_model/performance_claim/fake marker 이유로 FAIL
+- qwen_train=True checkpoint + smoke mode:
+  - Experiment A 조건 위반으로 FAIL
+- 최종 self-test PASS.
+
+해석:
+
+Step 42는 neural MAPPO inference adapter 앞에 checkpoint 검문소를 세운 단계다. 이제 실제 H200 checkpoint가 들어와도 먼저 계약 검증을 통과해야만 inference 경로로 진입할 수 있다.
+
+#### 3. Step 43 — Daegu energy proxy model v1 생성
+
+생성 파일:
+
+- `05_training/rewards/__init__.py`
+- `05_training/rewards/energy_proxy_model_v1.py`
+- `05_training/rewards/energy_proxy_config_daegu_v1.yaml`
+- `05_training/rewards/README_energy_proxy_model.md`
+- `05_training/rewards/test_energy_proxy_model_v1.py`
+
+Step 43에서는 Step 41 checkpoint contract에 고정한 대구형 energy proxy 상수를 실제 계산 가능한 독립 모듈로 구현했다.
+
+확정 상수:
+
+```text
+K_DIST = 0.0012 kWh/m
+K_ACC  = 0.1800 kWh/event
+K_IDLE = 0.0080 kWh/sec
+```
+
+계산식:
+
+```text
+energy_kwh_equiv =
+  0.0012 * distance_m
+  + 0.1800 * acceleration_event_count
+  + 0.0080 * hold_seconds
+```
+
+승객 1인당 에너지 프록시:
+
+```text
+energy_proxy_per_passenger =
+  energy_kwh_equiv / max(passenger_served_count, epsilon)
+```
+
+모듈 기능:
+
+- `compute_energy_kwh_equiv`
+- `compute_energy_proxy_per_passenger`
+- `compute_energy_proxy_from_components`
+- `compute_energy_proxy_for_record`
+- `compute_energy_proxy_for_records`
+- `summarize_energy_proxy_records`
+- `expected_contract_fields`
+- `validate_config_constants`
+
+검증 결과:
+
+- 기본 K 상수 검증 PASS.
+- 0 energy case PASS.
+- 샘플 계산식 PASS.
+- record 기반 계산 PASS.
+- batch summary PASS.
+- 승객 수 0명 denominator epsilon 보호 PASS.
+- 음수 입력 방어 PASS.
+- 잘못된 K 상수 config 거부 PASS.
+- 최종 self-test PASS.
+
+중요 해석:
+
+Daegu energy proxy model v1은 아직 MAPPO reward에 직접 편입하지 않았다. 현재 위치는 KPI-side diagnostic lens다.
+
+즉, 먼저 B0/B1/B2/A rollout에서 에너지 프록시가 상식적인 범위로 계산되는지 확인하고, 정책 간 trade-off가 말이 되는지 검증한다. 사용할 만하다고 판정되면 이후 reward shaping 후보로 승격한다.
+
+#### 4. 현재 연구 흐름상 의미
+
+Step 41~43 이후의 구조는 다음과 같다.
+
+```text
+Step 40:
+neural MAPPO inference adapter scaffold 생성
+
+Step 41:
+actual MAPPO checkpoint 인정 기준 정의
+
+Step 42:
+neural inference runner 앞에 checkpoint validator 연결
+
+Step 43:
+Daegu energy proxy model v1을 독립 계산 모듈로 구현
+```
+
+이로써 actual inference 준비 경로는 다음처럼 강화되었다.
+
+```text
+H200에서 trained MAPPO checkpoint 생성
+→ checkpoint contract v1 만족 여부 검증
+→ qwen 비활성 조건 확인
+→ reward/rollout/policy/action/observation/energy model version 확인
+→ model_state_dict 로드 가능성 확인
+→ validator PASS인 checkpoint만 neural inference adapter에 진입
+```
+
+#### 5. 논문/실험 방어 관점의 의미
+
+이번 구조를 통해 다음 위험을 줄였다.
+
+- smoke checkpoint를 실제 결과로 오인하는 문제
+- Qwen 개입 checkpoint가 A 조건 결과에 섞이는 문제
+- reward version 또는 energy proxy version이 다른 checkpoint가 섞이는 문제
+- observation/action dimension mismatch로 인한 잘못된 inference
+- 에너지 프록시를 검증 없이 reward에 바로 넣어 모델이 이상하게 학습되는 문제
+
+특히 energy proxy는 “대기시간은 줄었지만 에너지를 과도하게 쓴 것은 아닌가?”라는 리뷰어 질문에 대응하기 위한 핵심 방어 지표가 된다.
+
+#### 6. 현재 판정
+
+- Step 41: COMPLETED
+- Step 42: COMPLETED
+- Step 43: COMPLETED
+- Actual H200 trained checkpoint: NOT YET
+- Actual performance claim: NOT YET
+- Energy proxy reward integration: NOT YET
+- Energy proxy KPI-side validation: READY
+
+#### 7. 다음 단계 후보
+
+다음 단계는 아래 순서가 적절하다.
+
+1. Step 44 기록 커밋 및 GitHub push
+2. Step 45 `mappo_runner.py` checkpoint 저장 포맷을 checkpoint contract v1에 맞춤
+3. Step 46 actual checkpoint preflight script 생성
+4. Step 47 A/A90/A80/A70 rollout writer에서 mock/stub action을 neural adapter action으로 교체 준비
+5. Step 48 H200 서버 actual training checkpoint 생성 후 strict actual-mode validation
+
+---
+
 ## 📅 2026-04-26
 ### Step 40 actual neural MAPPO inference adapter 자리 생성
 
@@ -1642,5 +1909,6 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
 
