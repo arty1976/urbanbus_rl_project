@@ -36,6 +36,309 @@ demand_intensity =
 |---
 
 ## 📅 2026-04-27
+### Step 48~49 MAPPO policy action source bridge 및 policy metadata propagation 계약 구축
+
+오늘 작업에서는 Step 46까지 구축한 checkpoint preflight pipeline 위에, 실제 rollout writer가 neural MAPPO action을 안전하게 받아올 수 있는 action source bridge와 policy metadata propagation 계약을 추가했다.
+
+핵심 목표는 다음과 같다.
+
+- A/A90/A80/A70 rollout writer가 mock/stub action 대신 neural MAPPO action을 같은 인터페이스로 받을 수 있게 준비한다.
+- checkpoint가 없거나 validator를 통과하지 못하면 fallback 없이 STOP한다.
+- Qwen이 섞인 checkpoint는 Experiment A-family 경로에서 차단한다.
+- rollout/KPI 전 단계까지 policy source metadata를 같은 필드명으로 전달할 수 있게 표준화한다.
+- 실제 paper-level claim 가능 여부를 metadata로 명확히 구분한다.
+
+#### 1. Step 48 — MAPPO policy action source bridge 생성
+
+생성 파일:
+
+- `05_training/policies/mappo_policy_action_source.py`
+- `05_training/policies/test_mappo_policy_action_source.py`
+
+Step 48에서는 rollout writer가 직접 neural adapter와 validator를 모두 다루지 않아도 되도록 `MAPPOPolicyActionSource`를 만들었다.
+
+기존 구조의 문제:
+
+```text
+rollout writer가 neural adapter를 직접 다루면
+checkpoint validation, strict loading, Qwen 차단, metadata 기록이 분산될 위험이 있음
+```
+
+Step 48 이후 목표 구조:
+
+```text
+obs 생성
+→ MAPPOPolicyActionSource.select_actions(obs)
+→ actions 반환
+→ simulator.step(actions)
+→ metadata에 policy_source=mappo_policy 기록
+```
+
+`MAPPOPolicyActionSource`의 핵심 안전 규칙:
+
+```text
+checkpoint_path 없음 → STOP
+checkpoint validator 실패 → STOP
+actual mode에서 smoke checkpoint → STOP
+qwen_train=true 또는 qwen_inference=true → STOP
+qwen_trigger_rate != 0.0 → STOP
+placeholder fallback 없음
+mock action 없음
+```
+
+주요 metadata:
+
+```text
+policy_source = mappo_policy
+policy_action_source_version = mappo_policy_action_source_v1
+policy_action_source_mode = mappo_policy_actual_v1 또는 mappo_policy_smoke_v1
+checkpoint_validator_ran = true
+checkpoint_loaded = true
+trained_model
+performance_claim_allowed
+placeholder_fallback_used = false
+mock_action_used = false
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+reward_version = mappo_reward_v1
+energy_proxy_model_version = daegu_energy_proxy_v1
+```
+
+검증 결과:
+
+- smoke checkpoint + smoke mode:
+  - action 생성 PASS
+  - checkpoint validator 실행 확인
+  - checkpoint loaded 확인
+  - mock/placeholder fallback 미사용 확인
+  - Qwen 비활성 확인
+  - energy proxy model version 확인
+- checkpoint 없음:
+  - expected failure
+  - fallback 없이 STOP 확인
+- smoke checkpoint + actual mode:
+  - expected failure
+  - trained_model/performance_claim 조건 미충족으로 STOP 확인
+- qwen_train=True checkpoint:
+  - expected failure
+  - Experiment A 조건 위반으로 STOP 확인
+
+최종 출력:
+
+```text
+[OK] Step 48 MAPPO policy action source self-test PASS
+[DONE] Step 48 MAPPO policy action source bridge complete.
+```
+
+해석:
+
+Step 48은 “rollout writer가 나중에 MAPPO neural action을 안전하게 받아오는 단일 출입구”를 만든 단계다. 이 출입구는 checkpoint 검증, strict load, Qwen 차단, metadata 생성을 함께 수행한다.
+
+#### 2. Step 49 — policy source metadata propagation 계약 생성
+
+생성 파일:
+
+- `05_training/policies/policy_source_metadata.py`
+- `05_training/policies/test_policy_source_metadata.py`
+
+Step 49에서는 Step 48의 action source가 만든 metadata를 rollout row, window rollup, canonical KPI 직전까지 같은 이름과 같은 의미로 전달할 수 있도록 표준화했다.
+
+핵심 목적:
+
+```text
+정책 action이 진짜 MAPPO에서 왔는가?
+mock/stub action이 아닌가?
+checkpoint 검증을 거쳤는가?
+Qwen이 섞이지 않았는가?
+energy proxy 계약이 맞는가?
+actual performance claim이 가능한 상태인가?
+causal performance claim이 가능한 상태인가?
+```
+
+위 질문에 대한 답을 rollout metadata 필드로 남기는 것이 목적이다.
+
+표준 metadata 필드:
+
+```text
+policy_metadata_version
+condition_id
+source_mode
+policy_source
+policy_action_source_version
+policy_action_source_mode
+checkpoint_path
+checkpoint_validation_mode
+checkpoint_validator_ran
+checkpoint_loaded
+trained_model
+performance_claim_allowed
+placeholder_fallback_used
+mock_action_used
+qwen_train
+qwen_inference
+qwen_trigger_rate
+reward_version
+energy_proxy_model_version
+k_dist_kwh_per_m
+k_acc_kwh_per_event
+k_idle_kwh_per_sec
+actual_policy_claim_ready
+causal_policy_claim_ready
+```
+
+`actual_policy_claim_ready`가 true가 되려면:
+
+```text
+policy_source = mappo_policy
+policy_action_source_version = mappo_policy_action_source_v1
+checkpoint_validator_ran = true
+checkpoint_loaded = true
+trained_model = true
+performance_claim_allowed = true
+placeholder_fallback_used = false
+mock_action_used = false
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+reward_version = mappo_reward_v1
+energy_proxy_model_version = daegu_energy_proxy_v1
+K_DIST/K_ACC/K_IDLE 상수 일치
+```
+
+`causal_policy_claim_ready`가 true가 되려면 위 조건에 더해:
+
+```text
+causal_simulator = true
+source_mode가 causal_* 로 시작
+```
+
+해야 한다.
+
+즉, 실제 trained checkpoint만 있어도 causal claim은 불가능하다.  
+causal simulator 기반 rollout까지 필요하다.
+
+검증 결과:
+
+- smoke checkpoint 기반 metadata는 구조적으로 valid.
+- 하지만 `trained_model=false`, `performance_claim_allowed=false`이므로 actual claim-ready는 false.
+- noncausal smoke이므로 causal claim-ready도 false.
+- `require_actual_ready=True`를 걸면 smoke metadata는 실패해야 하며 실제로 실패.
+- `mock_action_used=true`는 실패.
+- `placeholder_fallback_used=true`는 실패.
+- `qwen_trigger_rate != 0.0`은 실패.
+- energy proxy model mismatch는 실패.
+- causal source_mode인데 causal readiness가 false인 경우 실패.
+- batch validation에서 bad row 포함 시 invalid 처리 확인.
+
+최종 출력:
+
+```text
+[OK] Step 49 policy source metadata propagation self-test PASS
+[DONE] Step 49 policy source metadata propagation contract complete.
+```
+
+#### 3. Step 48~49 이후 구조
+
+현재 actual MAPPO inference 준비 경로는 다음과 같다.
+
+```text
+H200 actual checkpoint 생성
+→ preflight_mappo_checkpoint.py 검증
+→ MAPPOPolicyActionSource 생성
+→ obs 입력
+→ checkpoint validator 재확인
+→ neural adapter strict load
+→ actions 생성
+→ policy_source_metadata로 rollout-safe metadata 정규화
+→ rollout row/window rollup/canonical KPI 전 단계로 전달
+```
+
+#### 4. 연구적으로 중요한 의미
+
+Step 48~49는 단순 코드 편의 기능이 아니다.  
+이 단계는 논문 결과 오염을 막는 provenance layer다.
+
+방지하는 문제:
+
+- mock action이 실제 MAPPO action처럼 섞이는 문제
+- placeholder fallback이 조용히 사용되는 문제
+- Qwen이 켜진 checkpoint가 A 조건 결과에 섞이는 문제
+- checkpoint 검증 없이 action이 생성되는 문제
+- smoke checkpoint 결과가 actual claim으로 해석되는 문제
+- noncausal replay 결과가 causal performance claim으로 오해되는 문제
+- energy proxy 상수/버전이 다른 결과가 같은 실험으로 묶이는 문제
+
+이제 rollout 결과에는 다음 질문에 대한 근거가 남는다.
+
+```text
+이 action은 어디서 왔는가?
+이 checkpoint는 검증됐는가?
+실제 학습된 checkpoint인가?
+성능 주장에 쓸 수 있는가?
+causal claim이 가능한가?
+Qwen이 개입했는가?
+energy proxy 계약이 맞는가?
+```
+
+#### 5. 현재까지의 누적 상태
+
+```text
+Step 40:
+neural MAPPO inference adapter scaffold 생성
+
+Step 41:
+MAPPO checkpoint contract v1 및 validator 생성
+
+Step 42:
+neural inference runner 앞에 strict checkpoint validator 연결
+
+Step 43:
+Daegu energy proxy model v1 독립 모듈 생성
+
+Step 44:
+Step 41~43 project_log 기록
+
+Step 45:
+MAPPO checkpoint builder와 runner checkpoint contract preview 연결
+
+Step 46:
+actual checkpoint preflight script 생성
+
+Step 47:
+Step 45~46 project_log 기록
+
+Step 48:
+MAPPO policy action source bridge 생성
+
+Step 49:
+policy source metadata propagation 계약 생성
+```
+
+#### 6. 현재 판정
+
+- Step 48: COMPLETED
+- Step 49: COMPLETED
+- MAPPO action source bridge: READY
+- policy metadata propagation contract: READY
+- actual H200 trained checkpoint: NOT YET
+- actual performance claim: NOT YET
+- causal performance claim: NOT YET
+- A/A90/A80/A70 rollout writer neural action integration: NOT YET
+
+#### 7. 다음 단계 후보
+
+다음 단계는 아래 순서가 적절하다.
+
+1. Step 50 기록 커밋 및 GitHub push
+2. Step 51 A/A90/A80/A70 rollout writer integration plan 작성
+3. Step 52 A-family rollout writer에 policy action source 선택 옵션 추가
+4. Step 53 policy metadata columns를 window_rollup/canonical KPI 입력 전 단계에 연결
+5. Step 54 H200 actual checkpoint 생성 전 최종 preflight checklist 작성
+
+---
+
+## 📅 2026-04-27
 ### Step 45~46 MAPPO checkpoint builder 및 actual checkpoint preflight pipeline 구축
 
 오늘 작업에서는 Step 41~43에서 확정한 MAPPO checkpoint contract, strict validator, Daegu energy proxy model을 실제 runner/checkpoint 저장 경로와 preflight 검증 경로에 연결했다.
@@ -2204,6 +2507,7 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
 
 
