@@ -97,7 +97,10 @@ def safe_rmtree_for_windows(path: Path) -> Path:
 
     for attempt in range(5):
         try:
-            shutil.rmtree(path, onerror=on_error)
+            try:
+                shutil.rmtree(path, onexc=on_error)
+            except TypeError:
+                shutil.rmtree(path, onerror=on_error)
             return path
         except PermissionError:
             time.sleep(0.5 + attempt * 0.5)
