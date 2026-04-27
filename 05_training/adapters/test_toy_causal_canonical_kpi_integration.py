@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -78,6 +80,37 @@ def build_toy_contract(contract_path: Path) -> None:
     dump_json(contract_path, payload)
 
 
+
+def safe_rmtree_for_windows(path: Path) -> Path:
+    # Windows can keep parquet/canonical_eval folders locked through Explorer,
+    # antivirus, or previous Python handles. Retry first; if still locked,
+    # use a fresh retry output path so the test can proceed.
+    if not path.exists():
+        return path
+
+    def on_error(func, target, exc_info):
+        try:
+            os.chmod(target, 0o700)
+            func(target)
+        except Exception:
+            pass
+
+    for attempt in range(5):
+        try:
+            try:
+                shutil.rmtree(path, onexc=on_error)
+            except TypeError:
+                shutil.rmtree(path, onerror=on_error)
+            return path
+        except PermissionError:
+            time.sleep(0.5 + attempt * 0.5)
+
+    fallback = path.with_name(f"{path.name}_retry_{os.getpid()}_{int(time.time())}")
+    print(f"[WARN] could not remove locked artifact directory: {path}")
+    print(f"[WARN] using fallback output directory instead: {fallback}")
+    return fallback
+
+
 def test_toy_causal_canonical_kpi_integration() -> None:
     py = Path(sys.executable)
 
@@ -86,8 +119,12 @@ def test_toy_causal_canonical_kpi_integration() -> None:
     canonical_root = output_root / "canonical_eval"
     contract_path = output_root / "toy_causal_contract.json"
 
-    if output_root.exists():
-        shutil.rmtree(output_root)
+    output_root = safe_rmtree_for_windows(output_root)
+
+    # Re-bind derived paths after possible fallback output_root replacement.
+    rollout_root = output_root / "rollouts"
+    canonical_root = output_root / "canonical_eval"
+    contract_path = output_root / "toy_causal_contract.json"
 
     output_root.mkdir(parents=True, exist_ok=True)
     build_toy_contract(contract_path)
