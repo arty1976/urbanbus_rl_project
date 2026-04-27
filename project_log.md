@@ -36,6 +36,301 @@ demand_intensity =
 |---
 
 ## 📅 2026-04-27
+### Step 45~46 MAPPO checkpoint builder 및 actual checkpoint preflight pipeline 구축
+
+오늘 작업에서는 Step 41~43에서 확정한 MAPPO checkpoint contract, strict validator, Daegu energy proxy model을 실제 runner/checkpoint 저장 경로와 preflight 검증 경로에 연결했다.
+
+핵심 목표는 다음과 같다.
+
+- H200에서 실제 MAPPO checkpoint가 생성될 때 반드시 Step 41 계약 형식으로 저장되도록 준비한다.
+- `mappo_runner.py`가 smoke checkpoint stub뿐 아니라 checkpoint contract preview를 함께 남기도록 한다.
+- 실제 `best.pt`가 생겼을 때 한 번의 preflight 명령으로 actual checkpoint 사용 가능 여부를 검증할 수 있게 한다.
+- fake/smoke/Qwen-invalid checkpoint가 actual inference 경로에 들어오지 못하게 한다.
+
+#### 1. Step 45 — MAPPO checkpoint builder 및 runner checkpoint contract preview 연결
+
+생성/수정 파일:
+
+- `05_training/policies/mappo_checkpoint_builder.py`
+- `05_training/policies/test_mappo_checkpoint_builder.py`
+- `05_training/mappo_runner.py`
+
+Step 45에서는 checkpoint 저장 포맷 생성기를 추가했다.
+
+`mappo_checkpoint_builder.py`의 역할:
+
+- Step 41의 checkpoint contract v1에 맞는 metadata 생성
+- Step 43의 Daegu energy proxy model v1 상수 포함
+- `model_state_dict` 포함 checkpoint payload 생성
+- `torch.save` 가능한 checkpoint 저장 함수 제공
+- runner smoke용 `checkpoint_contract_preview.json` 생성
+
+주요 고정 값:
+
+```text
+artifact_version = mappo_policy_checkpoint_v1
+contract_version = mappo_checkpoint_contract_v1
+condition_id = A
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+policy_architecture = ActorCriticMLP
+actor_obs_dim = 16
+critic_obs_dim = 64
+action_dim = 2
+hidden_dim = 128
+reward_version = mappo_reward_v1
+rollout_schema_version = rollout_schema_v1
+policy_interface_version = mappo_policy_interface_v1
+action_space_version = bus_control_action_v1
+observation_space_version = urbanbus_observation_v1
+energy_proxy_model_version = daegu_energy_proxy_v1
+energy_proxy_unit = kwh_equivalent
+k_dist_kwh_per_m = 0.0012
+k_acc_kwh_per_event = 0.1800
+k_idle_kwh_per_sec = 0.0080
+```
+
+`mappo_runner.py` 변경 사항:
+
+기존:
+
+```text
+checkpoint_stub.json만 저장
+```
+
+변경 후:
+
+```text
+checkpoint_stub.json 저장
+checkpoint_contract_preview.json 저장
+```
+
+`checkpoint_contract_preview.json`은 실제 torch checkpoint가 아니다.  
+`model_state_dict`도 없다.  
+대신 H200에서 실제 checkpoint를 만들 때 반드시 만족해야 할 metadata 계약을 seed별 run directory에 남긴다.
+
+주의 및 수정 사항:
+
+초기 self-test에서 `run_experiment_A_stub.py`에 존재하지 않는 `--contract`, `--run-root` 인자를 넘겨 실패했다. 이는 checkpoint builder 본체 문제가 아니라 테스트 호출 방식 문제였다.
+
+수정:
+
+- CLI 호출 대신 `MAPPOExperimentRunner.write_checkpoint_stub()`를 직접 호출하도록 테스트 수정.
+- 이후 runner preview 파일 생성 여부를 직접 확인하도록 변경.
+
+추가로 `extra_metadata`에 `condition_id`, `shared_policy`, `ctde_enabled` 같은 checkpoint contract 정식 key와 겹치는 이름을 넣어 builder가 preview 생성을 거부할 수 있는 문제가 있었다.
+
+수정:
+
+```text
+condition_id      → runner_condition_id
+shared_policy     → runner_shared_policy
+ctde_enabled      → runner_ctde_enabled
+```
+
+최종 검증 결과:
+
+- builder가 checkpoint payload 생성 PASS
+- smoke checkpoint 저장 PASS
+- validator smoke mode PASS
+- `model_state_dict` neural adapter load 가능 확인
+- `checkpoint_contract_preview.json` 생성 확인
+- preview 안에 `mappo_checkpoint_contract_v1`, `daegu_energy_proxy_v1`, Qwen 비활성 조건 포함 확인
+- 최종 self-test PASS
+
+최종 출력:
+
+```text
+[OK] Step 45 MAPPO checkpoint builder self-test PASS
+[DONE] Step 45 MAPPO runner checkpoint contract format complete.
+```
+
+#### 2. Step 46 — actual checkpoint preflight script 생성
+
+생성 파일:
+
+- `05_training/policies/preflight_mappo_checkpoint.py`
+- `05_training/policies/test_preflight_mappo_checkpoint.py`
+
+Step 46에서는 나중에 H200에서 실제 `best.pt`가 생겼을 때 사용할 preflight 검증 스크립트를 만들었다.
+
+`preflight_mappo_checkpoint.py`가 수행하는 일:
+
+1. checkpoint 파일 존재 확인
+2. Step 41 checkpoint validator 실행
+3. actual/smoke mode에 따른 조건 확인
+4. Step 42 neural inference strict runner 실행
+5. checkpoint가 neural adapter에 실제로 로드되는지 확인
+6. Qwen 비활성 조건 확인
+7. preflight manifest 저장
+
+실제 H200 checkpoint 사용 예:
+
+```powershell
+python .\05_training\policies\preflight_mappo_checkpoint.py `
+  --checkpoint .\artifacts\experiment_A_v1\checkpoints\best.pt `
+  --mode actual `
+  --device cuda `
+  --seed 1
+```
+
+Preflight 산출물:
+
+- `preflight_checkpoint_validation_report.json`
+- `neural_strict_load/seed_xxx/status.json`
+- `preflight_manifest.json`
+
+검증 모드:
+
+```text
+smoke mode:
+- boundary validation용
+- trained_model=false 허용
+- performance_claim_allowed=false 유지
+- actual performance claim 금지
+
+actual mode:
+- H200 trained checkpoint 전용
+- trained_model=true 필요
+- performance_claim_allowed=true 필요
+- fake/mock/stub/smoke marker 금지
+```
+
+Step 46 self-test 구성:
+
+- smoke checkpoint를 smoke mode로 검사 → PASS
+- 같은 smoke checkpoint를 actual mode로 검사 → FAIL이 맞음
+- qwen_train=True checkpoint를 smoke mode로 검사 → FAIL이 맞음
+
+중간 FAIL 해석:
+
+중간의 `[FAIL]`은 오류가 아니라 의도된 차단 검증이다.
+
+실제로 로그에서 다음이 확인되었다.
+
+```text
+smoke checkpoint + smoke mode:
+  preflight PASS
+  trained_model = False
+  performance_claim_allowed = False
+  actual_claim_allowed = False
+
+smoke checkpoint + actual mode:
+  FAIL
+  reason = actual mode requires trained_model=true
+           actual mode requires performance_claim_allowed=true
+
+qwen_train=True checkpoint + smoke mode:
+  FAIL
+  reason = qwen_train mismatch: expected False, got True
+```
+
+최종 검증 결과:
+
+```text
+[OK] Step 46 checkpoint preflight self-test PASS
+[DONE] Step 46 actual checkpoint preflight script complete.
+```
+
+#### 3. 현재 구조의 의미
+
+Step 45~46 이후 checkpoint 흐름은 다음과 같다.
+
+```text
+mappo_runner.py
+→ checkpoint contract preview 기록
+
+H200 actual training
+→ mappo_checkpoint_builder.py 형식으로 checkpoint 저장
+
+preflight_mappo_checkpoint.py
+→ checkpoint contract 검증
+→ actual mode 검증
+→ neural adapter strict load 검증
+→ Qwen 비활성 확인
+→ energy proxy 계약 확인
+→ preflight manifest 저장
+
+preflight PASS
+→ actual neural MAPPO inference에 투입 가능
+```
+
+#### 4. 현재까지의 누적 상태
+
+```text
+Step 40:
+neural MAPPO inference adapter scaffold 생성
+
+Step 41:
+MAPPO checkpoint contract v1 및 validator 생성
+
+Step 42:
+neural inference runner 앞에 strict checkpoint validator 연결
+
+Step 43:
+Daegu energy proxy model v1 독립 모듈 생성
+
+Step 44:
+Step 41~43 project_log 기록
+
+Step 45:
+MAPPO checkpoint builder와 runner checkpoint contract preview 연결
+
+Step 46:
+actual checkpoint preflight script 생성
+```
+
+#### 5. 연구적으로 중요한 점
+
+이번 구조는 실제 성능 결과를 만들기 전, 실험 오염을 막는 안전장치다.
+
+방지하는 문제:
+
+- smoke checkpoint를 actual checkpoint로 착각하는 문제
+- Qwen 개입 checkpoint가 Experiment A 결과에 섞이는 문제
+- energy proxy 상수가 다른 checkpoint가 섞이는 문제
+- reward/policy/action/observation schema version이 다른 checkpoint가 섞이는 문제
+- neural adapter가 로드할 수 없는 checkpoint를 뒤늦게 발견하는 문제
+
+이제 실제 H200 checkpoint가 생기면 단순히 파일만 확인하는 것이 아니라, 다음 기준을 모두 만족해야 한다.
+
+```text
+trained_model = true
+performance_claim_allowed = true
+condition_id = A
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+model_state_dict load OK
+energy_proxy_model_version = daegu_energy_proxy_v1
+K_DIST/K_ACC/K_IDLE 상수 일치
+preflight PASS
+```
+
+#### 6. 현재 판정
+
+- Step 45: COMPLETED
+- Step 46: COMPLETED
+- actual H200 trained checkpoint: NOT YET
+- actual performance claim: NOT YET
+- preflight pipeline: READY
+- smoke/fake checkpoint boundary validation: PASS
+- Qwen-invalid checkpoint rejection: PASS
+
+#### 7. 다음 단계 후보
+
+다음 단계는 아래 순서가 적절하다.
+
+1. Step 47 기록 커밋 및 GitHub push
+2. Step 48 A/A90/A80/A70 rollout writer에서 mock/stub action을 neural adapter action으로 교체 준비
+3. Step 49 actual policy source metadata propagation 점검
+4. Step 50 H200 actual checkpoint training 전 preflight checklist 작성
+5. Step 51 H200 서버에서 trained checkpoint 생성 후 `preflight_mappo_checkpoint.py --mode actual` 실행
+
+---
+
+## 📅 2026-04-27
 ### Step 41~43 MAPPO checkpoint contract, strict inference gate, Daegu energy proxy model 정착
 
 오늘 작업에서는 Step 40에서 만든 neural MAPPO inference adapter scaffold 위에, 실제 H200 학습 checkpoint가 들어오기 전에 반드시 필요한 안전 계약과 검증 장치를 추가했다. 또한 대구버스 에너지 프록시 K 상수를 실제 계산 가능한 독립 모듈로 분리하였다.
@@ -1909,6 +2204,7 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
 
 
