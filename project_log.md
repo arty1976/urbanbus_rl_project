@@ -371,6 +371,115 @@ causal performance claim: NOT YET
 5. Step 61 causal simulator adapter 준비 전, noncausal/smoke claim guard 재점검
 
 ---
+## ?뱟 2026-04-27
+### Phase 2 Causal Simulator Adapter ?쒖옉 ??Step 77~79 ?꾨즺
+
+?ㅻ뒛 ?묒뾽?먯꽌??Phase 1??historical replay ?쒓퀎瑜??섏뼱?? action??next state???ㅼ젣濡??곹뼢??二쇰뒗 理쒖냼 ?멸낵 ?쒕??덉씠??寃쎈줈瑜??댁뿀?? ?대쾲 援ш컙? ?쇰Ц ?깅뒫 二쇱옣???꾪븳 ?④퀎媛 ?꾨땲?? Phase 2 causal evaluation?쇰줈 吏꾩엯?섍린 ?꾪븳 adapter contract, toy dynamics, rollout writer, canonical KPI ?곌껐??寃利앺븯???④퀎??
+
+#### 1. Step 77 ??Phase 2 causal simulator adapter contract ?묒꽦 諛?self-test ?듦낵
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/adapters/causal_simulator_adapter_contract.md`
+  - `05_training/adapters/causal_simulator_adapter.py`
+  - `05_training/adapters/test_causal_simulator_adapter_contract.py`
+
+- **?듭떖 寃곗젙**
+  - `HistoricalReplayAdapter`??non-causal replay濡??좎??쒕떎.
+  - historical replay?먯꽌??action??next state瑜?諛붽씀吏 ?딆쑝誘濡?causal performance claim? 遺덇??섎떎.
+  - Phase 2??`CausalSimulatorAdapter`??`action_t -> state_{t+1} -> KPI` 寃쎈줈瑜?理쒖냼 ?섏??먯꽌 援ы쁽?쒕떎.
+  - 1?④퀎 怨듦컙 踰붿쐞???援??꾩뿭???꾨땲???섏꽦援??듭떖 嫄곗젏, 踰붿뼱-留뚯큿 ?ㅽ???toy corridor濡??쒗븳?쒕떎.
+  - agent ?섎뒗 5~10? 踰꾩뒪 ?섏??쇰줈 ?쒗븳?쒕떎.
+  - control granularity??30遺꾩쑝濡?怨좎젙?쒕떎.
+
+- **援ы쁽??理쒖냼 dynamics**
+  - passenger queue update
+  - bus position update
+  - headway sample update
+  - hold / dispatch / skip action effect
+  - energy proxy update
+  - intervention count / decision count update
+  - `causal_comparison_allowed = true` metadata 遺??
+- **self-test ?듦낵 ??ぉ**
+  - `reset()` / `step(actions)` / `get_graph_skeleton()` / `compute_kpis()` 怨꾩빟 ?듦낵
+  - 媛숈? seed + 媛숈? action sequence??deterministic
+  - 媛숈? seed + ?ㅻⅨ action sequence??bus position, passenger queue, next observation???ㅻⅤ寃?留뚮벀
+  - raw event schema 寃利?  - window rollup schema 寃利?  - 5~10 agent ?쒗븳 寃利?  - 30遺?control granularity 寃利?
+#### 2. Step 78 ??Toy causal rollout writer ?앹꽦 諛?self-test ?듦낵
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/run_toy_causal_rollout.py`
+  - `05_training/adapters/test_toy_causal_rollout_writer.py`
+
+- **??븷**
+  - Step 77??toy causal simulator瑜??ㅼ젣 rollout artifact濡???ν븳??
+  - 媛?scenario / condition / seed 議고빀?????`raw_events.parquet`? `window_rollup.parquet`瑜??앹꽦?쒕떎.
+  - run manifest瑜??④퍡 ?앹꽦?섏뿬 causal flag, source mode, row count, horizon ?뺣낫瑜?湲곕줉?쒕떎.
+
+- **寃利?寃곌낵**
+  - conditions: `A`, `A90`
+  - seeds: `1`, `2`
+  - scenario_count: `2`
+  - raw_event_rows: `128`
+  - window_rollup_rows: `8`
+  - self-test PASS
+
+- **?섎?**
+  - toy simulator媛 硫붾え由??대???dynamics 寃利앹쓣 ?섏뼱, canonical evaluation???곌껐 媛?ν븳 ?뚯씪 ?곗텧臾쇱쓣 留뚮뱾 ???덇쾶 ?섏뿀??
+
+#### 3. Step 79 ??Toy causal rollout??canonical KPI aggregator???곌껐
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/adapters/test_toy_causal_canonical_kpi_integration.py`
+  - `05_training/adapters/toy_causal_canonical_kpi_integration.md`
+
+- **??븷**
+  - Step 78??`window_rollup.parquet`瑜?湲곗〈 `canonical_kpi_aggregator.py --mode official_rollup` 寃쎈줈???곌껐?쒕떎.
+  - 湲곗〈 Phase 1?먯꽌 ?뺤갑??canonical KPI 吏묎퀎 寃쎈줈瑜?Phase 2 toy causal output?먮룄 洹몃?濡??곸슜?????덈뒗吏 寃利앺븳??
+
+- **寃利?寃곌낵**
+  - conditions: `A`, `A90`
+  - seeds: `1`, `2`
+  - windows: `3`
+  - time_bands: `peak`, `offpeak`, `night`
+  - raw_event_rows: `192`
+  - window_rollup_rows: `12`
+  - `kpi_by_window.parquet`: 12 rows
+  - `kpi_by_seed.parquet`: 4 rows
+  - `kpi_by_time_band.parquet`: 12 rows
+  - `kpi_overall.json` ?앹꽦 ?뺤씤
+  - `causal_comparison_allowed = true` ?좎? ?뺤씤
+  - shared KPI 6醫?寃利??듦낵
+  - official_rollup smoke PASS
+
+#### 4. ?꾩옱 ?섎?? ?쒓퀎
+
+?대쾲 Step 77~79濡?泥섏쓬?쇰줈 ?꾨옒 寃쎈줈媛 ?대졇??
+
+```text
+action_t
+-> causal simulator dynamics
+-> state_{t+1}
+-> raw_events.parquet / window_rollup.parquet
+-> canonical_kpi_aggregator.py
+-> kpi_by_window / kpi_by_seed / kpi_overall
+```
+
+?ㅻ쭔 ??寃곌낵???꾩쭅 toy simulator 湲곕컲?대떎. ?곕씪???ㅼ젣 ?쇰Ц ?깅뒫 二쇱옣?쇰줈 ?ъ슜?섏? ?딅뒗?? ?꾩옱 ?④퀎???섎????ㅼ쓬?쇰줈 ?쒗븳?쒕떎.
+
+- causal adapter contract 寃利?- 理쒖냼 toy dynamics 寃利?- canonical KPI aggregation ?곌껐 寃利?- Phase 2 causal simulator architecture 吏꾩엯 寃利?
+#### 5. ?ㅼ쓬 ?④퀎
+
+?ㅼ쓬 ?④퀎??Step 80 ?댄썑 ?ㅼ쓬 ??以??섎굹??
+
+1. **Step 81 ??Toy causal A/A90/A80/A70 full smoke matrix**
+   - A-family 議곌굔 4媛??꾩껜瑜?toy causal simulator ?꾩뿉???ㅽ뻾?쒕떎.
+   - seeds 1,2,3源뚯? ?뺤옣?섏뿬 12媛?run 援ъ“瑜?寃利앺븳??
+
+2. **Step 82 ??Project log 諛?GitHub push/status review**
+   - Step 77~80源뚯???蹂寃쎌쓣 而ㅻ컠?섍퀬 origin/main??push?쒕떎.
+   - artifacts???ъ깮??媛?ν븯誘濡?而ㅻ컠 ??곸뿉???쒖쇅?쒕떎.
+
+---
 
 ## 📅 2026-04-27
 ### Step 51~52 A-family rollout policy integration plan 및 policy-source selectable rollout writer 구축
