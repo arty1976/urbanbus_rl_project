@@ -1796,6 +1796,162 @@ KPI relationship analyzer와 Qwen의 역할은 분리한다.
 
 ---
 ## 📅 2026-04-27
+### H200 MAPPO training 준비 게이트 Step 66~70 완료
+
+오늘 작업에서는 실제 H200 서버에서 MAPPO 학습을 시작하기 전 필요한 학습 준비 게이트를 추가로 정리했다. Step 58~62가 실제 checkpoint 도착 이후의 preflight, 실행 계획, dry-run, arrival workflow를 다루는 체계였다면, Step 66~70은 그 checkpoint를 만들기 위한 H200 training side의 계약과 검증 체계를 고정한 작업이다.
+
+#### 1. Step 66 — H200 MAPPO training runbook draft 작성
+- **생성 파일**
+  - `05_training/policies/H200_mappo_training_runbook.md`
+  - `05_training/policies/test_h200_mappo_training_runbook.py`
+- **핵심 기능**
+  - 실제 H200에서 MAPPO (Multi-Agent Proximal Policy Optimization=다중 에이전트 근접 정책 최적화) 학습을 시작하기 위한 절차서를 작성했다.
+  - H200 checkout, Python environment, CUDA (Compute Unified Device Architecture=통합 병렬 연산 장치 아키텍처) 확인, local validation, input artifact, output folder 구조, post-training validation 절차를 문서화했다.
+  - `best_mappo.pt`가 단독으로 actual artifact가 되는 것이 아니라, 환경 리포트·학습 설정·명령 기록·checkpoint manifest·검증 리포트와 함께 관리되어야 함을 명시했다.
+- **중요 제한**
+  - Step 66은 실제 학습 구현이 아니라 H200 학습 운영 절차서다.
+  - 이 단계만으로 trained checkpoint가 생성되는 것은 아니다.
+
+#### 2. Step 67 — H200 environment report generator 작성
+- **생성 파일**
+  - `05_training/policies/generate_h200_environment_report.py`
+  - `05_training/policies/test_generate_h200_environment_report.py`
+- **핵심 기능**
+  - H200 학습 전 서버 환경을 JSON (JavaScript Object Notation=자바스크립트 객체 표기법) 리포트로 남기는 도구를 작성했다.
+  - 기록 항목에는 hostname, OS, Python, torch, CUDA, GPU (Graphics Processing Unit=그래픽 처리 장치), `nvidia-smi`, git commit, repo dirty 여부, 주요 환경변수가 포함된다.
+  - 실제 H200 서버에서는 `--require-cuda`, `--require-h200-name`, `--require-clean-git` 옵션으로 강제 검증할 수 있다.
+- **의미**
+  - 나중에 학습 결과가 달라졌을 때 서버 환경 차이, CUDA/PyTorch 버전 차이, git commit 차이를 추적할 수 있다.
+
+#### 3. Step 68 — H200 actual checkpoint folder contract validator 작성
+- **생성 파일**
+  - `05_training/policies/H200_actual_checkpoint_folder_contract.md`
+  - `05_training/policies/validate_h200_actual_checkpoint_folder.py`
+  - `05_training/policies/test_validate_h200_actual_checkpoint_folder.py`
+- **핵심 기능**
+  - H200 학습 결과 폴더가 actual checkpoint 후보로 인정되기 위한 최소 구조를 검증한다.
+  - `best_mappo.pt`만 있는 상태를 차단하고, 아래 파일들이 함께 있어야 한다.
+
+```text
+environment_report.json
+training_config.json
+training_command.txt
+git_commit.txt
+logs/train_stdout.log
+logs/train_stderr.log
+logs/train_metrics.jsonl
+checkpoints/best_mappo.pt
+checkpoints/checkpoint_manifest.json
+validation/validate_mappo_checkpoint_actual_report.json
+validation/h200_actual_checkpoint_preflight_report.json
+README_run_summary.md
+```
+
+- **검증 조건**
+  - `condition_id = A`
+  - `qwen_train = false`
+  - `qwen_inference = false`
+  - `qwen_trigger_rate = 0.0`
+  - `reward_version = mappo_reward_v1`
+  - `energy_proxy_model_version = daegu_energy_proxy_v1`
+  - `k_dist_kwh_per_m = 0.0012`
+  - `k_acc_kwh_per_event = 0.1800`
+  - `k_idle_kwh_per_sec = 0.0080`
+  - `trained_model = true`
+  - `performance_claim_allowed = true`
+
+#### 4. Step 69 — train_mappo_actual.py CLI contract scaffold 작성
+- **생성 파일**
+  - `05_training/train_mappo_actual.py`
+  - `05_training/policies/test_train_mappo_actual_contract.py`
+- **핵심 기능**
+  - 실제 full training 구현 전, H200에서 사용할 training entrypoint의 CLI (Command Line Interface=명령행 인터페이스) 계약을 고정했다.
+  - `--dry-run-contract` 모드에서 필수 인자, A 조건 고정, Qwen 비활성화, reward/energy proxy 상수, seeds `1,2,3`, output folder scaffold 생성을 검증한다.
+- **중요 제한**
+  - Step 69는 실제 학습을 수행하지 않는다.
+  - dry-run contract 모드에서는 `trained_model=false`, `performance_claim_allowed=false`로 기록된다.
+  - 즉, Step 69 산출물은 Step 58 actual preflight로 승격될 수 없다.
+
+#### 5. Step 70 — H200 training local validation bundle 작성
+- **생성 파일**
+  - `05_training/policies/H200_training_local_validation_bundle.md`
+  - `05_training/policies/run_h200_training_local_validation_bundle.py`
+  - `05_training/policies/test_h200_training_local_validation_bundle.py`
+- **핵심 기능**
+  - Step 58~69의 핵심 스크립트와 self-test가 로컬에서 존재하고 실행 가능한지 검증하는 bundle runner를 작성했다.
+  - dry-run mode에서는 필수 파일 존재 여부와 command pack만 검증한다.
+  - execute mode에서는 self-test command pack을 순서대로 실행할 수 있다.
+- **확인된 결과**
+  - `step70_dry_run_report.json` 생성 완료.
+  - `bundle_status = DRY_RUN_VALIDATED`
+  - `command_count = 11`
+- **의미**
+  - H200으로 코드를 옮기기 전, local notebook에서 training gate script bundle이 깨지지 않았는지 빠르게 확인할 수 있다.
+
+#### 6. 현재 H200 training 준비 체계
+
+```text
+Step 66:
+H200 MAPPO training runbook draft 작성
+
+Step 67:
+H200 environment report generator 작성
+
+Step 68:
+H200 actual checkpoint folder contract validator 작성
+
+Step 69:
+train_mappo_actual.py CLI contract scaffold 작성
+
+Step 70:
+H200 training local validation bundle 작성 및 dry-run report 생성
+```
+
+#### 7. 기존 actual execution gate와의 연결
+
+Step 66~70은 checkpoint를 만들기 위한 H200 training side 준비이고, Step 58~62는 만들어진 checkpoint를 actual execution side로 승격하기 위한 게이트다.
+
+```text
+H200 training side:
+Step 66 → Step 67 → Step 68 → Step 69 → Step 70
+
+Actual execution side:
+Step 58 → Step 59 → Step 60 → Step 61 → Step 62
+```
+
+두 흐름을 연결하면 다음과 같다.
+
+```text
+H200에서 학습 실행
+→ environment_report.json 기록
+→ training output folder 생성
+→ folder contract 검증
+→ validate_mappo_checkpoint.py --mode actual
+→ Step 58 actual preflight
+→ Step 59 A-family actual execution plan
+→ Step 60 dry-run
+→ Step 61 final runbook review
+→ Step 62 arrival workflow
+```
+
+#### 8. 현재 claim boundary
+
+- Step 66~70 PASS는 H200 training 준비 체계가 갖춰졌다는 뜻이다.
+- Step 70 dry-run PASS는 local command bundle이 준비됐다는 뜻이다.
+- 아직 실제 `best_mappo.pt` trained checkpoint가 생성된 것은 아니다.
+- HistoricalReplayAdapter 기반 결과는 actual policy path validation은 가능하지만 causal performance claim은 불가하다.
+- causal 성능 비교는 Phase 2 causal simulator adapter에서만 가능하다.
+
+#### 9. 다음 단계
+
+- Step 72 후보 1: `project_log.md` 이후 전체 상태 점검 및 GitHub push.
+- Step 72 후보 2: H200 서버 이관용 run package checklist 작성.
+- Step 72 후보 3: Phase 2 causal simulator adapter 설계 시작.
+- 현재 로컬에서 가장 자연스러운 다음 작업은 H200 서버에 넘길 최소 파일·명령·산출물 목록을 정리하는 transfer checklist 작성이다.
+
+
+---
+## 📅 2026-04-27
 ### H200 actual MAPPO checkpoint 실행 게이트 Step 58~62 완료
 
 오늘 작업에서는 A-family MAPPO actual 실행을 실제 H200 checkpoint 도착 이후 안전하게 수행하기 위한 최종 guard 체계를 완성했다. 핵심 목표는 smoke 결과와 actual 결과가 섞이지 않도록 막고, 실제 checkpoint가 들어왔을 때 preflight부터 실행 계획, dry-run 검증까지 일관된 절차로 연결하는 것이다.
