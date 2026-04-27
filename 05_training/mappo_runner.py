@@ -243,12 +243,59 @@ class MAPPOExperimentRunner:
         }
 
     def write_checkpoint_stub(self, run_dir: Path, seed: int) -> None:
+        """
+        Write a smoke checkpoint stub plus a contract preview.
+
+        This does not create an actual trained MAPPO checkpoint.
+        It records the exact checkpoint metadata contract that future H200
+        training checkpoints must satisfy before neural inference can accept them.
+        """
         payload = {
             "seed": seed,
             "rng_state_included": self.config.checkpoint_save_rng_state,
             "rng_state": get_rng_state() if self.config.checkpoint_save_rng_state else None,
+            "checkpoint_contract_version": "mappo_checkpoint_contract_v1",
+            "checkpoint_artifact_version": "mappo_policy_checkpoint_v1",
+            "trained_model": False,
+            "performance_claim_allowed": False,
+            "note": (
+                "Smoke checkpoint stub only. Actual MAPPO checkpoints must include "
+                "model_state_dict and pass policies/validate_mappo_checkpoint.py."
+            ),
         }
         dump_json(run_dir / "checkpoint_stub.json", payload)
+
+        try:
+            from policies.mappo_checkpoint_builder import write_checkpoint_contract_preview_json
+
+            write_checkpoint_contract_preview_json(
+                run_dir / "checkpoint_contract_preview.json",
+                project_root=Path(self.config.root_dir),
+                seed=seed,
+                trained_model=False,
+                performance_claim_allowed=False,
+                extra_metadata={
+                    "runner": "MAPPOExperimentRunner",
+                    "runner_condition_id": "A",
+                    "runner_shared_policy": self.config.shared_policy,
+                    "runner_ctde_enabled": self.config.use_ctde,
+                    "reward_norm": asdict(self.config.reward_norm),
+                    "freeze_schedule": asdict(self.config.freeze_schedule),
+                    "distributed": asdict(self.config.distributed),
+                },
+            )
+        except Exception as exc:
+            dump_json(
+                run_dir / "checkpoint_contract_preview_error.json",
+                {
+                    "status": "checkpoint_contract_preview_failed",
+                    "error": str(exc),
+                    "note": (
+                        "Runner smoke can continue, but Step 45 contract preview "
+                        "should be fixed before actual H200 checkpoint generation."
+                    ),
+                },
+            )
 
     def _build_stub_scenario_config(self) -> Dict[str, Any]:
         return {
