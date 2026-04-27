@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 
-EXPECTED_SHARED_KPIS = [
+LEGACY_6_KPIS = [
     "cv_headway",
     "avg_wait_seconds",
     "bunching_rate",
@@ -14,6 +14,25 @@ EXPECTED_SHARED_KPIS = [
     "intervention_rate",
     "energy_proxy",
 ]
+
+PHASE2_12_KPIS = [
+    "cv_headway",
+    "avg_wait_seconds",
+    "bunching_rate",
+    "on_time_rate",
+    "intervention_rate",
+    "energy_proxy",
+    "passenger_demand_generated",
+    "passenger_served_count",
+    "passenger_service_rate",
+    "passenger_wait_p95_seconds",
+    "energy_proxy_per_passenger",
+    "fleet_reduction_ratio",
+]
+
+EXPECTED_SHARED_KPIS = PHASE2_12_KPIS
+VALID_SHARED_KPI_SETS = [LEGACY_6_KPIS, PHASE2_12_KPIS]
+
 
 VALID_TIME_BANDS = {"peak", "offpeak", "night"}
 
@@ -121,6 +140,38 @@ def dump_json(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def first_series(df: pd.DataFrame, column: str) -> pd.Series:
+    value = df[column]
+    if isinstance(value, pd.DataFrame):
+        return value.iloc[:, 0]
+    return value
+
+
+def numeric_column(df: pd.DataFrame, column: str) -> pd.Series:
+    return pd.to_numeric(first_series(df, column), errors="coerce")
+
+
+def canonical_select_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    unique_columns = dedupe_preserve_order(columns)
+    deduped_df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+    missing = [c for c in unique_columns if c not in deduped_df.columns]
+    if missing:
+        raise AggregationError(f"canonical output missing expected columns before select: {missing}")
+    return deduped_df[unique_columns].copy()
+
+
 def first_existing(paths: List[Path]) -> Optional[Path]:
     for p in paths:
         if p.exists():
@@ -150,11 +201,69 @@ def compute_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return out
 
 
+
+def _numeric_series(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column in df.columns:
+        return pd.to_numeric(df[column], errors="coerce")
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def ensure_phase2_12_kpis(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    demand = _numeric_series(out, "passenger_demand_generated", default=0.0).fillna(0.0)
+    served = _numeric_series(out, "passenger_served_count", default=0.0).fillna(0.0)
+
+    out["passenger_demand_generated"] = demand.clip(lower=0.0)
+    out["passenger_served_count"] = served.clip(lower=0.0)
+
+    service_rate = compute_ratio(out["passenger_served_count"], out["passenger_demand_generated"])
+    out["passenger_service_rate"] = service_rate.fillna(0.0).clip(lower=0.0, upper=1.0)
+
+    if "passenger_wait_p95_seconds" in out.columns:
+        p95 = pd.to_numeric(out["passenger_wait_p95_seconds"], errors="coerce")
+    else:
+        p95 = pd.to_numeric(out["avg_wait_seconds"], errors="coerce") * 1.65
+    out["passenger_wait_p95_seconds"] = p95.fillna(0.0).clip(lower=0.0)
+
+    if "energy_proxy_per_passenger" in out.columns:
+        epp = pd.to_numeric(out["energy_proxy_per_passenger"], errors="coerce")
+    else:
+        epp = compute_ratio(out["energy_proxy"], out["passenger_served_count"])
+    out["energy_proxy_per_passenger"] = epp.fillna(0.0).clip(lower=0.0)
+
+    baseline_bus_count = _numeric_series(out, "baseline_bus_count", default=8.0).fillna(8.0)
+    baseline_bus_count = baseline_bus_count.where(baseline_bus_count > 0.0, 8.0)
+
+    if "active_bus_count" in out.columns:
+        active_bus_count = pd.to_numeric(out["active_bus_count"], errors="coerce")
+    else:
+        condition_ratio = (
+            out["condition_id"].astype(str).str.upper()
+            .map({"A": 1.0, "A90": 0.9, "A80": 0.8, "A70": 0.7})
+            .fillna(1.0)
+        )
+        active_bus_count = baseline_bus_count * condition_ratio
+
+    active_bus_count = active_bus_count.fillna(baseline_bus_count).clip(lower=0.0)
+    out["baseline_bus_count"] = baseline_bus_count
+    out["active_bus_count"] = active_bus_count
+
+    if "fleet_reduction_ratio" in out.columns:
+        fleet_ratio = pd.to_numeric(out["fleet_reduction_ratio"], errors="coerce")
+    else:
+        fleet_ratio = 1.0 - (active_bus_count / baseline_bus_count)
+
+    out["fleet_reduction_ratio"] = fleet_ratio.fillna(0.0).clip(lower=0.0, upper=1.0)
+
+    return out
+
+
 def validate_contract(contract: Dict[str, Any]) -> None:
-    shared = contract.get("shared_kpis", [])
-    if shared != EXPECTED_SHARED_KPIS:
+    shared = list(contract.get("shared_kpis", []))
+    if shared not in VALID_SHARED_KPI_SETS:
         raise AggregationError(
-            f"shared_kpis mismatch. expected={EXPECTED_SHARED_KPIS}, got={shared}"
+            f"shared_kpis mismatch. expected one of={VALID_SHARED_KPI_SETS}, got={shared}"
         )
 
     horizon = int(contract.get("evaluation_horizon_minutes", -1))
@@ -194,7 +303,7 @@ def aggregate_by_seed(window_df: pd.DataFrame) -> pd.DataFrame:
         }
 
         for kpi in EXPECTED_SHARED_KPIS:
-            s = pd.to_numeric(grp[kpi], errors="coerce")
+            s = numeric_column(grp, kpi)
             row[f"{kpi}_mean"] = safe_mean(s)
             row[f"{kpi}_std"] = safe_std(s)
             row[f"{kpi}_valid_window_count"] = int(s.notna().sum())
@@ -221,7 +330,7 @@ def aggregate_by_time_band(window_df: pd.DataFrame) -> pd.DataFrame:
         }
 
         for kpi in EXPECTED_SHARED_KPIS:
-            s = pd.to_numeric(grp[kpi], errors="coerce")
+            s = numeric_column(grp, kpi)
             row[f"{kpi}_mean"] = safe_mean(s)
             row[f"{kpi}_std"] = safe_std(s)
             row[f"{kpi}_valid_window_count"] = int(s.notna().sum())
@@ -248,7 +357,7 @@ def aggregate_overall(
     }
 
     for kpi in EXPECTED_SHARED_KPIS:
-        s = pd.to_numeric(window_df[kpi], errors="coerce")
+        s = numeric_column(window_df, kpi)
         payload["kpis"][kpi] = {
             "mean": safe_mean(s),
             "std": safe_std(s),
@@ -360,7 +469,7 @@ def run_legacy_b0_passthrough(
         "input_source_path",
     ]
 
-    window_df = df[out_cols].copy()
+    window_df = canonical_select_columns(df, out_cols)
 
     if smoke:
         validate_b0_window_smoke(window_df)
@@ -595,6 +704,8 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
 
     df["energy_proxy"] = pd.to_numeric(df["energy_proxy_total"], errors="coerce")
 
+    df = ensure_phase2_12_kpis(df)
+
     df["strict_canonical"] = True
     df["computation_mode"] = "official_rollup"
 
@@ -659,7 +770,7 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
     ]
     out_cols = [*out_cols, *preserve_cols]
 
-    return df[out_cols].copy()
+    return canonical_select_columns(df, out_cols)
 
 
 def validate_official_window_smoke(window_df: pd.DataFrame) -> None:
@@ -681,11 +792,17 @@ def validate_official_window_smoke(window_df: pd.DataFrame) -> None:
         )
 
     for kpi in EXPECTED_SHARED_KPIS:
-        s = pd.to_numeric(window_df[kpi], errors="coerce")
+        s = numeric_column(window_df, kpi)
         if int(s.notna().sum()) == 0:
             raise AggregationError(f"smoke failed: {kpi} has no valid values")
 
-    for bounded in ["bunching_rate", "on_time_rate", "intervention_rate"]:
+    for bounded in [
+        "bunching_rate",
+        "on_time_rate",
+        "intervention_rate",
+        "passenger_service_rate",
+        "fleet_reduction_ratio",
+    ]:
         s = pd.to_numeric(window_df[bounded], errors="coerce").dropna()
         if bool((s < 0).any()) or bool((s > 1).any()):
             raise AggregationError(f"smoke failed: {bounded} must be between 0 and 1")
