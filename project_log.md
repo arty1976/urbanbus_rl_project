@@ -372,6 +372,140 @@ causal performance claim: NOT YET
 
 ---
 ## ?뱟 2026-04-27
+### Phase 2 12-KPI Schema Extension 諛?A-Family Inspector ??Step 83~84 ?꾨즺
+
+?ㅻ뒛 ?묒뾽?먯꽌??Phase 2 toy causal simulator??KPI 泥닿퀎瑜?湲곗〈 6醫?以묒떖?먯꽌 12醫?KPI schema濡??뺤옣?섍퀬, A/A90/A80/A70 議곌굔蹂?寃곌낵瑜??щ엺???댁꽍 媛?ν븳 ?쒖? JSON report濡??먭??????덈뒗 inspector瑜?異붽??덈떎.
+
+?대쾲 援ш컙? ?ъ쟾??toy causal simulator 湲곕컲 sanity validation ?④퀎?? ?곕씪??paper-level performance claim? ?섏? ?딅뒗?? ???④퀎???섎?????2-KPI causal evaluation wiring???뺤긽?곸쑝濡??앹꽦쨌吏묎퀎쨌寃?щ맂?ㅲ앸뒗 寃껋쓣 ?뺤씤??寃껋씠??
+
+#### 1. Step 83 ??Phase 2 12-KPI schema extension ?꾨즺
+
+- **?듭떖 紐⑹쟻**
+  - 湲곗〈 canonical shared KPI 6醫낆쓣 Phase 2 怨듭떇 12醫?KPI schema濡??뺤옣?쒕떎.
+  - legacy 6-KPI 寃쎈줈? Phase 2 12-KPI 寃쎈줈瑜?紐⑤몢 吏?먰븯?꾨줉 canonical KPI aggregator瑜?怨꾩빟 湲곕컲?쇰줈 ?뺣━?쒕떎.
+  - toy causal rollout?먯꽌 ?좉퇋 KPI 諛?fleet-ratio metadata媛 downstream canonical output源뚯? 蹂댁〈쨌怨꾩궛?섎룄濡??쒕떎.
+
+- **Phase 2 怨듭떇 12醫?KPI**
+  1. `cv_headway`
+  2. `avg_wait_seconds`
+  3. `bunching_rate`
+  4. `on_time_rate`
+  5. `intervention_rate`
+  6. `energy_proxy`
+  7. `passenger_demand_generated`
+  8. `passenger_served_count`
+  9. `passenger_service_rate`
+  10. `passenger_wait_p95_seconds`
+  11. `energy_proxy_per_passenger`
+  12. `fleet_reduction_ratio`
+
+- **異붽???蹂닿컯??怨꾩궛**
+  - `passenger_service_rate = passenger_served_count / max(passenger_demand_generated, 1)`
+  - `passenger_wait_p95_seconds`??toy causal simulator??deterministic wait proxy瑜?湲곕컲?쇰줈 怨꾩궛
+  - `energy_proxy_per_passenger = energy_proxy_total / max(passenger_served_count, 1)`
+  - `fleet_reduction_ratio = 1.0 - active_bus_count / max(baseline_bus_count, 1)`
+  - A-family toy setting?먯꽌 baseline bus count??8?濡??먭퀬, 議곌굔蹂?active bus ratio瑜?諛섏쁺
+    - `A`: 1.0
+    - `A90`: 0.9
+    - `A80`: 0.8
+    - `A70`: 0.7
+
+- **canonical KPI aggregator 蹂닿컯**
+  - `canonical_kpi_aggregator.py`媛 contract??`shared_kpis` 湲곗??쇰줈 6-KPI legacy? 12-KPI Phase 2瑜?紐⑤몢 泥섎━?섎룄濡??섏젙
+  - `official_rollup` output??`kpi_by_window.parquet`, `kpi_by_seed.parquet`, `kpi_by_time_band.parquet`, `kpi_overall.json`?먯꽌 12醫?KPI媛 紐⑤몢 寃利앸릺?꾨줉 蹂닿컯
+  - 以묐났 KPI column???앷린??寃쎌슦?먮룄 ?덉쟾?섍쾶 泥섎━?섎룄濡?duplicate-safe column selection??異붽?
+  - bounded KPI 寃利?踰붿쐞瑜??뺤옣
+    - `bunching_rate`
+    - `on_time_rate`
+    - `intervention_rate`
+    - `passenger_service_rate`
+    - `fleet_reduction_ratio`
+
+- **寃利?寃곌낵**
+  - Step 79 怨꾩뿴 canonical integration self-test PASS
+  - Step 81 A-family matrix self-test PASS
+  - 12醫?KPI validation PASS
+  - `causal_comparison_allowed = true` ?좎? ?뺤씤
+
+#### 2. Step 84 ??Toy causal A-family 12-KPI result inspector ?꾨즺
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/evaluation/inspect_toy_causal_a_family_kpis.py`
+  - `05_training/evaluation/test_inspect_toy_causal_a_family_kpis.py`
+  - `05_training/evaluation/toy_causal_a_family_kpi_inspection.md`
+
+- **??븷**
+  - Phase 2 toy causal A-family canonical output???щ엺???댁꽍 媛?ν븳 ?쒕줈 ?붿빟?쒕떎.
+  - `A` 議곌굔??baseline?쇰줈 ?먭퀬 `A90`, `A80`, `A70`??12-KPI 蹂?붾웾怨?蹂?붿쑉??怨꾩궛?쒕떎.
+  - 議곌굔蹂??붿빟, seed蹂??붿빟, time_band蹂??붿빟, A ?鍮?delta report瑜??앹꽦?쒕떎.
+
+- **?낅젰**
+  - `artifacts/phase2_toy_causal_a_family_matrix_selftest/canonical_eval/kpi_by_window.parquet`
+  - `artifacts/phase2_toy_causal_a_family_matrix_selftest/canonical_eval/kpi_by_seed.parquet`
+  - `artifacts/phase2_toy_causal_a_family_matrix_selftest/canonical_eval/kpi_by_time_band.parquet`
+  - `artifacts/phase2_toy_causal_a_family_matrix_selftest/canonical_eval/kpi_overall.json`
+
+- **?앹꽦 ?곗텧臾?*
+  - `condition_summary.csv`
+  - `condition_vs_A_delta.csv`
+  - `time_band_summary.csv`
+  - `seed_summary.csv`
+  - `inspection_report.json`
+
+- **寃利?寃곌낵**
+  - `A/A90/A80/A70 횞 seeds 1,2,3` ?꾩껜 matrix ?ъ깮??PASS
+  - `kpi_by_window` rows: 36
+  - `kpi_by_seed` rows: 12
+  - `kpi_by_time_band` rows: 36
+  - `condition_summary` rows: 4
+  - `condition_vs_A_delta` rows: 36
+  - 12醫?KPI 紐⑤몢 validated
+  - `causal_comparison_allowed = true` ?좎?
+  - `claim_boundary = toy_causal_sanity_only_not_paper_performance_claim` 紐낆떆
+
+#### 3. ?꾩옱 ?섎?? ?쒓퀎
+
+Step 83~84 ?꾨즺濡??꾨옒 寃쎈줈媛 ?ロ삍??
+
+```text
+Phase 2 toy causal dynamics
+-> 12-KPI window_rollup
+-> canonical_kpi_aggregator.py official_rollup
+-> 12-KPI kpi_by_window / kpi_by_seed / kpi_by_time_band / kpi_overall
+-> A-family condition summary / A ?鍮?delta / time-band summary
+```
+
+?ㅻ쭔 ??寃곌낵???꾩쭅 toy causal simulator 湲곕컲?대떎.
+
+?곕씪???ㅼ쓬 臾몄옣? ?꾩쭅 湲덉??쒕떎.
+
+```text
+A70???ㅼ젣 ?援?踰꾩뒪 ?댁쁺?먯꽌 ?깅뒫???곗닔?섎떎.
+A90/A80/A70???ㅼ젣 MAPPO ?뺤콉?쇰줈 寃利앸릱??
+?쇰Ц ?깅뒫?쒖뿉 諛붾줈 ?ｌ쓣 ???덈떎.
+```
+
+?꾩옱 ?덉슜?섎뒗 ?댁꽍? ?ㅼ쓬?대떎.
+
+```text
+Phase 2 toy causal simulator?먯꽌 12-KPI schema wiring???뺤긽 ?묐룞?쒕떎.
+A-family 議곌굔蹂?fleet ratio媛 canonical KPI? inspector源뚯? ?꾨떖?쒕떎.
+12-KPI 寃곌낵瑜?議곌굔蹂??쒓컙?蹂?seed蹂꾨줈 寃?ы븷 ???덈떎.
+```
+
+#### 4. ?ㅼ쓬 ?④퀎
+
+?ㅼ쓬 異붿쿇 ?④퀎??Step 86?대떎.
+
+- **Step 86 ??12-KPI 湲곕컲 MAPPO reward v1 ?곌껐**
+  - `mappo_reward_v1.py` ?먮뒗 湲곗〈 reward module??12醫?KPI瑜??낅젰?쇰줈 諛쏆븘 reward components瑜?怨꾩궛?섎룄濡??쒕떎.
+  - service quality瑜?1?쒖쐞, energy/fleet reduction??2?쒖쐞濡??먮뒗 reward contract瑜?怨좎젙?쒕떎.
+  - `passenger_service_rate`, `passenger_wait_p95_seconds`, `energy_proxy_per_passenger`, `fleet_reduction_ratio`媛 reward debug output??紐낆떆?섎룄濡??쒕떎.
+
+以묎컙??Step 85 ?꾩뿉??蹂寃쎈텇??commit/push?섍퀬, artifacts??而ㅻ컠?섏? ?딅뒗??
+
+---
+## ?뱟 2026-04-27
 ### Phase 2 Causal Simulator Adapter ?쒖옉 ??Step 77~79 ?꾨즺
 
 ?ㅻ뒛 ?묒뾽?먯꽌??Phase 1??historical replay ?쒓퀎瑜??섏뼱?? action??next state???ㅼ젣濡??곹뼢??二쇰뒗 理쒖냼 ?멸낵 ?쒕??덉씠??寃쎈줈瑜??댁뿀?? ?대쾲 援ш컙? ?쇰Ц ?깅뒫 二쇱옣???꾪븳 ?④퀎媛 ?꾨땲?? Phase 2 causal evaluation?쇰줈 吏꾩엯?섍린 ?꾪븳 adapter contract, toy dynamics, rollout writer, canonical KPI ?곌껐??寃利앺븯???④퀎??
