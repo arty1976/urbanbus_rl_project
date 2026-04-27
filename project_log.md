@@ -36,6 +36,343 @@ demand_intensity =
 |---
 
 ## 📅 2026-04-27
+### Step 51~52 A-family rollout policy integration plan 및 policy-source selectable rollout writer 구축
+
+오늘 작업에서는 Step 48~49에서 만든 MAPPO policy action source bridge와 policy metadata propagation 계약을 실제 A-family rollout writer에 연결하기 위한 통합 계획과 smoke writer를 구축했다.
+
+핵심 목표는 다음과 같다.
+
+- A/A90/A80/A70 조건에서 어떤 policy source mode를 허용할지 명확히 정의한다.
+- mock/stub action과 neural MAPPO action을 옵션으로 분리한다.
+- checkpoint가 없거나 validator를 통과하지 못하면 fallback 없이 STOP한다.
+- Qwen이 섞인 checkpoint가 A-family MAPPO 경로에 들어오지 못하게 한다.
+- rollout 산출물에 policy source metadata를 남긴다.
+- smoke 결과와 actual 성능 주장 가능 결과를 명확히 구분한다.
+
+#### 1. Step 51 — A-family rollout policy integration plan 생성
+
+생성 파일:
+
+- `05_training/policies/a_family_rollout_policy_integration_plan.md`
+- `05_training/policies/a_family_rollout_policy_integration.py`
+- `05_training/policies/test_a_family_rollout_policy_integration.py`
+
+Step 51에서는 실제 rollout writer를 수정하기 전에 A-family 조건의 policy source 선택 규칙을 먼저 계약으로 고정했다.
+
+A-family 조건:
+
+```text
+A
+A90
+A80
+A70
+```
+
+공통 규칙:
+
+```text
+qwen_train = false
+qwen_inference = false
+qwen_trigger_rate = 0.0
+```
+
+허용 policy source mode:
+
+```text
+mock_smoke
+mappo_smoke
+mappo_actual
+```
+
+각 mode의 의미:
+
+```text
+mock_smoke:
+- 개발용 mock action
+- checkpoint 불필요
+- allow_mock=true를 명시해야만 허용
+- policy_source = mock_policy
+- 성능 주장 불가
+
+mappo_smoke:
+- neural MAPPO action source 경로 검증용
+- checkpoint 필요
+- checkpoint_validation_mode = smoke
+- checkpoint_loaded = true 필요
+- checkpoint_validator_ran = true 필요
+- policy_source = mappo_policy
+- actual 성능 주장 불가
+
+mappo_actual:
+- H200 trained checkpoint 전용
+- checkpoint 필요
+- checkpoint_validation_mode = actual
+- trained_model = true 필요
+- performance_claim_allowed = true 필요
+- Qwen 비활성 필요
+- actual policy claim 가능 후보
+- causal claim은 causal simulator가 있을 때만 가능
+```
+
+Step 51에서 정한 source_mode 예:
+
+```text
+A + mock_smoke:
+noncausal_A_mock_policy_smoke_v1
+
+A + mappo_smoke:
+noncausal_A_mappo_policy_smoke_v1
+
+A + mappo_actual + noncausal simulator:
+noncausal_A_mappo_policy_actual_v1
+
+A + mappo_actual + causal simulator:
+causal_A_mappo_policy_v1
+```
+
+self-test에서 확인한 expected failure:
+
+```text
+B2는 A-family 조건이 아니므로 거부
+mappo_smoke인데 checkpoint 없음 → 거부
+mappo_actual인데 validation_mode=smoke → 거부
+mock_smoke인데 allow_mock=false → 거부
+qwen_train=true → 거부
+qwen_trigger_rate=0.5 → 거부
+```
+
+최종 결과:
+
+```text
+[OK] Step 51 A-family policy integration plan self-test PASS
+[DONE] Step 51 A-family rollout policy integration plan complete.
+```
+
+해석:
+
+Step 51은 A/A90/A80/A70 rollout writer가 mock, MAPPO smoke, MAPPO actual을 헷갈리지 않고 안전하게 선택하도록 만든 정책 통합 설계도다.
+
+#### 2. Step 52 — A-family policy-source selectable rollout smoke writer 생성
+
+생성 파일:
+
+- `05_training/run_a_family_policy_rollout_smoke.py`
+- `05_training/policies/test_a_family_policy_rollout_smoke.py`
+
+Step 52에서는 Step 51의 통합 계획을 실제 실행 가능한 smoke rollout writer로 구현했다.
+
+새 runner 옵션:
+
+```text
+--condition-id A|A90|A80|A70
+--policy-source-mode mock_smoke|mappo_smoke|mappo_actual
+--checkpoint-path <path>
+--checkpoint-validation-mode smoke|actual
+--allow-mock
+--seed <seed>
+--device cpu|cuda
+--output-root <path>
+--scenario-index <path>
+--scenario-row-index <index>
+```
+
+writer 실행 흐름:
+
+```text
+scenario window
+→ simulator.reset(seed, scenario_config)
+→ obs 생성
+→ policy_source_mode 확인
+→ mock action 또는 MAPPOPolicyActionSource 선택
+→ actions 생성
+→ simulator.step(actions)
+→ policy metadata 생성
+→ window_rollup.parquet 저장
+→ status/manifest/actions/policy_metadata 저장
+```
+
+생성 산출물:
+
+```text
+status.json
+run_manifest.json
+actions.json
+policy_metadata.json
+window_rollup.parquet
+```
+
+성공 케이스:
+
+```text
+A + mock_smoke + allow_mock
+→ PASS
+→ policy_source = mock_policy
+→ source_mode = noncausal_A_mock_policy_smoke_v1
+
+A + mappo_smoke + smoke checkpoint
+→ PASS
+→ policy_source = mappo_policy
+→ source_mode = noncausal_A_mappo_policy_smoke_v1
+
+A90 + mappo_smoke + smoke checkpoint
+→ PASS
+→ policy_source = mappo_policy
+→ source_mode = noncausal_A90_mappo_policy_smoke_v1
+```
+
+의도적 실패 케이스:
+
+```text
+mock_smoke인데 allow_mock 없음
+→ FAIL 정상
+→ 실수로 mock을 쓰는 것 방지
+
+mappo_smoke인데 checkpoint 없음
+→ FAIL 정상
+→ checkpoint 없는 placeholder fallback 방지
+
+mappo_actual인데 smoke checkpoint 사용
+→ FAIL 정상
+→ trained_model=true, performance_claim_allowed=true 필요
+
+qwen_train=True checkpoint 사용
+→ FAIL 정상
+→ A-family Qwen 비활성 조건 보호
+```
+
+최종 결과:
+
+```text
+[OK] Step 52 A-family policy rollout smoke self-test PASS
+[DONE] Step 52 A-family policy-source selectable rollout writer complete.
+```
+
+#### 3. Step 52의 중요한 의미
+
+Step 52는 A-family rollout writer를 실제 neural MAPPO action source와 연결하기 위한 첫 실행 가능한 다리다.
+
+이제 아래가 가능하다.
+
+```text
+mock smoke rollout 생성
+mappo smoke rollout 생성
+A/A90 조건별 source_mode 구분
+policy_metadata.json 저장
+window_rollup.parquet에 policy metadata 포함
+checkpoint 없는 mappo path 차단
+Qwen-invalid checkpoint 차단
+actual mode에서 smoke checkpoint 차단
+```
+
+단, 현재는 여전히 smoke 단계다.
+
+```text
+실제 H200 trained checkpoint 기반 성능 주장: 아직 아님
+causal performance comparison: 아직 아님
+```
+
+#### 4. 현재까지의 누적 구조
+
+```text
+Step 40:
+neural MAPPO inference adapter scaffold 생성
+
+Step 41:
+MAPPO checkpoint contract v1 및 validator 생성
+
+Step 42:
+neural inference runner 앞에 strict checkpoint validator 연결
+
+Step 43:
+Daegu energy proxy model v1 독립 모듈 생성
+
+Step 44:
+Step 41~43 project_log 기록
+
+Step 45:
+MAPPO checkpoint builder와 runner checkpoint contract preview 연결
+
+Step 46:
+actual checkpoint preflight script 생성
+
+Step 47:
+Step 45~46 project_log 기록
+
+Step 48:
+MAPPO policy action source bridge 생성
+
+Step 49:
+policy source metadata propagation 계약 생성
+
+Step 50:
+Step 48~49 project_log 기록
+
+Step 51:
+A-family rollout policy integration plan 생성
+
+Step 52:
+A-family policy-source selectable rollout smoke writer 생성
+```
+
+#### 5. 연구적으로 중요한 점
+
+Step 51~52는 실험 오염을 줄이는 provenance control layer를 실제 rollout smoke writer까지 끌어내린 단계다.
+
+방지하는 문제:
+
+```text
+mock action을 실제 MAPPO action으로 착각
+checkpoint 없는 placeholder fallback
+smoke checkpoint를 actual checkpoint로 사용
+Qwen 개입 checkpoint가 A-family MAPPO 경로에 섞임
+source_mode 누락
+policy metadata 누락
+noncausal replay 결과를 causal claim으로 오해
+```
+
+이제 rollout 산출물에는 다음 정보가 남는다.
+
+```text
+어떤 condition인가?
+어떤 policy_source_mode인가?
+policy_source가 mock인가 mappo인가?
+checkpoint를 로드했는가?
+validator를 실행했는가?
+mock_action_used인가?
+placeholder_fallback_used인가?
+Qwen trigger rate는 0인가?
+energy proxy model version은 무엇인가?
+actual_policy_claim_ready인가?
+causal_policy_claim_ready인가?
+```
+
+#### 6. 현재 판정
+
+```text
+Step 51: COMPLETED
+Step 52: COMPLETED
+A-family policy integration plan: READY
+A-family policy-source selectable rollout smoke writer: READY
+mappo_smoke rollout path: READY
+mappo_actual rollout path: 구조상 준비, 실제 H200 checkpoint 필요
+actual H200 trained checkpoint: NOT YET
+actual performance claim: NOT YET
+causal performance claim: NOT YET
+```
+
+#### 7. 다음 단계 후보
+
+다음 단계는 아래 순서가 적절하다.
+
+1. Step 53 기록 커밋 및 GitHub push
+2. Step 54 window_rollup policy metadata columns 검증기 생성
+3. Step 55 canonical KPI aggregator가 policy metadata/source_mode를 보존하는지 smoke 검증
+4. Step 56 A/A90/A80/A70 다조건 mappo_smoke rollout matrix 생성
+5. Step 57 H200 actual checkpoint 생성 전 최종 checklist 작성
+
+---
+
+## 📅 2026-04-27
 ### Step 48~49 MAPPO policy action source bridge 및 policy metadata propagation 계약 구축
 
 오늘 작업에서는 Step 46까지 구축한 checkpoint preflight pipeline 위에, 실제 rollout writer가 neural MAPPO action을 안전하게 받아올 수 있는 action source bridge와 policy metadata propagation 계약을 추가했다.
@@ -2507,6 +2844,7 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/README_mappo_neural_policy_adapter.md`
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
+
 
 
 
