@@ -1,0 +1,23 @@
+﻿model_version: daegu_energy_proxy_v1
+energy_proxy_unit: kwh_equivalent
+
+constants:
+  k_dist_kwh_per_m: 0.0012
+  k_acc_kwh_per_event: 0.1800
+  k_idle_kwh_per_sec: 0.0080
+
+formula:
+  energy_kwh_equiv: "0.0012 * distance_m + 0.1800 * acceleration_event_count + 0.0080 * hold_seconds"
+  energy_proxy_per_passenger: "energy_kwh_equiv / max(passenger_served_count, epsilon)"
+
+epsilon: 1.0e-9
+
+intended_use:
+  first_stage: "KPI-side diagnostic lens"
+  later_stage: "candidate reward-shaping term after validation"
+  not_for: "direct physics-grade fuel or battery certification"
+
+status:
+  phase: "Step 43"
+  reward_integration: "not_yet"
+  checkpoint_contract_pinned: true
