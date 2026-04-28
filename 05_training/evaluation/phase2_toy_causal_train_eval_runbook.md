@@ -1,4 +1,4 @@
-﻿# Phase 2 Toy Causal Train/Eval Runbook
+# Phase 2 Toy Causal Train/Eval Runbook
 
 ## Purpose
 
@@ -276,3 +276,113 @@ smoke_evaluation_only = true
 ```
 
 It can compare smoke outputs structurally, but it must not be interpreted as paper-level performance.
+
+## Step 93 ??Toy MAPPO Smoke Matrix Evaluation
+
+Files:
+
+```text
+05_training/evaluation/evaluate_toy_mappo_smoke_matrix.py
+05_training/evaluation/test_evaluate_toy_mappo_smoke_matrix.py
+05_training/evaluation/toy_mappo_smoke_matrix_evaluation.md
+```
+
+Command:
+
+```powershell
+python 05_training/evaluation/test_evaluate_toy_mappo_smoke_matrix.py
+```
+
+Expected outputs:
+
+```text
+artifacts/phase2_toy_mappo_smoke_matrix_eval_selftest/
+  matrix_evaluation_manifest.json
+  matrix_summary.csv
+  matrix_training/
+  conditions/
+    A/
+    A90/
+    A80/
+    A70/
+  matrix_canonical_eval/
+  matrix_inspection/
+```
+
+Expected flags:
+
+```text
+trained_model = false
+performance_claim_allowed = false
+smoke_evaluation_only = true
+matrix_smoke_evaluation_only = true
+```
+
+Expected matrix validation:
+
+```text
+conditions = A/A90/A80/A70
+kpi_by_window_rows = 12
+condition_summary rows = 4
+condition_vs_A_delta rows = 36
+12-KPI schema validated
+```
+
+Important implementation detail:
+
+```text
+Condition-level Step 91 evaluation uses --skip-inspector.
+The final matrix-level combined canonical output runs the A-family inspector.
+```
+
+This avoids trying to run A-family delta inspection on a single non-baseline condition such as A90.
+
+## Updated Full Local Smoke Validation Sequence
+
+Run from project root:
+
+```powershell
+if (Test-Path ".\05_training\.venv\Scripts\python.exe") {
+    $py = (Resolve-Path ".\05_training\.venv\Scripts\python.exe").Path
+} else {
+    $py = "python"
+}
+
+& $py .\05_training\rewards\test_mappo_reward_v1.py
+& $py .\05_training\adapters\test_causal_simulator_reward_v1_integration.py
+& $py .\05_training\adapters\test_toy_causal_mappo_training_smoke.py
+& $py .\05_training\policies\test_toy_mappo_smoke_checkpoint_validator.py
+& $py .\05_training\evaluation\test_evaluate_toy_mappo_smoke_checkpoint.py
+& $py .\05_training\evaluation\test_evaluate_toy_mappo_smoke_matrix.py
+```
+
+## Updated Current Gate Status
+
+The current Phase 2 toy causal smoke gate is passed when all of the following are true:
+
+```text
+reward_v1 self-test PASS
+adapter reward integration PASS
+toy MAPPO training smoke PASS
+checkpoint validator PASS
+single-condition smoke checkpoint evaluator PASS
+A-family smoke matrix evaluator PASS
+all artifacts keep non-claim flags
+```
+
+## Updated Recommended Next Step
+
+Step 95 should produce one of the following:
+
+```text
+Phase 2 toy causal smoke pipeline final status report
+```
+
+or
+
+```text
+Toy causal simulator realism gap analysis
+```
+
+The final status report is recommended first, because Steps 77 through 93 now form a complete structural smoke pipeline.
+

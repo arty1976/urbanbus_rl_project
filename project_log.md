@@ -372,6 +372,131 @@ causal performance claim: NOT YET
 
 ---
 ## ?뱟 2026-04-28
+### Phase 2 Toy MAPPO Smoke Matrix Evaluation ??Step 93 ?꾨즺
+
+?대쾲 ?묒뾽?먯꽌??Step 91???⑥씪 `A` condition smoke checkpoint evaluation??A-family matrix ?꾩껜濡??뺤옣?덈떎. 利?媛숈? Step 88 smoke checkpoint瑜?湲곗??쇰줈 `A`, `A90`, `A80`, `A70` 議곌굔?먯꽌 媛곴컖 toy causal evaluation rollout???섑뻾?섍퀬, 洹?寃곌낵瑜??섎굹??matrix-level canonical KPI 諛?inspector output?쇰줈 ?듯빀?덈떎.
+
+?대쾲 ?④퀎???ъ쟾??smoke evaluation?대떎. ?곕씪????寃곌낵???ㅼ젣 MAPPO ?깅뒫 鍮꾧탳???쇰Ц ?깅뒫?쒓? ?꾨땲?? 紐⑹쟻? ??議곌굔??紐⑤몢 媛숈? 12-KPI schema? 媛숈? non-claim boundary濡?evaluation pipeline???듦낵?섎뒗吏 ?뺤씤?섎뒗 寃껋씠??
+
+#### 1. Step 93 ??Toy MAPPO smoke matrix evaluator ?꾨즺
+
+- **?앹꽦/?섏젙 ?뚯씪**
+  - `05_training/evaluation/evaluate_toy_mappo_smoke_matrix.py`
+  - `05_training/evaluation/test_evaluate_toy_mappo_smoke_matrix.py`
+  - `05_training/evaluation/toy_mappo_smoke_matrix_evaluation.md`
+  - `05_training/evaluation/evaluate_toy_mappo_smoke_checkpoint.py`
+
+- **?듭떖 紐⑹쟻**
+  - Step 88 smoke checkpoint瑜???踰??앹꽦?섍굅???낅젰 checkpoint瑜??ъ슜?쒕떎.
+  - `A/A90/A80/A70` 議곌굔蹂꾨줈 Step 91 evaluator瑜??몄텧?쒕떎.
+  - 媛?議곌굔?먯꽌 `raw_events.parquet`, `window_rollup.parquet`, canonical KPI output???앹꽦?쒕떎.
+  - 議곌굔蹂?canonical output???⑹퀜 `matrix_canonical_eval`??留뚮뱺??
+  - ?듯빀??matrix canonical output?먯꽌 A-family inspector瑜??ㅽ뻾?쒕떎.
+  - 理쒖쥌 `matrix_evaluation_manifest.json`怨?`matrix_summary.csv`瑜??앹꽦?쒕떎.
+
+- **寃利앸맂 寃쎈줈**
+  ```text
+  Step 88 smoke checkpoint
+  -> A / A90 / A80 / A70 condition-level evaluation
+  -> condition-level raw_events / window_rollup
+  -> condition-level canonical KPI
+  -> matrix_canonical_eval
+  -> A-family 12-KPI inspector
+  -> matrix_evaluation_manifest.json
+  ```
+
+- **self-test 寃곌낵**
+  - `conditions = ['A', 'A90', 'A80', 'A70']`
+  - `kpi_by_window_rows = 12`
+  - `condition_summary = 4 rows`
+  - `condition_vs_A_delta = 36 rows`
+  - `12_kpis = validated`
+  - `causal_allowed = true`
+  - `performance_claim_allowed = false`
+  - `smoke_evaluation_only = true`
+  - `matrix_smoke_evaluation_only = true`
+
+#### 2. Step 93 以?諛쒓껄?섍퀬 ?닿껐??臾몄젣
+
+##### 2.1 condition-level inspector ?몄텧 ?꾩튂 臾몄젣
+
+珥덇린 Step 93 援ы쁽?먯꽌??媛?condition??Step 91 evaluator濡??몄텧???? `A90`, `A80`, `A70` ?⑤룆 canonical output????댁꽌??A-family inspector瑜??ㅽ뻾?섎젮怨??덈떎. 洹몃윭??A-family inspector??`A` baseline???꾩슂?섍린 ?뚮Ц??`A90` ?⑤룆 ?낅젰?먯꽌???ㅼ쓬 ?ㅻ쪟媛 諛쒖깮?덈떎.
+
+```text
+RuntimeError: condition_summary must include A baseline condition
+```
+
+?닿껐:
+- Step 91 evaluator??`--skip-inspector` ?듭뀡??異붽??덈떎.
+- Step 93 matrix evaluator??議곌굔蹂??⑤룆 evaluation ?④퀎?먯꽌??inspector瑜?嫄대꼫?대떎.
+- 留덉?留됱뿉 `A/A90/A80/A70`??紐⑤몢 ?⑹튇 `matrix_canonical_eval`?먯꽌留?inspector瑜??ㅽ뻾?쒕떎.
+
+??援ъ“媛 留욌뒗 ?댁쑀:
+```text
+議곌굔蹂?evaluation = rollout + canonical KPI源뚯?留??앹꽦
+matrix-level evaluation = A baseline???ы븿???듯빀 inspector ?ㅽ뻾
+```
+
+##### 2.2 `--skip-inspector` ?듭뀡 ?꾩튂 ?ㅻ쪟 ?섏젙
+
+以묎컙 ?⑥튂?먯꽌 `--skip-inspector`媛 ?섎せ?댁꽌 `train_toy_causal_mappo_smoke.py` ?몄텧遺??遺숈뿀?? ??training script???대떦 ?듭뀡???뚯? 紐삵븯誘濡??ㅼ쓬 ?ㅻ쪟媛 諛쒖깮?덈떎.
+
+```text
+train_toy_causal_mappo_smoke.py: error: unrecognized arguments: --skip-inspector
+```
+
+?닿껐:
+- training command?먯꽌??`--skip-inspector`瑜??쒓굅?덈떎.
+- condition-level Step 91 evaluator command?먮쭔 `--skip-inspector`瑜?遺숈씠?꾨줉 ?섏젙?덈떎.
+
+#### 3. ?꾩옱 ?섎?? ?쒓퀎
+
+Step 93 ?꾨즺濡??꾨옒 寃쎈줈媛 ?ロ삍??
+
+```text
+12-KPI reward_v1
+-> toy causal adapter reward
+-> toy MAPPO smoke training
+-> smoke checkpoint validation
+-> single-condition smoke checkpoint evaluation
+-> A-family smoke matrix evaluation
+-> matrix-level canonical KPI
+-> matrix-level inspector
+```
+
+?ㅻ쭔 ?꾩쭅 ?ㅼ쓬? ?섎??섏? ?딅뒗??
+
+```text
+A70???ㅼ젣濡?A蹂대떎 ?깅뒫??醫뗫떎.
+MAPPO policy媛 ?섎졃?덈떎.
+?援??꾩뿭 causal simulator?먯꽌 ?댁쁺 ?깅뒫??寃利앸릱??
+?쇰Ц ?깅뒫?쒖뿉 ?ｌ쓣 ???덈떎.
+```
+
+?꾩옱 ?덉슜?섎뒗 ?댁꽍? ?ㅼ쓬?대떎.
+
+```text
+Phase 2 toy causal train/eval smoke matrix pipeline??援ъ“?곸쑝濡??곌껐?섏뿀??
+A/A90/A80/A70 議곌굔???숈씪??12-KPI schema? non-claim boundary濡?evaluation pipeline???듦낵?쒕떎.
+matrix-level inspector媛 A baseline 湲곕컲 delta table???앹꽦?????덈떎.
+```
+
+#### 4. ?ㅼ쓬 ?④퀎
+
+異붿쿇 ?ㅼ쓬 ?④퀎??Step 95?대떎.
+
+- **Step 95 ??Phase 2 toy causal smoke pipeline final status report**
+  - Step 77~93 ?꾩껜瑜????μ쭨由?status report濡??뺣━?쒕떎.
+  - ?쒖셿猷뚮맂 gate?? ?쒖븘吏?湲덉??섎뒗 claim?? ?쒕떎??H200/causal simulator ?뺤옣 吏꾩엯 議곌굔?앹쓣 紐낆떆?쒕떎.
+  - ?댄썑遺?곕뒗 toy smoke媛 ?꾨땲???ㅼ젣 causal simulator ?뺤옣 ?먮뒗 H200 actual integration?쇰줈 ?섏뼱媛덉? 寃곗젙?쒕떎.
+
+???
+- **Step 95 ??Toy causal simulator realism gap analysis**
+  - ?꾩옱 toy dynamics媛 ?ㅼ젣 ?援?踰꾩뒪 ?댁쁺怨??ㅻⅨ ?먯쓣 紐⑸줉?뷀븳??
+  - ?ㅼ쓬 causal simulator v2?먯꽌 諛섎뱶??蹂닿컯??dynamics瑜??뺤쓽?쒕떎.
+
+---
+## ?뱟 2026-04-28
 ### Phase 2 Toy MAPPO Smoke Checkpoint Evaluation ??Step 91 ?꾨즺
 
 ?대쾲 ?묒뾽?먯꽌??Step 88?먯꽌 ?앹꽦??toy MAPPO smoke checkpoint瑜??ㅼ떆 遺덈윭? Phase 2 toy causal adapter?먯꽌 ?됯? rollout???섑뻾?섍퀬, 洹?寃곌낵瑜?canonical KPI aggregation 諛?12-KPI inspector源뚯? ?곌껐?덈떎.
