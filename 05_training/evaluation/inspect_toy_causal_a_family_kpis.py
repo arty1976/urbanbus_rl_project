@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -48,6 +48,19 @@ BOUNDED_0_1 = {
     "passenger_service_rate",
     "fleet_reduction_ratio",
 }
+
+DELTA_COLUMNS = [
+    "condition_id",
+    "baseline_condition_id",
+    "kpi",
+    "direction",
+    "condition_mean",
+    "baseline_mean",
+    "delta_abs",
+    "delta_pct_vs_A",
+    "improved_vs_A",
+    "claim_boundary",
+]
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -205,7 +218,9 @@ def build_condition_vs_a_delta(condition_summary: pd.DataFrame) -> pd.DataFrame:
                 "claim_boundary": "toy_causal_sanity_only_not_paper_performance_claim",
             })
 
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=DELTA_COLUMNS)
+    return pd.DataFrame(rows, columns=DELTA_COLUMNS)
 
 
 def build_time_band_summary(window_df: pd.DataFrame) -> pd.DataFrame:
@@ -288,15 +303,18 @@ def build_report(
         "energy_proxy_per_passenger_mean",
     ]].to_dict("records")
 
-    interesting_delta = delta_df[
-        delta_df["kpi"].isin([
-            "passenger_service_rate",
-            "passenger_wait_p95_seconds",
-            "energy_proxy_per_passenger",
-            "fleet_reduction_ratio",
-            "avg_wait_seconds",
-        ])
-    ].to_dict("records")
+    if len(delta_df) == 0 or "kpi" not in delta_df.columns:
+        interesting_delta = []
+    else:
+        interesting_delta = delta_df[
+            delta_df["kpi"].isin([
+                "passenger_service_rate",
+                "passenger_wait_p95_seconds",
+                "energy_proxy_per_passenger",
+                "fleet_reduction_ratio",
+                "avg_wait_seconds",
+            ])
+        ].to_dict("records")
 
     return {
         "artifact_version": "toy_causal_a_family_kpi_inspector_v1_step84",
