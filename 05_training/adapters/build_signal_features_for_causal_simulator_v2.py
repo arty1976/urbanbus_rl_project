@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -19,13 +19,20 @@ LAT_CANDIDATES = ["lat", "latitude", "위도", "y_wgs84", "wgs84_y", "위도값"
 LON_CANDIDATES = ["lon", "lng", "longitude", "경도", "x_wgs84", "wgs84_x", "경도값"]
 X_CANDIDATES = ["x", "x_coord", "coord_x", "좌표x", "x좌표", "tm_x", "epsg5187_x", "x_5187"]
 Y_CANDIDATES = ["y", "y_coord", "coord_y", "좌표y", "y좌표", "tm_y", "epsg5187_y", "y_5187"]
-ID_CANDIDATES = ["signal_id", "id", "신호등id", "신호등_id", "시설물관리번호", "관리번호"]
-TYPE_CANDIDATES = ["signal_type", "type", "신호등종류", "종류", "시설구분", "신호기종류"]
-NAME_CANDIDATES = ["signal_name", "name", "신호등명", "시설명", "교차로명", "설치위치"]
+ID_CANDIDATES = [
+    "signal_id", "id", "신호등id", "신호등_id", "신호등관리번호", "시설물관리번호", "관리번호"
+]
+TYPE_CANDIDATES = [
+    "signal_type", "type", "신호등종류", "신호등구분", "종류", "시설구분", "신호기종류", "신호제어방식"
+]
+NAME_CANDIDATES = [
+    "signal_name", "name", "신호등명", "시설명", "교차로명", "설치위치", "소재지도로명주소", "소재지지번주소", "도로노선명"
+]
 
 NODE_X_CANDIDATES = ["x", "x_coord", "coord_x", "node_x", "x_5187", "epsg5187_x", "lon", "lng", "longitude", "경도"]
 NODE_Y_CANDIDATES = ["y", "y_coord", "coord_y", "node_y", "y_5187", "epsg5187_y", "lat", "latitude", "위도"]
 
+# daegu_csv_step99_patch_v2: Korean Daegu traffic signal CSV columns supported.
 FORBIDDEN_DYNAMIC_SIGNAL_FIELDS = [
     "red_light_delay_seconds",
     "green_time_seconds",
@@ -106,6 +113,62 @@ def infer_signal_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     }
 
 
+def _yes_no_flag_from_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip().str.upper()
+    return s.isin(["Y", "YES", "TRUE", "1", "O", "○", "있음", "유", "운영", "작동"])
+
+
+def _nonempty_metadata_flag(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip()
+    return s.notna() & (s != "") & (s.str.lower() != "nan")
+
+
+def _yes_no_flag_from_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip().str.upper()
+    return s.isin(["Y", "YES", "TRUE", "1", "O", "○", "있음", "유", "운영", "작동"])
+
+
+def _nonempty_metadata_flag(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip()
+    return s.notna() & (s != "") & (s.str.lower() != "nan")
+
+
+def _yes_no_flag_from_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip().str.upper()
+    return s.isin(["Y", "YES", "TRUE", "1", "O", "○", "있음", "유", "운영", "작동"])
+
+
+def _nonempty_metadata_flag(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip()
+    return s.notna() & (s != "") & (s.str.lower() != "nan")
+
+
+def _yes_no_flag_from_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip().str.upper()
+    return s.isin(["Y", "YES", "TRUE", "1", "O", "○", "있음", "유", "운영", "작동"])
+
+
+def _nonempty_metadata_flag(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col].astype(str).str.strip()
+    return s.notna() & (s != "") & (s.str.lower() != "nan")
+
+
 def add_signal_flags(df: pd.DataFrame, inferred: Dict[str, Optional[str]]) -> pd.DataFrame:
     out = df.copy()
     type_col = inferred.get("type_col")
@@ -117,28 +180,54 @@ def add_signal_flags(df: pd.DataFrame, inferred: Dict[str, Optional[str]]) -> pd
     if name_col and name_col in out.columns:
         text = text + " " + out[name_col].astype(str)
 
+    for extra_col in [
+        "신호등구분",
+        "신호등색종류",
+        "신호등화방식",
+        "신호제어방식",
+        "신호시간결정방식",
+        "소재지도로명주소",
+        "소재지지번주소",
+    ]:
+        if extra_col in out.columns:
+            text = text + " " + out[extra_col].astype(str)
+
     lowered = text.str.lower()
 
-    out["_pedestrian_signal_flag"] = (
+    pedestrian_from_text = (
         lowered.str.contains("보행", regex=False)
         | lowered.str.contains("pedestrian", regex=False)
         | lowered.str.contains("횡단", regex=False)
-    ).astype(int)
+    )
+    pedestrian_from_cols = (
+        _yes_no_flag_from_col(out, "보행자작동신호기유무")
+        | _yes_no_flag_from_col(out, "시각장애인용음향신호기유무")
+    )
 
-    out["_blink_signal_flag"] = (
+    blink_from_text = (
         lowered.str.contains("점멸", regex=False)
         | lowered.str.contains("blink", regex=False)
         | lowered.str.contains("flashing", regex=False)
-    ).astype(int)
+    )
+    blink_from_cols = _yes_no_flag_from_col(out, "점멸등운영여부")
 
-    out["_controlled_signal_flag"] = (
+    controlled_from_text = (
         lowered.str.contains("제어", regex=False)
         | lowered.str.contains("control", regex=False)
         | lowered.str.contains("controlled", regex=False)
         | lowered.str.contains("신호", regex=False)
-    ).astype(int)
+    )
+    controlled_from_cols = (
+        _nonempty_metadata_flag(out, "신호제어방식")
+        | _nonempty_metadata_flag(out, "신호시간결정방식")
+    )
+
+    out["_pedestrian_signal_flag"] = (pedestrian_from_text | pedestrian_from_cols).astype(int)
+    out["_blink_signal_flag"] = (blink_from_text | blink_from_cols).astype(int)
+    out["_controlled_signal_flag"] = (controlled_from_text | controlled_from_cols).astype(int)
 
     return out
+
 
 
 def prepare_signal_xy(signal_csv: Path) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -197,14 +286,14 @@ def load_nodes_from_db(db_url: str, node_source_db: str) -> pd.DataFrame:
     sql = f"""
     SELECT
         n.node_uid,
-        n.node_index,
+        n.node_idx AS node_index,
         ST_X(d.geom_5187)::double precision AS x_5187,
         ST_Y(d.geom_5187)::double precision AS y_5187
     FROM {node_source_db} n
     JOIN public.dim_stop d
       ON n.node_uid = 'STOP:' || d.stop_id::text
     WHERE d.geom_5187 IS NOT NULL
-    ORDER BY n.node_index
+    ORDER BY n.node_idx
     """
 
     conn = psycopg2.connect(db_url)
@@ -567,3 +656,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
