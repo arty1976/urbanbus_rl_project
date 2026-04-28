@@ -372,6 +372,75 @@ causal performance claim: NOT YET
 
 ---
 ## ?뱟 2026-04-28
+### Phase 2 Smoke Pipeline Status 諛?Realism Gap ??Step 95~96 ?꾨즺
+
+?대쾲 ?묒뾽?먯꽌??Step 77~94源뚯? 援ъ텞??Phase 2 toy causal smoke pipeline???꾩옱 ?곹깭瑜??뺣━?섍퀬, ?ㅼ쓬 ?④퀎?먯꽌 諛섎뱶??蹂닿컯?댁빞 ??realism gap??臾몄꽌?뷀뻽??
+
+#### 1. Step 95 ??Phase 2 toy causal smoke pipeline status report ?꾨즺
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/evaluation/phase2_toy_causal_smoke_pipeline_status.md`
+  - `05_training/evaluation/test_phase2_toy_causal_smoke_pipeline_status.py`
+
+- **?듭떖 紐⑹쟻**
+  - Step 77~94源뚯? ?꾨즺??gate瑜???臾몄꽌濡??뺣━?덈떎.
+  - 援ъ“?곸쑝濡?寃利앸맂 寃껉낵 ?꾩쭅 寃利앸릺吏 ?딆? 寃껋쓣 遺꾨━?덈떎.
+  - `performance_claim_allowed=false` 寃쎄퀎瑜??ㅼ떆 紐낆떆?덈떎.
+  - ?ㅼ쓬 ?④퀎濡?realism gap analysis瑜?沅뚯옣?덈떎.
+
+- **?꾩옱 ?덉슜?섎뒗 claim**
+  ```text
+  Phase 2 toy causal smoke pipeline? 援ъ“?곸쑝濡??곌껐?섏뼱 ?덇퀬 ?ы쁽 媛?ν븯??
+  ```
+
+- **?꾩옱 湲덉??섎뒗 claim**
+  ```text
+  ?ㅼ젣 MAPPO ?뺤콉???섎졃?덈떎.
+  ?援??꾩뿭 ?댁쁺 ?깅뒫??媛쒖꽑?먮떎.
+  A70???ㅼ젣 ?댁쁺?먯꽌 A蹂대떎 醫뗫떎.
+  ?쇰Ц ?깅뒫?쒖뿉 ?ｌ쓣 ???덈떎.
+  ```
+
+#### 2. Step 96 ??Toy causal simulator realism gap analysis ?꾨즺
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/adapters/toy_causal_simulator_realism_gap_analysis.md`
+  - `05_training/adapters/test_toy_causal_simulator_realism_gap_analysis.py`
+
+- **?듭떖 紐⑹쟻**
+  - ?꾩옱 toy simulator媛 ?ㅼ젣 ?援?踰꾩뒪 ?댁쁺怨??ㅻⅨ 吏?먯쓣 泥닿퀎?곸쑝濡??뺣━?덈떎.
+  - causal simulator v2濡??섏뼱媛湲??꾩뿉 諛섎뱶??蹂닿컯?댁빞 ??dynamics瑜??뺤쓽?덈떎.
+  - toy smoke validation怨?real causal performance validation ?ъ씠??媛꾧레??紐낇솗???덈떎.
+
+- **二쇱슂 realism gap**
+  - network scale and topology
+  - demand generation
+  - passenger queue and service process
+  - bus movement dynamics
+  - action feasibility
+  - capacity and crowding
+  - timetable and dispatch schedule
+  - traffic and signal delay
+  - calibration and validation
+  - reward-hacking risk
+
+#### 3. ?ㅼ쓬 ?④퀎
+
+異붿쿇 ?ㅼ쓬 ?④퀎??Step 97?대떎.
+
+- **Step 97 ??Causal simulator v2 contract**
+  - state schema
+  - action schema
+  - transition dynamics
+  - raw event schema
+  - window_rollup schema
+  - calibration diagnostics
+  - validation gates
+
+Step 97遺?곕뒗 toy smoke wiring???섏뼱?? ?ㅼ젣 ?援?踰꾩뒪 ?댁쁺????媛源뚯슫 causal simulator ?ㅺ퀎濡??섏뼱媛꾨떎.
+
+---
+## ?뱟 2026-04-28
 ### Phase 2 Toy MAPPO Smoke Matrix Evaluation ??Step 93 ?꾨즺
 
 ?대쾲 ?묒뾽?먯꽌??Step 91???⑥씪 `A` condition smoke checkpoint evaluation??A-family matrix ?꾩껜濡??뺤옣?덈떎. 利?媛숈? Step 88 smoke checkpoint瑜?湲곗??쇰줈 `A`, `A90`, `A80`, `A70` 議곌굔?먯꽌 媛곴컖 toy causal evaluation rollout???섑뻾?섍퀬, 洹?寃곌낵瑜??섎굹??matrix-level canonical KPI 諛?inspector output?쇰줈 ?듯빀?덈떎.
