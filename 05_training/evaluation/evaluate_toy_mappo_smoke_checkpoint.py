@@ -399,19 +399,35 @@ def rollout_checkpoint(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
     inspection_root = output_root / "inspection"
-    run_cmd(
-        [
-            sys.executable,
-            str(TRAINING_DIR / "evaluation" / "inspect_toy_causal_a_family_kpis.py"),
-            "--canonical-root",
-            str(canonical_root),
-            "--output-root",
-            str(inspection_root),
-            "--conditions",
-            condition_id,
-        ],
-        cwd=TRAINING_DIR.parent,
-    )
+    inspection_ran = False
+    if args.skip_inspector:
+        inspection_root.mkdir(parents=True, exist_ok=True)
+        dump_json(
+            inspection_root / "inspection_skipped.json",
+            {
+                "artifact_version": "toy_mappo_smoke_checkpoint_inspection_skipped_v1_step93",
+                "condition_id": condition_id,
+                "reason": "single non-baseline condition evaluation inside Step 93 matrix; combined matrix inspector runs later",
+                "performance_claim_allowed": False,
+                "smoke_evaluation_only": True,
+                "created_at_utc": utc_now(),
+            },
+        )
+    else:
+        run_cmd(
+            [
+                sys.executable,
+                str(TRAINING_DIR / "evaluation" / "inspect_toy_causal_a_family_kpis.py"),
+                "--canonical-root",
+                str(canonical_root),
+                "--output-root",
+                str(inspection_root),
+                "--conditions",
+                condition_id,
+            ],
+            cwd=TRAINING_DIR.parent,
+        )
+        inspection_ran = True
 
     evaluation_manifest_path = output_root / "evaluation_manifest.json"
     reward_values = [float(r["reward_total"]) for r in reward_trace_rows]
@@ -422,6 +438,7 @@ def rollout_checkpoint(args: argparse.Namespace) -> Dict[str, Any]:
         "rollouts_root": str(rollouts_root),
         "canonical_root": str(canonical_root),
         "inspection_root": str(inspection_root),
+        "inspection_ran": bool(inspection_ran),
         "scenario_index": str(scenario_index_path),
         "condition_id": condition_id,
         "seed": int(args.seed),
@@ -484,6 +501,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-mode", default="argmax", choices=["argmax", "sample"])
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--skip-inspector", action="store_true")
     return parser.parse_args()
 
 
