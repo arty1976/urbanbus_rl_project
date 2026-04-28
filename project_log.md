@@ -1,4 +1,4 @@
-## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+﻿## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
 
 ### 1. Phase 2 causal simulator 구조 확장
 Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
@@ -4188,9 +4188,114 @@ Step 40부터는 새창에서 시작한다.
   - `05_training/policies/test_mappo_neural_policy_adapter_v1.py`
 - conservative mock action을 바로 제거하지 않고, 별도 adapter에서 실제 H200 checkpoint loader를 받을 준비를 한다.
 
+<!-- STEP_104_CAUSAL_SIMULATOR_V2_STATIC_SIGNAL_LOG_START -->
 
+## Step 97~103 — Static Signal-aware Causal Simulator v2 Smoke Pipeline
 
+### Summary
 
+Step 97~103 completed the first end-to-end smoke pipeline that connects Daegu static traffic signal infrastructure data to the causal simulator v2 scaffold and canonical KPI aggregation path.
 
+This is not a performance result.  
+This is a pipeline validation result.
 
+### Completed steps
+
+`	ext
+Step 97:
+Tensor DB + signal CSV data availability audit
+
+Step 98:
+Signal feature builder for causal simulator v2
+
+Step 99:
+Actual Daegu signal CSV + tensor DB signal feature generation
+
+Step 100:
+Causal simulator v2 input contract integration
+
+Step 101:
+CausalSimulatorAdapter v2 scaffold
+
+Step 102:
+CausalSimulatorAdapter v2 rollout writer smoke
+
+Step 103:
+Causal simulator v2 rollout to canonical KPI aggregator smoke
+`
+
+### Key artifacts
+
+`	ext
+artifacts/signal_features_v2/node_signal_features.parquet
+artifacts/signal_features_v2/edge_signal_features.parquet
+artifacts/causal_simulator_v2_contract/causal_simulator_v2_input_contract.json
+artifacts/causal_simulator_v2_adapter_smoke/status.json
+artifacts/causal_simulator_v2_rollout_smoke/rollout_manifest.json
+artifacts/causal_simulator_v2_rollout_smoke/C2_STATIC_SIGNAL/rollouts/seed_101/raw_events.parquet
+artifacts/causal_simulator_v2_rollout_smoke/C2_STATIC_SIGNAL/rollouts/seed_101/window_rollup.parquet
+artifacts/causal_simulator_v2_canonical_kpi_smoke/canonical_eval/kpi_by_window.parquet
+artifacts/causal_simulator_v2_canonical_kpi_smoke/canonical_eval/kpi_by_seed.parquet
+artifacts/causal_simulator_v2_canonical_kpi_smoke/canonical_eval/kpi_overall.json
+`
+
+### Confirmed graph scale
+
+`	ext
+node_rows = 4116
+edge_rows = 5484
+`
+
+### What was achieved
+
+`	ext
+Daegu signal CSV
+→ static node/edge signal feature generation
+→ causal simulator v2 input contract
+→ CausalSimulatorAdapter v2 reset/step smoke
+→ raw_events.parquet and window_rollup.parquet
+→ canonical_kpi_aggregator.py smoke
+→ kpi_by_window/kpi_by_seed/kpi_overall generation
+`
+
+### Guardrails
+
+The following claims remain disallowed:
+
+`	ext
+trained_model = false
+performance_claim_allowed = false
+causal_performance_claim_allowed = false
+dynamic_signal_phase_claim_allowed = false
+red_light_delay_claim_allowed = false
+green_time_claim_allowed = false
+cycle_length_claim_allowed = false
+daegu_citywide_performance_claim_allowed = false
+fleet_reduction_claim_allowed = false
+`
+
+### Interpretation
+
+Allowed interpretation:
+
+`	ext
+The static signal infrastructure-aware causal simulator v2 smoke pipeline is connected.
+`
+
+Disallowed interpretation:
+
+`	ext
+The model has demonstrated real-world Daegu bus performance improvement.
+The simulator reflects real red-light delay, green time, cycle length, or signal phase.
+Fleet reduction effectiveness has been proven.
+`
+
+### Next step
+
+`	ext
+Step 105:
+Causal v2 canonical KPI smoke inspector
+`
+
+<!-- STEP_104_CAUSAL_SIMULATOR_V2_STATIC_SIGNAL_LOG_END -->
 
