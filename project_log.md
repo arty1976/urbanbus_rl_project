@@ -371,6 +371,169 @@ causal performance claim: NOT YET
 5. Step 61 causal simulator adapter 준비 전, noncausal/smoke claim guard 재점검
 
 ---
+## ?뱟 2026-04-28
+### Phase 2 12-KPI Reward 諛?Toy MAPPO Smoke Scaffold ??Step 86~89 ?꾨즺
+
+?ㅻ뒛 ?묒뾽?먯꽌??Phase 2 toy causal simulator媛 ?⑥닚 dynamics 寃利앹쓣 ?섏뼱, 12-KPI 湲곕컲 reward contract? 理쒖냼 MAPPO smoke training 寃쎈줈源뚯? ?곌껐?섎뒗吏瑜?寃利앺뻽?? ?대쾲 援ш컙? ?ㅼ젣 ?쇰Ц ?깅뒫 二쇱옣?대굹 H200 蹂명븰?듭씠 ?꾨땲?? causal toy simulator ?꾩뿉??reward wiring, training smoke, checkpoint contract媛 ?덉쟾?섍쾶 ?묐룞?섎뒗吏瑜??뺤씤?섎뒗 ?④퀎??
+
+#### 1. Step 86 ??12-KPI 湲곕컲 MAPPO reward v1 contract ?꾨즺
+
+- **?앹꽦/?섏젙 ?뚯씪**
+  - `05_training/rewards/__init__.py`
+  - `05_training/rewards/mappo_reward_v1.py`
+  - `05_training/rewards/reward_config_v1.yaml`
+  - `05_training/rewards/README_reward_contract.md`
+  - `05_training/rewards/test_mappo_reward_v1.py`
+
+- **?듭떖 紐⑹쟻**
+  - Phase 2 怨듭떇 12醫?KPI瑜??낅젰?쇰줈 諛쏅뒗 MAPPO reward contract瑜?怨좎젙?덈떎.
+  - reward???쒕퉬???덉쭏??1?쒖쐞, ?먮꼫吏 ?⑥쑉怨?fleet reduction??2?쒖쐞濡??먮룄濡??ㅺ퀎?덈떎.
+  - `fleet_reduction_ratio`??蹂대꼫???깃꺽?대ŉ, `passenger_service_rate`媛 臾대꼫吏硫?fleet bonus媛 臾댄슚?붾릺?꾨줉 ?덈떎.
+  - `energy_proxy` ?⑤룆???꾨땲??`energy_proxy_per_passenger`瑜?以묒떖?쇰줈 ?먮꼫吏 ?⑥쑉???됯??섎룄濡??덈떎.
+  - `passenger_wait_p95_seconds`???됯퇏 ?湲곗떆媛꾨낫??媛뺥븯寃?踰뚯젏?뷀뻽??
+
+- **?듭떖 諛섑솚 援ъ“**
+  - `reward_total`
+  - `reward_components`
+  - `reward_debug`
+  - `reward_version = mappo_reward_v1`
+  - `reward_claim_boundary = toy_causal_training_reward_contract_not_paper_performance_claim`
+
+- **寃利?寃곌낵**
+  - `python -m py_compile` ?듦낵
+  - `test_mappo_reward_v1.py` self-test ?듦낵
+  - low service rate, high p95 wait, energy efficiency, fleet bonus secondary constraint, missing KPI, NaN/inf 諛⑹뼱 寃利??꾨즺
+
+#### 2. Step 87 ??CausalSimulatorAdapter.step() reward_v1 ?곌껐 ?꾨즺
+
+- **?앹꽦/?섏젙 ?뚯씪**
+  - `05_training/adapters/causal_simulator_adapter.py`
+  - `05_training/adapters/test_causal_simulator_reward_v1_integration.py`
+  - `05_training/adapters/test_causal_simulator_adapter_contract.py`
+  - `05_training/adapters/causal_simulator_adapter_contract.md`
+
+- **?듭떖 紐⑹쟻**
+  - `CausalSimulatorAdapter.step()`媛 12-KPI reward metrics瑜?援ъ꽦?섍퀬, `mappo_reward_v1.compute_total_reward()`瑜??몄텧?섎룄濡??곌껐?덈떎.
+  - 怨꾩궛??`reward_total`? 紐⑤뱺 agent?먭쾶 媛숈? team-level scalar reward濡?broadcast?쒕떎.
+  - `StepResult.info`?먮뒗 reward debugging怨?claim boundary ?뺣낫媛 ?ㅼ뼱媛꾨떎.
+
+- **StepResult.info reward fields**
+  - `reward_version`
+  - `reward_claim_boundary`
+  - `reward_total`
+  - `reward_components`
+  - `reward_debug`
+  - `reward_metrics`
+
+- **寃利?寃곌낵**
+  - reward info contract ?듦낵
+  - 紐⑤뱺 agent reward媛 `reward_total`怨?媛숈?吏 寃利??듦낵
+  - 媛숈? seed + 媛숈? action sequence??deterministic reward 寃利??듦낵
+  - all-hold action pattern??dispatch-dominant pattern蹂대떎 ??? reward瑜?諛쏅뒗吏 寃利??듦낵
+  - `causal_comparison_allowed = true`???좎??섎릺, reward claim boundary??paper-level performance claim???꾨떂??紐낆떆
+
+#### 3. Step 88 ??Toy causal MAPPO training smoke scaffold ?꾨즺
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/train_toy_causal_mappo_smoke.py`
+  - `05_training/adapters/test_toy_causal_mappo_training_smoke.py`
+  - `05_training/adapters/toy_causal_mappo_training_smoke.md`
+
+- **?듭떖 紐⑹쟻**
+  - ?ㅼ젣 full MAPPO training???꾨땲?? 理쒖냼 training smoke 寃쎈줈瑜?寃利앺뻽??
+  - actor/critic tiny torch model???ъ슜??rollout, reward collection, policy/value loss 怨꾩궛, optimizer step, checkpoint ??κ퉴吏 ?섑뻾?덈떎.
+  - ??checkpoint???숈뒿 ?꾨즺 紐⑤뜽???꾨땲??smoke artifact??
+
+- **寃利앸맂 寃쎈줈**
+  ```text
+  CausalSimulatorAdapter
+  -> toy MAPPO actor/critic
+  -> 12-KPI reward_v1 team reward
+  -> rollout trace
+  -> tiny policy/value update
+  -> smoke checkpoint ???  -> training_manifest.json 湲곕줉
+  -> deterministic reward sequence 寃利?  ```
+
+- **?앹꽦 ?곗텧臾?*
+  - `training_manifest.json`
+  - `training_trace.csv`
+  - `checkpoints/toy_mappo_smoke_checkpoint.pt`
+
+- **寃利?寃곌낵**
+  - `total_transitions = 32`
+  - `reward_version = mappo_reward_v1`
+  - `trained_model = false`
+  - `performance_claim_allowed = false`
+  - `smoke_training_only = true`
+  - deterministic reward sequence 寃利??듦낵
+
+#### 4. Step 89 ??Toy MAPPO smoke checkpoint contract validator ?꾨즺
+
+- **?앹꽦 ?뚯씪**
+  - `05_training/policies/validate_toy_mappo_smoke_checkpoint.py`
+  - `05_training/policies/test_toy_mappo_smoke_checkpoint_validator.py`
+  - `05_training/policies/toy_mappo_smoke_checkpoint_contract.md`
+
+- **?듭떖 紐⑹쟻**
+  - Step 88?먯꽌 ?앹꽦??checkpoint媛 ?쒗븰???꾨즺 紐⑤뜽?앹씠 ?꾨땲???쐓moke checkpoint?앸씪??怨꾩빟??吏?ㅻ뒗吏 ?낅┰ 寃利앺븳??
+  - `training_manifest.json`, `training_trace.csv`, `toy_mappo_smoke_checkpoint.pt` ?ъ씠???꾩닔 metadata ?쇨??깆쓣 寃利앺븳??
+  - 議곗옉??manifest?먯꽌 `performance_claim_allowed=true`媛 ?ㅼ뼱?ㅻ㈃ validator媛 ?뺥솗??嫄곕??섎뒗吏 negative test???섑뻾?덈떎.
+
+- **寃利앸맂 ?듭떖 怨꾩빟**
+  - `trained_model = false`
+  - `performance_claim_allowed = false`
+  - `smoke_training_only = true`
+  - `causal_comparison_allowed = true`
+  - `reward_version = mappo_reward_v1`
+  - `reward_claim_boundary = toy_causal_training_reward_contract_not_paper_performance_claim`
+  - 12-KPI `reward_metric_keys` 議댁옱
+  - loss/reward/trace finite 寃利?
+#### 5. ?꾩옱 ?섎?? ?쒓퀎
+
+Step 86~89 ?꾨즺濡??꾨옒 寃쎈줈媛 ?ロ삍??
+
+```text
+12-KPI canonical metrics
+-> mappo_reward_v1 reward contract
+-> CausalSimulatorAdapter.step() team reward
+-> toy MAPPO smoke rollout/update
+-> smoke checkpoint
+-> checkpoint contract validator
+```
+
+?ㅻ쭔 ??寃곌낵???꾩쭅 ?ㅼ쓬???섎??섏? ?딅뒗??
+
+```text
+?ㅼ젣 MAPPO policy媛 ?섎졃?덈떎.
+?援??꾩뿭 causal simulator?먯꽌 ?깅뒫??寃利앸릱??
+?쇰Ц ?깅뒫?쒖뿉 ?ｌ쓣 ???덈뒗 寃곌낵媛 ?섏솕??
+H200 蹂명븰??checkpoint? ?숇벑?섎떎.
+```
+
+?꾩옱 ?덉슜?섎뒗 ?댁꽍? ?ㅼ쓬?대떎.
+
+```text
+Phase 2 toy causal environment?먯꽌 reward_v1怨?MAPPO smoke training path媛 援ъ“?곸쑝濡??곌껐?먮떎.
+12-KPI reward metrics媛 adapter -> training -> checkpoint -> validator源뚯? ?꾨떖?쒕떎.
+?앹꽦??checkpoint???덉쟾?섍쾶 smoke artifact濡??쇰꺼留곷맂??
+```
+
+#### 6. ?ㅼ쓬 ?④퀎
+
+異붿쿇 ?ㅼ쓬 ?④퀎??Step 91?대떎.
+
+- **Step 91 ??Toy causal MAPPO smoke rollout evaluator**
+  - Step 88 smoke checkpoint瑜?遺덈윭? toy causal adapter?먯꽌 rollout ?됯?瑜??섑뻾?쒕떎.
+  - evaluation output??`raw_events.parquet`, `window_rollup.parquet`, canonical KPI, inspector源뚯? ?곌껐?쒕떎.
+  - ?? ?ъ쟾??smoke checkpoint 湲곕컲?대?濡?performance claim? 湲덉??쒕떎.
+
+?먮뒗 ??덉쑝濡?Step 91???ㅼ쓬泥섎읆 ?≪쓣 ???덈떎.
+
+- **Step 91 ??Phase 2 toy causal training/evaluation runbook**
+  - Step 86~89??reward, training smoke, checkpoint validator, evaluation 怨꾪쉷????臾몄꽌濡??뺣━?쒕떎.
+  - ?댄썑 H200 actual training ?곌껐 ?꾩뿉 ?꾩슂??gate瑜?怨좎젙?쒕떎.
+
+---
 ## ?뱟 2026-04-27
 ### Phase 2 12-KPI Schema Extension 諛?A-Family Inspector ??Step 83~84 ?꾨즺
 
