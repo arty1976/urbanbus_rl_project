@@ -1,0 +1,188 @@
+﻿{
+  "artifact_version": "reward_ablation_result_schema_step117_v1",
+  "step": 117,
+  "schema_status": "RESULT_SCHEMA_DRAFT_NOT_ACTUAL_RESULT",
+  "purpose": "Define the required result schema for comparing R0-R5 reward ablation candidates before any trainable reward promotion.",
+  "depends_on_steps": [
+    "Step111 final reward specification draft",
+    "Step112 reward candidate protocol",
+    "Step113 reward normalization baseline lock",
+    "Step114 hard constraint review",
+    "Step115 reward ablation matrix",
+    "Step116 trainable reward promotion gate"
+  ],
+  "claim_guards": {
+    "actual_ablation_results_available": false,
+    "reward_winner_selected": false,
+    "best_reward_claim_allowed": false,
+    "train_with_this_reward_allowed": false,
+    "reward_promotion_allowed": false,
+    "performance_claim_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "canonical_causal_comparison_allowed": false
+  },
+  "candidate_ids_expected": [
+    "R0",
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+  ],
+  "candidate_result_interpretation": {
+    "R0": "service-only safety baseline candidate",
+    "R1": "balanced default candidate",
+    "R2": "wait-heavy candidate",
+    "R3": "long-wait fairness-heavy candidate",
+    "R4": "energy-light candidate",
+    "R5": "fleet-reduction cautious candidate"
+  },
+  "canonical_12_kpis": [
+    "cv_headway",
+    "avg_wait_seconds",
+    "bunching_rate",
+    "on_time_rate",
+    "intervention_rate",
+    "energy_proxy",
+    "passenger_demand_generated",
+    "passenger_served_count",
+    "passenger_service_rate",
+    "passenger_wait_p95_seconds",
+    "energy_proxy_per_passenger",
+    "fleet_reduction_ratio"
+  ],
+  "result_tables": [
+    {
+      "table_name": "reward_ablation_result_by_candidate_seed_condition",
+      "description": "One row per reward candidate, condition, and seed. This is the main comparison table.",
+      "required_columns": [
+        "artifact_version",
+        "candidate_id",
+        "candidate_label",
+        "condition_id",
+        "seed",
+        "adapter_mode",
+        "source_mode",
+        "scenario_count",
+        "window_count",
+        "cv_headway_mean",
+        "avg_wait_seconds_mean",
+        "bunching_rate_mean",
+        "on_time_rate_mean",
+        "intervention_rate_mean",
+        "energy_proxy_mean",
+        "passenger_demand_generated_mean",
+        "passenger_served_count_mean",
+        "passenger_service_rate_mean",
+        "passenger_wait_p95_seconds_mean",
+        "energy_proxy_per_passenger_mean",
+        "fleet_reduction_ratio_mean",
+        "service_quality_score_mean",
+        "secondary_efficiency_score_mean",
+        "hard_constraint_violation_count",
+        "any_hard_constraint_violation",
+        "train_with_this_reward_allowed",
+        "best_reward_claim_allowed",
+        "causal_performance_claim_allowed",
+        "paper_level_claim_allowed"
+      ]
+    },
+    {
+      "table_name": "reward_ablation_result_overall_by_candidate",
+      "description": "Candidate-level rollup after aggregating across seeds and allowed conditions.",
+      "required_columns": [
+        "artifact_version",
+        "candidate_id",
+        "candidate_label",
+        "evaluated_seed_count",
+        "evaluated_condition_count",
+        "n_condition_seed_pairs",
+        "service_quality_score_mean",
+        "service_quality_score_std",
+        "secondary_efficiency_score_mean",
+        "secondary_efficiency_score_std",
+        "hard_constraint_violation_count",
+        "eligible_for_promotion",
+        "promotion_block_reason",
+        "candidate_rank_placeholder",
+        "reward_winner_selected",
+        "best_reward_claim_allowed",
+        "train_with_this_reward_allowed"
+      ]
+    },
+    {
+      "table_name": "hard_constraint_violations_by_candidate",
+      "description": "Detailed hard-constraint violation ledger for every candidate.",
+      "required_columns": [
+        "artifact_version",
+        "candidate_id",
+        "candidate_label",
+        "condition_id",
+        "seed",
+        "constraint_id",
+        "metric",
+        "threshold_rule",
+        "observed_value",
+        "baseline_value",
+        "violation_margin",
+        "violation_count",
+        "violation_action",
+        "blocking",
+        "notes"
+      ]
+    },
+    {
+      "table_name": "reward_ablation_result_manifest",
+      "description": "Manifest tying result artifacts to the candidate protocol, baseline lock, hard constraint review, and promotion gate.",
+      "required_columns": [
+        "artifact_version",
+        "created_at_utc",
+        "candidate_protocol_path",
+        "normalization_baseline_lock_path",
+        "hard_constraint_review_path",
+        "reward_ablation_matrix_path",
+        "promotion_gate_path",
+        "result_root",
+        "result_status",
+        "actual_ablation_results_available",
+        "reward_winner_selected",
+        "train_with_this_reward_allowed",
+        "best_reward_claim_allowed"
+      ]
+    }
+  ],
+  "ranking_policy_draft_not_locked": {
+    "ranking_status": "DRAFT_NOT_LOCKED",
+    "primary_sort": "hard_constraint_violation_count ascending",
+    "secondary_sort": "service_quality_score_mean descending",
+    "tertiary_sort": "passenger_wait_p95_seconds_mean ascending",
+    "quaternary_sort": "energy_proxy_per_passenger_mean ascending",
+    "winner_selection_allowed_now": false,
+    "reason": "The schema defines how future results will be ranked, but no actual ablation result exists yet."
+  },
+  "promotion_requirements_after_results": [
+    "All R0-R5 candidates must be evaluated with the same scenarios, seeds, conditions, and windows.",
+    "All candidate outputs must include the canonical 12-KPI means.",
+    "Hard constraint violation ledger must be complete.",
+    "Candidates with blocking hard constraint violations cannot be promoted.",
+    "A promotion review must compare service-quality score before energy/fleet efficiency.",
+    "A winner cannot be selected from smoke-only or scaffold-only outputs.",
+    "train_with_this_reward_allowed can only become true in a later promotion step after actual result validation."
+  ],
+  "expected_output_files_later": [
+    "reward_ablation_result_by_candidate_seed_condition.parquet",
+    "reward_ablation_result_overall_by_candidate.parquet",
+    "hard_constraint_violations_by_candidate.parquet",
+    "reward_ablation_result_manifest.json",
+    "reward_ablation_result_summary.md"
+  ],
+  "prohibited_now": [
+    "Do not select a best reward candidate.",
+    "Do not train MAPPO with any R0-R5 candidate based only on this schema.",
+    "Do not claim reward performance.",
+    "Do not claim causal improvement.",
+    "Do not include this schema as a result table in a paper."
+  ],
+  "next_step": "Step118 reward ablation result writer or runner guard"
+}
