@@ -1,0 +1,154 @@
+﻿{
+  "artifact_version": "hard_constraint_review_step114_v1",
+  "step": 114,
+  "review_status": "REVIEWED_NOT_TRAINABLE",
+  "purpose": "Review hard constraint candidates for the final MAPPO reward while preserving all non-trainable guards.",
+  "depends_on": {
+    "step111": "05_training/rewards/final_reward_spec_step111.json",
+    "step112": "05_training/rewards/reward_candidate_protocol_step112.json",
+    "step113": "05_training/rewards/reward_normalization_baseline_lock_step113.json"
+  },
+  "baseline_reference": {
+    "normalization_baseline_locked": true,
+    "normalization_baseline_id": "B1_noop",
+    "numeric_baseline_values_locked": false,
+    "numeric_baseline_source_status": "not_locked_until_empirical_baseline_table"
+  },
+  "claim_guards": {
+    "train_with_this_reward_allowed": false,
+    "final_reward_design_claim_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "canonical_causal_comparison_allowed": false,
+    "hard_constraints_finalized": false,
+    "hard_constraint_numeric_values_locked": false,
+    "reward_weights_locked": false,
+    "reward_formula_finalized": false
+  },
+  "observability_guards": {
+    "actual_headway": "not_observed",
+    "actual_arrival_departure_time": "not_observed",
+    "actual_dwell": "not_observed",
+    "actual_passenger_wait_observed": false,
+    "queue_demand_observed": false,
+    "queue_demand_proxy": true,
+    "eta_based_headway_is_actual_headway": false
+  },
+  "hard_constraint_design_principles": {
+    "service_quality_floor_required": true,
+    "long_wait_fairness_required": true,
+    "energy_saving_by_service_suppression_blocked": true,
+    "fleet_reduction_bonus_must_not_override_service": true,
+    "qwen_off_for_A_family_required": true,
+    "observability_overclaim_blocked": true
+  },
+  "constraints": [
+    {
+      "constraint_id": "service_rate_floor",
+      "metric": "passenger_service_rate",
+      "draft_rule": "passenger_service_rate >= 0.95",
+      "threshold_type": "ratio_floor",
+      "draft_threshold_value": 0.95,
+      "baseline_dependency": "none",
+      "violation_action": "large_penalty_or_hard_fail_candidate",
+      "reason": "Prevents policies from reducing energy or fleet by leaving passengers unserved.",
+      "locked": false
+    },
+    {
+      "constraint_id": "avg_wait_regression_cap",
+      "metric": "avg_wait_seconds",
+      "draft_rule": "avg_wait_seconds <= B1_noop_avg_wait_seconds * 1.10",
+      "threshold_type": "relative_cap_to_B1_noop",
+      "draft_threshold_multiplier": 1.10,
+      "baseline_dependency": "B1_noop",
+      "violation_action": "large_penalty_candidate",
+      "reason": "Prevents average passenger wait from degrading beyond a 10 percent draft cap relative to the no-op baseline.",
+      "locked": false
+    },
+    {
+      "constraint_id": "p95_wait_regression_cap",
+      "metric": "passenger_wait_p95_seconds",
+      "draft_rule": "passenger_wait_p95_seconds <= B1_noop_p95_wait_seconds * 1.15",
+      "threshold_type": "relative_cap_to_B1_noop",
+      "draft_threshold_multiplier": 1.15,
+      "baseline_dependency": "B1_noop",
+      "violation_action": "large_penalty_candidate",
+      "reason": "Protects long-wait passengers and prevents average-only optimization from hiding unfair outcomes.",
+      "locked": false
+    },
+    {
+      "constraint_id": "energy_service_coupling_guard",
+      "metric": "energy_proxy_per_passenger",
+      "draft_rule": "energy_proxy_per_passenger improvement cannot be counted unless passenger_service_rate floor and wait caps pass",
+      "threshold_type": "conditional_guard",
+      "baseline_dependency": "B1_noop",
+      "violation_action": "disable_energy_bonus_candidate",
+      "reason": "Blocks the shortcut where total or per-passenger energy appears better because service quality collapsed.",
+      "locked": false
+    },
+    {
+      "constraint_id": "fleet_reduction_service_guard",
+      "metric": "fleet_reduction_ratio",
+      "draft_rule": "fleet_reduction_bonus is active only if service_rate_floor, avg_wait_regression_cap, and p95_wait_regression_cap pass",
+      "threshold_type": "conditional_bonus_guard",
+      "baseline_dependency": "B1_noop",
+      "violation_action": "disable_fleet_bonus_candidate",
+      "reason": "Keeps fleet reduction as a secondary bonus rather than a standalone objective.",
+      "locked": false
+    },
+    {
+      "constraint_id": "qwen_off_for_A_family",
+      "metric": "qwen_trigger_rate",
+      "draft_rule": "qwen_trigger_rate == 0.0 for A/A90/A80/A70 pure MAPPO reward evaluation",
+      "threshold_type": "exact_zero",
+      "draft_threshold_value": 0.0,
+      "baseline_dependency": "none",
+      "violation_action": "hard_fail_candidate",
+      "reason": "Preserves pure MAPPO experimental isolation for A-family runs.",
+      "locked": false
+    },
+    {
+      "constraint_id": "observability_overclaim_guard",
+      "metric": "observability_guards",
+      "draft_rule": "actual_headway, actual_arrival_departure_time, actual_dwell, and actual_passenger_wait remain not_observed unless a later evidence gate upgrades them",
+      "threshold_type": "claim_guard",
+      "baseline_dependency": "none",
+      "violation_action": "hard_fail_candidate",
+      "reason": "Prevents proxy/candidate fields from being reported as actual observations.",
+      "locked": false
+    },
+    {
+      "constraint_id": "finite_reward_guard",
+      "metric": "reward_total",
+      "draft_rule": "reward_total and all reward components must be finite numbers",
+      "threshold_type": "numeric_safety",
+      "baseline_dependency": "none",
+      "violation_action": "hard_fail_candidate",
+      "reason": "Prevents NaN or infinite values from entering training or evaluation artifacts.",
+      "locked": false
+    }
+  ],
+  "required_constraint_ids": [
+    "service_rate_floor",
+    "avg_wait_regression_cap",
+    "p95_wait_regression_cap",
+    "energy_service_coupling_guard",
+    "fleet_reduction_service_guard",
+    "qwen_off_for_A_family",
+    "observability_overclaim_guard",
+    "finite_reward_guard"
+  ],
+  "still_not_allowed": [
+    "Do not train MAPPO with these constraints yet.",
+    "Do not claim these thresholds are empirically final.",
+    "Do not report scaffold reward outputs as paper-level performance.",
+    "Do not treat ETA-based headway as actual observed headway.",
+    "Do not treat queue/demand proxy as directly observed queue demand."
+  ],
+  "required_next_gates_before_training": [
+    "Step115 reward ablation matrix",
+    "Step116 trainable reward promotion gate",
+    "empirical baseline numeric value table",
+    "constraint stress test against shortcut policies"
+  ]
+}
