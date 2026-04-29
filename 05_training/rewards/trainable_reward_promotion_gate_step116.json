@@ -1,0 +1,84 @@
+﻿{
+  "artifact_version": "trainable_reward_promotion_gate_step116_v1",
+  "step": 116,
+  "gate_status": "DRAFT_GATE_NOT_PROMOTED",
+  "purpose": "Define the gate that must be passed before any Step 111-115 reward candidate can be promoted to trainable MAPPO reward.",
+  "trainable_reward_promoted": false,
+  "train_with_this_reward_allowed": false,
+  "selected_candidate_id": null,
+  "selected_candidate_claim_allowed": false,
+  "reason_not_promoted": "No actual reward ablation result has been produced yet. Step 115 only defined the candidate matrix.",
+  "required_prior_artifacts": [
+    "05_training/rewards/final_reward_spec_step111.json",
+    "05_training/rewards/reward_candidate_protocol_step112.json",
+    "05_training/rewards/reward_normalization_baseline_lock_step113.json",
+    "05_training/rewards/hard_constraint_review_step114.json",
+    "05_training/rewards/reward_ablation_matrix_step115.json"
+  ],
+  "required_prior_gate_statuses": {
+    "step111": "PASS_FINAL_REWARD_SPEC_DRAFT_NOT_TRAINABLE",
+    "step112": "PASS_REWARD_CANDIDATE_PROTOCOL_DRAFT_NOT_TRAINABLE",
+    "step113": "PASS_BASELINE_REFERENCE_LOCKED_NOT_TRAINABLE",
+    "step114": "PASS_HARD_CONSTRAINT_REVIEW_DRAFT_NOT_TRAINABLE",
+    "step115": "PASS_REWARD_ABLATION_MATRIX_DRAFT_NOT_TRAINABLE"
+  },
+  "promotion_requirements": {
+    "final_reward_spec_exists": true,
+    "candidate_protocol_exists": true,
+    "normalization_baseline_locked": true,
+    "hard_constraint_review_exists": true,
+    "reward_ablation_matrix_exists": true,
+    "actual_ablation_results_exist": false,
+    "selected_candidate_has_best_evidence": false,
+    "selected_candidate_passes_service_floor": false,
+    "selected_candidate_passes_wait_regression_caps": false,
+    "selected_candidate_passes_energy_shortcut_guard": false,
+    "selected_candidate_passes_qwen_off_guard": false,
+    "selected_candidate_passes_observability_guard": false,
+    "human_review_completed": false
+  },
+  "non_promotable_until_all_true": [
+    "actual_ablation_results_exist",
+    "selected_candidate_has_best_evidence",
+    "selected_candidate_passes_service_floor",
+    "selected_candidate_passes_wait_regression_caps",
+    "selected_candidate_passes_energy_shortcut_guard",
+    "selected_candidate_passes_qwen_off_guard",
+    "selected_candidate_passes_observability_guard",
+    "human_review_completed"
+  ],
+  "candidate_matrix_expected": {
+    "candidate_count": 6,
+    "candidate_ids": ["R0", "R1", "R2", "R3", "R4", "R5"],
+    "best_candidate_claim_allowed": false
+  },
+  "locked_guards": {
+    "weight_sign_convention": "positive_magnitude_with_formula_sign",
+    "normalization_baseline": "B1_noop",
+    "numeric_baseline_values_locked": false,
+    "hard_constraints_finalized": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "canonical_causal_comparison_allowed": false,
+    "actual_headway": "not_observed",
+    "actual_arrival_departure_time": "not_observed",
+    "actual_dwell": "not_observed",
+    "actual_passenger_wait_observed": false,
+    "queue_demand_observed": false,
+    "queue_demand_proxy": true
+  },
+  "service_quality_first_requirements": {
+    "service_weight_must_dominate_energy_fleet": true,
+    "long_wait_penalty_at_least_avg_wait_penalty": true,
+    "fleet_reduction_bonus_must_remain_secondary": true,
+    "energy_proxy_total_must_not_be_direct_reward": true,
+    "passenger_service_rate_must_be_direct_reward_candidate": true,
+    "passenger_wait_p95_seconds_must_be_direct_reward_candidate": true
+  },
+  "promotion_decision": {
+    "decision": "NOT_PROMOTED",
+    "trainable_reward_promoted": false,
+    "train_with_this_reward_allowed": false,
+    "next_step": "Step117 reward ablation result schema and collector"
+  }
+}
