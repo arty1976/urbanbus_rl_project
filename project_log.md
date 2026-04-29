@@ -4299,3 +4299,59 @@ Causal v2 canonical KPI smoke inspector
 
 <!-- STEP_104_CAUSAL_SIMULATOR_V2_STATIC_SIGNAL_LOG_END -->
 
+<!-- STEP_105_RIDERSHIP_2023_DB_INCLUSION_DECISION_START -->
+
+Step 105 — 2023 Ridership DB Inclusion Decision
+Summary
+
+The 2023 stop-level hourly boarding/alighting CSV should not be re-imported into the current database.
+
+The same 2023 ridership source is already present in:
+
+public.stg_daegu_stop_usage_2023
+Confirmed staging totals
+row_count = 2,102,115
+date_count = 365
+date_range = 2023-01-01 ~ 2023-12-31
+stop_id_count = 3,386
+usage_type_count = 2
+boarding_total = 181,556,972
+alighting_total = 70,567,680
+overall_total = 252,124,652
+
+These totals match the expected 2023 ridership CSV totals.
+
+Existing tensor DB year basis
+
+Core pre-tensor source relations were confirmed as 2023-only by min/max timestamp:
+
+public.graph_state_timeslice.state_ts
+2023-01-01 05:00:00+09:00 ~ 2023-12-31 23:00:00+09:00
+
+public.rl_state_training_base.state_ts
+2023-01-01 05:00:00+09:00 ~ 2023-12-31 22:00:00+09:00
+Decision
+2023 ridership CSV:
+already_loaded_in_db = true
+do_not_reimport = true
+tensor_rebuild_required_now = false
+
+2022 ridership CSV:
+archive_for_future_cross_year_validation = true
+do_not_merge_into_current_2023_tensor_db = true
+Rationale
+
+Because the current tensor DB is 2023-based and the 2023 ridership source is already loaded in staging, re-importing the CSV would risk duplicate ridership counts.
+
+Guardrails
+performance_claim_allowed = false
+causal_performance_claim_allowed = false
+
+This decision is about data lineage and duplicate-load prevention. It is not a model performance claim.
+
+Next recommended step
+Step 106:
+Current DB ridership lineage documentation or fact-to-tensor transformation rule inspection
+
+<!-- STEP_105_RIDERSHIP_2023_DB_INCLUSION_DECISION_END -->
+
