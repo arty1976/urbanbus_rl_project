@@ -1,0 +1,41 @@
+﻿{
+  "artifact_version": "reward_ablation_noop_result_ingestion_guard_step123_v1",
+  "step": 123,
+  "guard_status": "NOOP_RESULT_INGESTION_GUARD_NOT_ACTUAL_RESULTS",
+  "purpose": "Ingest Step 122 sandbox no-op runner outputs and verify that they are complete, schema-safe, and not mistaken for actual reward ablation results.",
+  "expected_candidate_ids": ["R0", "R1", "R2", "R3", "R4", "R5"],
+  "expected_condition_ids": ["A", "A90", "A80", "A70"],
+  "expected_seeds": [1, 2, 3],
+  "expected_row_count": 72,
+  "required_noop_status_values": ["NOOP_RECORDED_NOT_EXECUTED"],
+  "claim_guards": {
+    "actual_results": false,
+    "winner_selected": false,
+    "best_reward_claim_allowed": false,
+    "execute_allowed": false,
+    "actual_training_allowed": false,
+    "train_with_this_reward_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false
+  },
+  "required_input_columns": [
+    "run_id",
+    "candidate_id",
+    "condition_id",
+    "seed",
+    "noop_status",
+    "execute_allowed",
+    "actual_training_allowed",
+    "train_with_this_reward_allowed",
+    "actual_results",
+    "winner_selected",
+    "command_hash",
+    "planned_output_root"
+  ],
+  "output_tables": [
+    "noop_ingested_rows_csv",
+    "noop_ingestion_summary_csv",
+    "noop_ingestion_manifest_json"
+  ],
+  "next_step": "Step124 reward ablation actual result schema bridge or selection criteria gate"
+}
