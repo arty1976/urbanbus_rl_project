@@ -1,0 +1,191 @@
+﻿{
+  "artifact_version": "reward_candidate_protocol_step112_v1",
+  "step": 112,
+  "source_spec": "05_training/rewards/final_reward_spec_step111.json",
+  "protocol_status": "DRAFT_NOT_TRAINABLE",
+  "purpose": "Define a controlled candidate protocol for comparing reward-weight variants derived from Step 111 without allowing MAPPO training yet.",
+  "claim_guards": {
+    "reward_candidate_protocol_finalized": false,
+    "candidate_selected": false,
+    "reward_weights_locked": false,
+    "normalization_locked": false,
+    "hard_constraints_locked": false,
+    "baseline_reference_locked": false,
+    "train_with_candidate_reward_allowed": false,
+    "train_with_this_reward_allowed": false,
+    "final_reward_design_claim_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "canonical_causal_comparison_allowed": false
+  },
+  "weight_sign_convention": "positive_magnitude_with_formula_sign",
+  "selection_policy": {
+    "selection_status": "not_selected",
+    "selection_allowed_in_step112": false,
+    "selection_requires_future_steps": [
+      "Step113 reward normalization baseline lock",
+      "Step114 hard constraint review",
+      "Step115 reward ablation matrix",
+      "Step116 trainable reward promotion gate"
+    ],
+    "same_windows_required": true,
+    "same_seeds_required": true,
+    "same_scenarios_required": true,
+    "same_simulator_contract_required": true,
+    "qwen_trigger_rate_required": 0.0
+  },
+  "candidate_common_constraints": {
+    "service_quality_first": true,
+    "energy_fleet_secondary": true,
+    "energy_proxy_not_primary_objective": true,
+    "fleet_reduction_bonus_only": true,
+    "no_energy_saving_by_stranding_passengers": true,
+    "long_wait_fairness_required": true,
+    "trainable": false,
+    "performance_claim_allowed": false
+  },
+  "normalization_policy_draft_not_locked": {
+    "candidate_training_baseline": "B1_noop",
+    "candidate_reporting_baselines": [
+      "B0_historical",
+      "B1_noop",
+      "B2_rulebased"
+    ],
+    "baseline_reference_locked": false,
+    "normalization_locked": false,
+    "must_not_compare_candidates_on_raw_unscaled_seconds": true
+  },
+  "candidate_matrix": [
+    {
+      "candidate_id": "R0_BALANCED_STEP111",
+      "candidate_role": "default_balanced_reference_from_step111",
+      "selection_status": "not_selected",
+      "trainable": false,
+      "performance_claim_allowed": false,
+      "weights": {
+        "w_service": 3.0,
+        "w_avg_wait": 2.0,
+        "w_long_wait": 3.0,
+        "w_ontime": 1.0,
+        "w_bunching": 1.5,
+        "w_headway_cv": 1.0,
+        "w_energy_per_passenger": 1.0,
+        "w_fleet_reduction": 0.5,
+        "w_intervention": 0.25,
+        "w_constraint": 10.0
+      },
+      "expected_behavior": "Balanced service-first reward candidate. Energy and fleet terms remain secondary."
+    },
+    {
+      "candidate_id": "R1_SERVICE_STRICT",
+      "candidate_role": "stronger_service_rate_protection",
+      "selection_status": "not_selected",
+      "trainable": false,
+      "performance_claim_allowed": false,
+      "weights": {
+        "w_service": 4.0,
+        "w_avg_wait": 2.0,
+        "w_long_wait": 3.5,
+        "w_ontime": 1.0,
+        "w_bunching": 1.5,
+        "w_headway_cv": 1.0,
+        "w_energy_per_passenger": 0.8,
+        "w_fleet_reduction": 0.25,
+        "w_intervention": 0.25,
+        "w_constraint": 12.0
+      },
+      "expected_behavior": "Rejects energy savings that reduce served passenger share. Best for guarding against service collapse."
+    },
+    {
+      "candidate_id": "R2_WAIT_FAIRNESS_HEAVY",
+      "candidate_role": "stronger_long_wait_and_average_wait_protection",
+      "selection_status": "not_selected",
+      "trainable": false,
+      "performance_claim_allowed": false,
+      "weights": {
+        "w_service": 3.0,
+        "w_avg_wait": 2.5,
+        "w_long_wait": 4.5,
+        "w_ontime": 1.0,
+        "w_bunching": 1.5,
+        "w_headway_cv": 1.0,
+        "w_energy_per_passenger": 0.75,
+        "w_fleet_reduction": 0.25,
+        "w_intervention": 0.25,
+        "w_constraint": 12.0
+      },
+      "expected_behavior": "Protects passengers at the tail of the wait-time distribution. Best for fairness and p95 wait control."
+    },
+    {
+      "candidate_id": "R3_ENERGY_LIGHT",
+      "candidate_role": "minimal_energy_pressure_sanity_candidate",
+      "selection_status": "not_selected",
+      "trainable": false,
+      "performance_claim_allowed": false,
+      "weights": {
+        "w_service": 3.0,
+        "w_avg_wait": 2.0,
+        "w_long_wait": 3.0,
+        "w_ontime": 1.0,
+        "w_bunching": 1.5,
+        "w_headway_cv": 1.0,
+        "w_energy_per_passenger": 0.5,
+        "w_fleet_reduction": 0.2,
+        "w_intervention": 0.25,
+        "w_constraint": 10.0
+      },
+      "expected_behavior": "Tests whether service improvements remain stable when energy pressure is very light."
+    },
+    {
+      "candidate_id": "R4_FLEET_BONUS_BOUNDARY",
+      "candidate_role": "upper_boundary_for_fleet_bonus_without_dominating_service",
+      "selection_status": "not_selected",
+      "trainable": false,
+      "performance_claim_allowed": false,
+      "weights": {
+        "w_service": 3.5,
+        "w_avg_wait": 2.25,
+        "w_long_wait": 3.25,
+        "w_ontime": 1.0,
+        "w_bunching": 1.5,
+        "w_headway_cv": 1.0,
+        "w_energy_per_passenger": 1.0,
+        "w_fleet_reduction": 0.75,
+        "w_intervention": 0.25,
+        "w_constraint": 12.0
+      },
+      "expected_behavior": "Boundary test for fleet reduction bonus. Fleet term is still smaller than energy-per-passenger and much smaller than service terms."
+    }
+  ],
+  "candidate_rejection_rules": [
+    "Reject any candidate where any weight is non-positive.",
+    "Reject any candidate where service-quality weight sum does not dominate energy/fleet weight sum.",
+    "Reject any candidate where w_long_wait is smaller than w_avg_wait.",
+    "Reject any candidate where w_fleet_reduction exceeds w_energy_per_passenger.",
+    "Reject any candidate that directly rewards total energy_proxy reduction.",
+    "Reject any candidate that allows train_with_candidate_reward_allowed=true in Step 112.",
+    "Reject any candidate that permits paper_level_claim_allowed or causal_performance_claim_allowed."
+  ],
+  "ablation_readiness_notes": {
+    "step112_scope": "Protocol definition only. No training and no candidate selection.",
+    "step115_expected_scope": "Run controlled reward-candidate ablation with same windows, seeds, scenarios, and simulator contract.",
+    "primary_screening_metrics": [
+      "passenger_service_rate",
+      "avg_wait_seconds",
+      "passenger_wait_p95_seconds",
+      "bunching_rate",
+      "cv_headway"
+    ],
+    "secondary_screening_metrics": [
+      "energy_proxy_per_passenger",
+      "fleet_reduction_ratio",
+      "intervention_rate"
+    ],
+    "forbidden_shortcuts": [
+      "energy reduction by suppressing service",
+      "fleet reduction by leaving passengers unserved",
+      "average wait improvement while p95 wait gets worse",
+      "claiming ETA-based headway as actual observed headway"
+    ]
+  }
+}
