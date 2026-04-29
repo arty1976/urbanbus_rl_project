@@ -1,0 +1,140 @@
+﻿{
+  "artifact_version": "reward_normalization_baseline_lock_step113_v1",
+  "step": 113,
+  "lock_status": "BASELINE_REFERENCE_LOCKED_FOR_CANDIDATE_EVALUATION_NOT_TRAINABLE",
+  "purpose": "Lock the reward normalization baseline reference for candidate evaluation while preserving all training and claim guards.",
+  "source_steps": [
+    "Step110 final reward design review gate",
+    "Step111 final reward specification draft",
+    "Step112 reward candidate protocol"
+  ],
+  "claim_guards": {
+    "baseline_reference_locked_for_candidate_evaluation": true,
+    "reward_formula_finalized": false,
+    "reward_weights_locked": false,
+    "normalization_numeric_values_locked": false,
+    "hard_constraints_locked": false,
+    "train_with_this_reward_allowed": false,
+    "final_reward_design_claim_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "canonical_causal_comparison_allowed": false
+  },
+  "observability_guards": {
+    "actual_headway": "not_observed",
+    "actual_arrival_departure_time": "not_observed",
+    "actual_dwell": "not_observed",
+    "actual_passenger_wait_observed": false,
+    "queue_demand_observed": false,
+    "queue_demand_proxy": true
+  },
+  "baseline_reference_lock": {
+    "training_reward_normalization_baseline": "B1_noop",
+    "baseline_reference_locked_for_candidate_evaluation": true,
+    "numeric_baseline_values_locked": false,
+    "reporting_comparison_baselines": [
+      "B0_historical",
+      "B1_noop",
+      "B2_rulebased"
+    ],
+    "rationale": "B1_noop is the safest reward-normalization anchor because it represents no intervention under the same scenario/window structure. B0_historical remains important for reporting but has missing/legacy KPI coverage. B2_rulebased is a comparator policy and should not be the primary training reward normalization anchor.",
+    "not_trainable_reason": "The baseline reference is locked, but numerical baseline constants, hard constraints, reward ablation results, and trainable reward promotion are not locked yet."
+  },
+  "normalization_policy": {
+    "weight_sign_convention": "positive_magnitude_with_formula_sign",
+    "scale_policy": "baseline_ratio_or_bounded_score",
+    "test_set_leakage_guard": "Do not compute final numeric normalization constants from held-out test windows. Use calibration/train-reference baseline artifacts only, then report test performance separately.",
+    "zero_denominator_policy": "Use epsilon guard and emit validation warning; do not silently divide by zero.",
+    "proxy_label_policy": "Any metric derived from queue/demand proxy or ETA/headway candidate must retain proxy/candidate metadata and must not be promoted to actual observed status."
+  },
+  "normalization_terms": [
+    {
+      "term": "passenger_service_rate",
+      "direction": "higher_is_better",
+      "reward_component": "service_rate_score",
+      "normalization_rule": "clip(passenger_service_rate, 0.0, 1.0)",
+      "baseline_source": "not_required_ratio_metric",
+      "observation_status": "proxy_allowed_with_label"
+    },
+    {
+      "term": "avg_wait_seconds",
+      "direction": "lower_is_better",
+      "reward_component": "avg_wait_penalty",
+      "normalization_rule": "max(0, avg_wait_seconds / baseline_B1_noop_avg_wait_seconds - 1)",
+      "baseline_source": "B1_noop",
+      "observation_status": "proxy_or_aggregated_wait"
+    },
+    {
+      "term": "passenger_wait_p95_seconds",
+      "direction": "lower_is_better",
+      "reward_component": "long_wait_penalty",
+      "normalization_rule": "max(0, passenger_wait_p95_seconds / baseline_B1_noop_passenger_wait_p95_seconds - 1)",
+      "baseline_source": "B1_noop",
+      "observation_status": "proxy_not_actual_individual_wait"
+    },
+    {
+      "term": "on_time_rate",
+      "direction": "higher_is_better",
+      "reward_component": "on_time_score",
+      "normalization_rule": "clip(on_time_rate, 0.0, 1.0)",
+      "baseline_source": "optional_B1_noop_reporting_delta",
+      "observation_status": "proxy_or_schedule_candidate"
+    },
+    {
+      "term": "bunching_rate",
+      "direction": "lower_is_better",
+      "reward_component": "bunching_penalty",
+      "normalization_rule": "max(0, bunching_rate / max(baseline_B1_noop_bunching_rate, epsilon) - 1)",
+      "baseline_source": "B1_noop",
+      "observation_status": "headway_proxy_candidate"
+    },
+    {
+      "term": "cv_headway",
+      "direction": "lower_is_better",
+      "reward_component": "headway_cv_penalty",
+      "normalization_rule": "max(0, cv_headway / max(baseline_B1_noop_cv_headway, epsilon) - 1)",
+      "baseline_source": "B1_noop",
+      "observation_status": "headway_proxy_candidate"
+    },
+    {
+      "term": "energy_proxy_per_passenger",
+      "direction": "lower_is_better",
+      "reward_component": "energy_per_passenger_penalty",
+      "normalization_rule": "energy_proxy_per_passenger / max(baseline_B1_noop_energy_proxy_per_passenger, epsilon)",
+      "baseline_source": "B1_noop",
+      "observation_status": "energy_proxy_not_metered_energy"
+    },
+    {
+      "term": "fleet_reduction_ratio",
+      "direction": "higher_is_better_but_secondary_bonus_only",
+      "reward_component": "fleet_reduction_bonus",
+      "normalization_rule": "clip(fleet_reduction_ratio, 0.0, 1.0)",
+      "baseline_source": "condition_defined_not_observed",
+      "observation_status": "experiment_condition_derived"
+    },
+    {
+      "term": "intervention_rate",
+      "direction": "lower_is_better_small_penalty",
+      "reward_component": "intervention_penalty",
+      "normalization_rule": "clip(intervention_rate, 0.0, 1.0)",
+      "baseline_source": "optional_B1_noop_reporting_delta",
+      "observation_status": "policy_action_derived"
+    }
+  ],
+  "forbidden_direct_normalization_terms": [
+    "passenger_demand_generated",
+    "passenger_served_count",
+    "energy_proxy"
+  ],
+  "required_baseline_artifacts_before_numeric_lock": [
+    "B1_noop canonical 12-KPI kpi_by_window.parquet",
+    "B1_noop canonical 12-KPI kpi_by_seed.parquet",
+    "B1_noop canonical 12-KPI kpi_overall.json",
+    "B1_noop normalization_constants_step113_or_later.json"
+  ],
+  "next_required_gates": [
+    "Step114 hard constraint review",
+    "Step115 reward ablation matrix",
+    "Step116 trainable reward promotion gate"
+  ]
+}
