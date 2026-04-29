@@ -1,4 +1,146 @@
-﻿## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+## 📅 2026-04-26 - Phase 2 causal simulator skeleton, fleet sensitivity, extended KPI 분석 체계 확정
+
+<!-- STEP104_ROUTE_AWARE_V2_LOG_START -->
+## 📅 2026-04-29
+### Step 99-D~103 BIS API 통합 감사 및 route-aware causal simulator v2 scaffold 연결 완료
+
+오늘 작업에서는 Step 97/98에서 제기된 데이터 가용성 문제를 API(Application Programming Interface=응용 프로그램 인터페이스) artifact 기반으로 재검증하고, 그 결과를 route-aware causal simulator v2의 최소 실행 파이프라인까지 연결했다. 이번 범위는 **DB(Database=데이터베이스) write 없음**, **tensor DB(Database=데이터베이스) overwrite 없음**, **추가 API 호출 없음**, **성능 주장 금지** 원칙을 유지한 구조 검증이다.
+
+#### 1. Step 99-D — `/getRealtime02` ETA sampling audit 완료
+- 생성/검증 파일:
+  - `05_training/adapters/inspect_getrealtime02_eta_sampling.py`
+  - `05_training/adapters/test_getrealtime02_eta_sampling.py`
+  - `05_training/adapters/run_step99d_getrealtime02_eta_sampling.ps1`
+- 주요 결과:
+  - normalized ETA rows = 58
+  - ETA-based headway candidates = 23
+  - `getRealtime02_eta = observed_candidate`
+  - `eta_based_headway = candidate_from_getRealtime02`
+- 단, 다음 값들은 계속 `not_observed`로 유지:
+  - `actual_headway`
+  - `actual_arrival_departure_time`
+  - `actual_dwell`
+
+#### 2. Step 99-E — BIS API data source integration audit 완료
+- 생성/검증 파일:
+  - `05_training/adapters/analyze_bis_api_integration_step99e.py`
+  - `05_training/adapters/test_bis_api_integration_step99e.py`
+  - `05_training/adapters/bis_api_integration_audit_step99e.md`
+- 주요 결과:
+  - `audit_status = PASS`
+  - `getPos02 coverage = 1.0`
+  - `getRealtime02 ETA coverage = 1.0`
+  - `headway candidate coverage = 1.0`
+- 의미:
+  - `/getPos02` 현재 위치 후보가 `/getBs02` route-stop sequence 위에 100% 매칭됨.
+  - `/getRealtime02` ETA 후보도 `/getBs02` route-stop sequence 위에 100% 매칭됨.
+  - ETA 기반 headway candidate도 route-aware simulator v2 입력 후보로 연결 가능함.
+
+#### 3. Step 99-F — Step 97/98 classification update consolidation 완료
+- 생성/검증 파일:
+  - `05_training/adapters/consolidate_bis_api_classification_step99f.py`
+  - `05_training/adapters/test_bis_api_classification_step99f.py`
+  - `05_training/adapters/bis_api_classification_consolidation_step99f.md`
+- 주요 결과:
+  - `audit_status = PASS`
+  - `getPos02 coverage = 1.0`
+  - `getRealtime02 ETA coverage = 1.0`
+  - `headway candidate coverage = 1.0`
+- classification update 핵심:
+  - `route_id = observed_candidate_full_collection_234_of_238_routes`
+  - `direction_id = observed_candidate_full_collection_234_of_238_routes_cross_confirmed`
+  - `ordered_stop_sequence = observed_candidate_full_collection_234_of_238_routes`
+  - `bus_id_or_vehicle_no = repeated_sample_observed_candidate_from_getPos02_vhcNo2`
+  - `live_position_xy = repeated_sample_observed_candidate_from_getPos02_xPos_yPos`
+  - `current_route_sequence = repeated_sample_observed_candidate_from_getPos02_seq`
+  - `current_stop_id = repeated_sample_observed_candidate_from_getPos02_bsId`
+  - `getRealtime02_eta = observed_candidate_cross_matched_to_getBs02`
+  - `eta_based_headway = candidate_from_getRealtime02_cross_matched_to_getBs02`
+- 유지되는 방어선:
+  - `actual_headway = not_observed`
+  - `actual_arrival_departure_time = not_observed`
+  - `actual_dwell = not_observed`
+  - `paper_level_claim_allowed = false`
+  - `causal_performance_claim_allowed = false`
+
+#### 4. Step 100 — causal simulator v2 contract 갱신 완료
+- 생성/검증 파일:
+  - `05_training/adapters/build_causal_simulator_v2_contract_step100.py`
+  - `05_training/adapters/test_causal_simulator_v2_contract_step100.py`
+  - `05_training/adapters/causal_simulator_v2_contract_step100.md`
+- 주요 결과:
+  - `contract_status = READY_FOR_ROUTE_AWARE_MINIMAL_SCAFFOLD`
+- 의미:
+  - Step 99-F의 observed/candidate/proxy/not_observed 판정을 simulator v2 계약으로 승격.
+  - `eta_based_headway`는 calibration candidate로만 사용.
+  - `actual_headway`, `actual_arrival_departure_time`, `actual_dwell`은 계속 not_observed.
+
+#### 5. Step 101 — route-aware minimal simulator scaffold 완료
+- 생성/검증 파일:
+  - `05_training/adapters/route_aware_minimal_simulator_step101.py`
+  - `05_training/adapters/test_route_aware_minimal_simulator_step101.py`
+  - `05_training/adapters/route_aware_minimal_simulator_step101.md`
+- 주요 결과:
+  - `audit_status = PASS`
+  - `scaffold_status = READY_FOR_STEP102_ROLLOUT_WRITER_SCAFFOLD`
+  - `trace_rows = 24`
+- 의미:
+  - `/getBs02`의 `route_id + direction_id + ordered_stop_sequence`를 기반으로 route table 생성.
+  - bus-like agent를 route sequence 위에 초기화하고, `hold`/`advance` action에 따라 stop_order를 갱신하는 최소 scaffold 통과.
+
+#### 6. Step 102 — route-aware rollout writer scaffold 완료
+- 생성/검증 파일:
+  - `05_training/adapters/route_aware_rollout_writer_step102.py`
+  - `05_training/adapters/test_route_aware_rollout_writer_step102.py`
+  - `05_training/adapters/route_aware_rollout_writer_step102.md`
+- 주요 결과:
+  - 기본 실행: `raw_events = 24`, `window_rollup = 1`, `parquet_ready = True`
+  - A/A90/A80/A70 × seeds 1,2,3 × routes 2 matrix:
+    - `raw_events = 480`
+    - `window_rollup = 24`
+    - `parquet_ready = True`
+- 의미:
+  - Step 101 trace를 `raw_events.parquet`와 `window_rollup.parquet` 형태로 변환.
+  - canonical KPI(Key Performance Indicator=핵심 성과 지표) 집계기의 입력 형태로 보낼 준비 완료.
+
+#### 7. Step 103 — route-aware rollout canonical KPI integration 완료
+- 생성/검증 파일:
+  - `05_training/adapters/route_aware_canonical_kpi_step103.py`
+  - `05_training/adapters/test_route_aware_canonical_kpi_step103.py`
+  - `05_training/adapters/route_aware_canonical_kpi_step103.md`
+- 주요 결과:
+  - `audit_status = PASS`
+  - `integration_status = READY_FOR_STEP104_PROJECT_LOG_RUNBOOK_UPDATE`
+  - `kpi_by_window = 24`
+  - `kpi_by_seed = 12`
+  - `kpi_by_time_band = 12`
+  - `causal_allowed = False`
+- 의미:
+  - Step 102의 `window_rollup.parquet`가 기존 `canonical_kpi_aggregator.py`의 `official_rollup` 경로를 통과.
+  - route-aware scaffold output이 canonical KPI 파이프라인에 연결 가능함을 확인.
+  - 단, `causal_allowed = False`로 성능 주장 차단선은 유지.
+
+#### 8. 현재 허용되는 주장
+- `/getBs02`, `/getPos02`, `/getRealtime02` 산출물은 route_id / direction_id / stop_id 체계에서 상호 연결 가능하다.
+- route-aware minimal simulator scaffold는 `/getBs02` ordered stop sequence 위에서 agent 이동 trace를 생성할 수 있다.
+- route-aware rollout writer는 `raw_events`와 `window_rollup`을 생성할 수 있다.
+- route-aware scaffold output은 canonical KPI aggregation까지 통과할 수 있다.
+
+#### 9. 아직 금지되는 주장
+- actual headway가 관측되었다.
+- 실제 arrival/departure time이 관측되었다.
+- 실제 dwell time이 관측되었다.
+- A/A90/A80/A70의 실제 성능 차이를 주장할 수 있다.
+- 논문 성능표에 넣을 수 있는 causal performance result가 나왔다.
+
+#### 10. 다음 단계
+- Step 105: route-aware v2 realism gap closure plan 작성.
+- Step 106: passenger queue / demand proxy v2 설계.
+- Step 107: ETA 기반 calibration hook 설계.
+- Step 108: route-aware simulator adapter interface 정식화.
+- Step 109: canonical 12-KPI 확장과 route-aware v2 연결 여부 재점검.
+<!-- STEP104_ROUTE_AWARE_V2_LOG_END -->
+
 
 ### 1. Phase 2 causal simulator 구조 확장
 Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
@@ -4354,4 +4496,3 @@ Step 106:
 Current DB ridership lineage documentation or fact-to-tensor transformation rule inspection
 
 <!-- STEP_105_RIDERSHIP_2023_DB_INCLUSION_DECISION_END -->
-
