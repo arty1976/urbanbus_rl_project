@@ -1,0 +1,1104 @@
+{
+  "artifact_version": "tensor_db_data_requirements_v2_step97_v1",
+  "step": 97,
+  "name": "Tensor DB data availability and generability audit",
+  "classification_classes": [
+    "observed",
+    "derived",
+    "proxy",
+    "assumed",
+    "missing"
+  ],
+  "guardrails": {
+    "performance_claim_allowed": false,
+    "fleet_reduction_claim_allowed": false,
+    "causal_performance_claim_allowed_for_proxy_assumed_missing": false,
+    "only_observed_or_derived_allowed_in_v2_required_contract": true,
+    "no_2023_csv_reimport": true,
+    "no_tensor_db_overwrite": true,
+    "no_2022_merge_into_2023_tensor_db": true
+  },
+  "relation_candidates": [
+    "public.gatv2_node_master_active",
+    "public.gatv2_edge_primary_active",
+    "public.gatv2_edge_primary_active_mat",
+    "public.gatv2_snapshot_stop_features_train",
+    "public.gatv2_snapshot_stop_features_train_mat",
+    "public.graph_state_timeslice",
+    "public.rl_state_training_base",
+    "public.fact_stop_usage_hourly",
+    "public.stg_daegu_stop_usage_2023"
+  ],
+  "candidate_fields": [
+    {
+      "field_name": "stop_id_or_node_uid",
+      "simulator_need": "Identify stops/nodes in simulator state.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_node_master_active",
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "node_uid",
+        "stop_id"
+      ],
+      "derivation_rule": "Direct read from source identity columns.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "node identity column",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Use node_uid as canonical when stop_id is not directly available."
+    },
+    {
+      "field_name": "node_index",
+      "simulator_need": "Dense node index for tensor and graph arrays.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_node_master_active",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "node_index"
+      ],
+      "derivation_rule": "Direct read from tensor/node source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "node_index column",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Required for tensor alignment."
+    },
+    {
+      "field_name": "directed_edge_src_dst",
+      "simulator_need": "Directed graph edge endpoints.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_edge_primary_active_mat",
+        "public.gatv2_edge_primary_active"
+      ],
+      "source_columns": [
+        "src_idx",
+        "dst_idx",
+        "src_node_uid",
+        "dst_node_uid"
+      ],
+      "derivation_rule": "Direct read from edge source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "edge endpoint columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Direction must be preserved."
+    },
+    {
+      "field_name": "edge_distance",
+      "simulator_need": "Distance between stop graph nodes.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_edge_primary_active_mat",
+        "public.gatv2_edge_primary_active"
+      ],
+      "source_columns": [
+        "distance_m"
+      ],
+      "derivation_rule": "Direct read from edge source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "distance_m",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Can support travel/energy proxy, but not observed energy."
+    },
+    {
+      "field_name": "edge_travel_time",
+      "simulator_need": "Nominal edge travel time.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_edge_primary_active_mat",
+        "public.gatv2_edge_primary_active"
+      ],
+      "source_columns": [
+        "time_sec"
+      ],
+      "derivation_rule": "Direct read from edge source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "time_sec",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Nominal/static travel time, not real-time AVL travel time."
+    },
+    {
+      "field_name": "route_id",
+      "simulator_need": "Route-specific simulator logic.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "route_id"
+      ],
+      "derivation_rule": "No derivation from tensor fields alone.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "route_id not guaranteed in tensor sources",
+      "required_source_data": "route/trip source table",
+      "acquisition_path": "current_original_db",
+      "notes": "Needed for route-level v2 if available outside tensor DB."
+    },
+    {
+      "field_name": "direction_id",
+      "simulator_need": "Direction-aware route simulation.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "direction_id",
+        "dir",
+        "route_dir"
+      ],
+      "derivation_rule": "No derivation from tensor fields alone.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "direction_id not guaranteed in tensor sources",
+      "required_source_data": "route direction source table",
+      "acquisition_path": "current_original_db",
+      "notes": "Needed for route-direction sequencing."
+    },
+    {
+      "field_name": "ordered_stop_sequence",
+      "simulator_need": "Route stop order and legal movement.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "stop_sequence",
+        "sequence",
+        "seq"
+      ],
+      "derivation_rule": "No derivation from aggregate tensor fields alone.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "ordered route-stop sequence missing from tensor fields",
+      "required_source_data": "route-stop sequence table",
+      "acquisition_path": "current_original_db",
+      "notes": "Potentially available from original route_link/sequence data, not tensor artifact."
+    },
+    {
+      "field_name": "state_ts",
+      "simulator_need": "Current simulation timestamp.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train",
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "state_ts"
+      ],
+      "derivation_rule": "Direct read from state source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "state_ts",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Temporal anchor for snapshots."
+    },
+    {
+      "field_name": "next_state_ts",
+      "simulator_need": "Next transition timestamp.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "next_state_ts"
+      ],
+      "derivation_rule": "Direct read from transition source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "next_state_ts",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Transition anchor."
+    },
+    {
+      "field_name": "service_date",
+      "simulator_need": "Calendar date for split and seasonality.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.fact_stop_usage_hourly",
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "service_date"
+      ],
+      "derivation_rule": "Direct read from date source or derived from state_ts date if documented.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "service_date or state_ts",
+      "acquisition_path": "current_tensor_db",
+      "notes": "If derived from state_ts, classify the concrete output as derived."
+    },
+    {
+      "field_name": "hour_of_day_or_time_band",
+      "simulator_need": "Time-of-day simulator context.",
+      "availability_class": "derived",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "hour_of_day",
+        "service_hour",
+        "hour_sin",
+        "hour_cos",
+        "state_ts"
+      ],
+      "derivation_rule": "Use observed hour columns or derive hour from state_ts/hour_sin/hour_cos.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "timestamp or hour columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "time_band thresholds must be documented."
+    },
+    {
+      "field_name": "is_peak",
+      "simulator_need": "Peak/offpeak state context.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train",
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "is_peak"
+      ],
+      "derivation_rule": "Direct read from feature source.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "is_peak",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Observed as engineered feature, not raw operational label unless source documents it."
+    },
+    {
+      "field_name": "boardings_recent",
+      "simulator_need": "Recent boardings demand signal.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "boardings_recent",
+        "boardings_recent_log",
+        "boardings"
+      ],
+      "derivation_rule": "Direct read if raw count exists; log column requires inverse transform and should be treated as derived.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "boarding count/log columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Prefer raw count over log feature for KPI."
+    },
+    {
+      "field_name": "alightings_recent",
+      "simulator_need": "Recent alightings demand signal.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "alightings_recent",
+        "alightings_recent_log",
+        "alightings"
+      ],
+      "derivation_rule": "Direct read if raw count exists; log column requires inverse transform and should be treated as derived.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "alighting count/log columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Prefer raw count over log feature for KPI."
+    },
+    {
+      "field_name": "waiting_passenger_cnt",
+      "simulator_need": "Queue pressure state.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "waiting_passenger_cnt",
+        "waiting_passenger_cnt_log"
+      ],
+      "derivation_rule": "Direct read if raw count exists; log column requires inverse transform and should be treated as derived.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "waiting count/log columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Queue pressure is available as aggregate, not individual wait time."
+    },
+    {
+      "field_name": "next_boardings_recent",
+      "simulator_need": "Next-state boarding target.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "next_boardings_recent",
+        "next_boardings_recent_log"
+      ],
+      "derivation_rule": "Direct read if raw target exists; log column requires inverse transform.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "next boarding columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Transition target."
+    },
+    {
+      "field_name": "next_alightings_recent",
+      "simulator_need": "Next-state alighting target.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "next_alightings_recent",
+        "next_alightings_recent_log"
+      ],
+      "derivation_rule": "Direct read if raw target exists; log column requires inverse transform.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "next alighting columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Transition target."
+    },
+    {
+      "field_name": "next_waiting_passenger_cnt",
+      "simulator_need": "Next-state waiting target.",
+      "availability_class": "observed",
+      "source_relation": [
+        "public.rl_state_training_base",
+        "public.gatv2_snapshot_stop_features_train_mat",
+        "public.gatv2_snapshot_stop_features_train"
+      ],
+      "source_columns": [
+        "next_waiting_passenger_cnt",
+        "next_waiting_passenger_cnt_log"
+      ],
+      "derivation_rule": "Direct read if raw target exists; log column requires inverse transform.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": true,
+      "paper_level_claim_allowed": true,
+      "causal_performance_claim_allowed": true,
+      "missing_reason": "",
+      "required_source_data": "next waiting columns",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Transition target."
+    },
+    {
+      "field_name": "passenger_arrival_rate",
+      "simulator_need": "Passenger arrival process for v2 simulator.",
+      "availability_class": "proxy",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "boardings_recent",
+        "waiting_passenger_cnt",
+        "next_waiting_passenger_cnt"
+      ],
+      "derivation_rule": "Estimate from changes in aggregate counts over delta time; not observed arrival process.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "no passenger-level arrival timestamps",
+      "required_source_data": "arrival event or calibrated OD/arrival source",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Use only as proxy if documented."
+    },
+    {
+      "field_name": "passenger_queue_count",
+      "simulator_need": "Queue count state.",
+      "availability_class": "proxy",
+      "source_relation": [
+        "public.graph_state_timeslice",
+        "public.rl_state_training_base"
+      ],
+      "source_columns": [
+        "waiting_passenger_cnt"
+      ],
+      "derivation_rule": "Use waiting_passenger_cnt as queue proxy.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "queue count may not be direct passenger queue observation",
+      "required_source_data": "queue or waiting count source",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Aggregate queue pressure, not full queue process."
+    },
+    {
+      "field_name": "passenger_wait_age_distribution",
+      "simulator_need": "Wait-time distribution for p95 and long-wait metrics.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "wait_age_bucket",
+        "passenger_wait_seconds"
+      ],
+      "derivation_rule": "Cannot derive individual wait-age distribution from aggregate waiting count alone.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "no passenger-level or age-bucket wait data",
+      "required_source_data": "passenger wait age buckets or arrival/boarding timestamps",
+      "acquisition_path": "external_data_required",
+      "notes": "Needed for observed p95 wait."
+    },
+    {
+      "field_name": "passenger_wait_p95_seconds",
+      "simulator_need": "Long-wait KPI.",
+      "availability_class": "proxy",
+      "source_relation": [],
+      "source_columns": [
+        "passenger_wait_p95_seconds"
+      ],
+      "derivation_rule": "Can be approximated from proxy wait model, but not observed without wait distribution.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "no observed wait distribution",
+      "required_source_data": "passenger wait age distribution",
+      "acquisition_path": "external_data_required",
+      "notes": "Proxy p95 cannot support paper-level claim."
+    },
+    {
+      "field_name": "passenger_service_rate",
+      "simulator_need": "Fraction of generated demand served.",
+      "availability_class": "proxy",
+      "source_relation": [],
+      "source_columns": [
+        "passenger_demand_generated",
+        "passenger_served_count"
+      ],
+      "derivation_rule": "May be computed if demand and served counts are simulated; not observed unless both source counts are observed.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "observed generated demand and served counts not guaranteed",
+      "required_source_data": "passenger demand and served count source",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Can be simulator proxy/debug metric."
+    },
+    {
+      "field_name": "bus_id",
+      "simulator_need": "Vehicle identity.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "bus_id",
+        "vehicle_id"
+      ],
+      "derivation_rule": "No derivation from stop-level aggregate tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "vehicle IDs absent from tensor DB",
+      "required_source_data": "AVL or dispatch logs",
+      "acquisition_path": "external_data_required",
+      "notes": "Required for vehicle-level simulator realism."
+    },
+    {
+      "field_name": "vehicle_trajectory",
+      "simulator_need": "Vehicle movement path over time.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "bus_id",
+        "lat",
+        "lon",
+        "state_ts"
+      ],
+      "derivation_rule": "No derivation from aggregate stop snapshots.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "AVL trajectory absent",
+      "required_source_data": "AVL trajectory logs",
+      "acquisition_path": "external_data_required",
+      "notes": "Cannot claim real vehicle movement without this."
+    },
+    {
+      "field_name": "bus_arrival_time_at_stop",
+      "simulator_need": "Observed stop arrival event.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "arrival_time",
+        "arrive_ts"
+      ],
+      "derivation_rule": "No derivation from stop-level aggregate counts.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "stop arrival events absent",
+      "required_source_data": "AVL/APC stop event logs",
+      "acquisition_path": "external_data_required",
+      "notes": "Needed for observed headway."
+    },
+    {
+      "field_name": "bus_departure_time_at_stop",
+      "simulator_need": "Observed stop departure event.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "departure_time",
+        "depart_ts"
+      ],
+      "derivation_rule": "No derivation from stop-level aggregate counts.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "stop departure events absent",
+      "required_source_data": "AVL/APC stop event logs",
+      "acquisition_path": "external_data_required",
+      "notes": "Needed for observed dwell time."
+    },
+    {
+      "field_name": "headway_seconds",
+      "simulator_need": "Headway metric.",
+      "availability_class": "proxy",
+      "source_relation": [],
+      "source_columns": [
+        "arrival_time",
+        "state_ts",
+        "time_sec"
+      ],
+      "derivation_rule": "Can be approximated in simulator, but observed headway requires vehicle arrival events.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "actual bus arrival events missing",
+      "required_source_data": "bus arrival events",
+      "acquisition_path": "external_data_required",
+      "notes": "Proxy headway cannot support observed headway claim."
+    },
+    {
+      "field_name": "dwell_time_seconds",
+      "simulator_need": "Stop dwell time.",
+      "availability_class": "proxy",
+      "source_relation": [],
+      "source_columns": [
+        "boarding_count",
+        "alighting_count",
+        "departure_time",
+        "arrival_time"
+      ],
+      "derivation_rule": "Can be estimated by formula, but observed dwell requires arrival/departure events.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": true,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "arrival/departure stop events missing",
+      "required_source_data": "AVL/APC stop events",
+      "acquisition_path": "external_data_required",
+      "notes": "Formula dwell is assumed/proxy."
+    },
+    {
+      "field_name": "vehicle_capacity",
+      "simulator_need": "Vehicle capacity constraint.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "vehicle_capacity"
+      ],
+      "derivation_rule": "Use scenario constant unless fleet metadata exists.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "capacity metadata not in tensor DB",
+      "required_source_data": "fleet metadata",
+      "acquisition_path": "external_data_required",
+      "notes": "Assumed capacity cannot support observed load/crowding claims."
+    },
+    {
+      "field_name": "vehicle_load",
+      "simulator_need": "On-board passenger load.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "vehicle_load",
+        "onboard_count"
+      ],
+      "derivation_rule": "No vehicle-level passenger state in tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "vehicle load absent",
+      "required_source_data": "APC/AVL load data",
+      "acquisition_path": "external_data_required",
+      "notes": "Needed for crowding/capacity realism."
+    },
+    {
+      "field_name": "left_behind_passengers",
+      "simulator_need": "Unserved passengers due to capacity/skip.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "left_behind_passengers",
+        "unserved_count"
+      ],
+      "derivation_rule": "No direct left-behind source.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "left-behind observations absent",
+      "required_source_data": "APC/capacity/passenger event data",
+      "acquisition_path": "external_data_required",
+      "notes": "Can only be simulated without observed source."
+    },
+    {
+      "field_name": "active_bus_count",
+      "simulator_need": "Number of active buses in scenario.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "active_bus_count"
+      ],
+      "derivation_rule": "Scenario setting unless vehicle schedule source is available.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "active bus counts not observed in tensor DB",
+      "required_source_data": "schedule/fleet operation data",
+      "acquisition_path": "current_original_db",
+      "notes": "A/A90/A80/A70 can define this as scenario parameter."
+    },
+    {
+      "field_name": "baseline_bus_count",
+      "simulator_need": "Baseline fleet count for comparison.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "baseline_bus_count"
+      ],
+      "derivation_rule": "Scenario setting unless schedule/fleet source exists.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "baseline bus count not observed in tensor DB",
+      "required_source_data": "schedule/fleet operation data",
+      "acquisition_path": "current_original_db",
+      "notes": "Needed to define fleet ratio; claim remains restricted without observed operations."
+    },
+    {
+      "field_name": "fleet_reduction_ratio",
+      "simulator_need": "Fleet reduction scenario ratio.",
+      "availability_class": "derived",
+      "source_relation": [],
+      "source_columns": [
+        "active_bus_count",
+        "baseline_bus_count"
+      ],
+      "derivation_rule": "1 - active_bus_count / baseline_bus_count when both are defined in experiment contract.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "",
+      "required_source_data": "experiment-defined active/baseline counts",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Derived from experiment settings, not observed operational reduction."
+    },
+    {
+      "field_name": "hold_seconds",
+      "simulator_need": "Control action hold duration.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "hold_seconds"
+      ],
+      "derivation_rule": "Simulator action parameter, not observed unless event logs exist.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "hold events not observed in tensor DB",
+      "required_source_data": "control/action logs",
+      "acquisition_path": "not_available",
+      "notes": "Allowed as action variable, not observed KPI."
+    },
+    {
+      "field_name": "skip_stop_action_legality",
+      "simulator_need": "Whether skip-stop is legally/operationally allowed.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "skip_stop_action_legality"
+      ],
+      "derivation_rule": "Rule table or hand-coded policy needed.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "skip-stop legal constraints absent",
+      "required_source_data": "operation rulebook",
+      "acquisition_path": "external_data_required",
+      "notes": "Use only as rule assumption until sourced."
+    },
+    {
+      "field_name": "dispatch_action_legality",
+      "simulator_need": "Whether dispatch action is feasible.",
+      "availability_class": "assumed",
+      "source_relation": [],
+      "source_columns": [
+        "dispatch_action_legality"
+      ],
+      "derivation_rule": "Rule table or dispatch schedule needed.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "dispatch constraints absent",
+      "required_source_data": "dispatch schedule/rules",
+      "acquisition_path": "external_data_required",
+      "notes": "Use as action mask assumption only."
+    },
+    {
+      "field_name": "traffic_delay",
+      "simulator_need": "Dynamic traffic delay.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "traffic_delay",
+        "speed",
+        "congestion"
+      ],
+      "derivation_rule": "No dynamic traffic source in tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "dynamic traffic data absent",
+      "required_source_data": "traffic speed/delay data",
+      "acquisition_path": "external_data_required",
+      "notes": "Static time_sec is not observed dynamic delay."
+    },
+    {
+      "field_name": "signal_delay",
+      "simulator_need": "Traffic signal delay.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "signal_delay",
+        "signal_phase",
+        "cycle_length"
+      ],
+      "derivation_rule": "No signal timing/state source in tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "signal timing/state data absent",
+      "required_source_data": "signal timing or signal event data",
+      "acquisition_path": "external_data_required",
+      "notes": "Static signal locations alone do not give delay."
+    },
+    {
+      "field_name": "weather_event_effect",
+      "simulator_need": "Weather or special event demand/traffic modifier.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "weather",
+        "event_flag"
+      ],
+      "derivation_rule": "No weather/event source in tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "weather/event data absent",
+      "required_source_data": "weather/event data",
+      "acquisition_path": "external_data_required",
+      "notes": "External enrichment required."
+    },
+    {
+      "field_name": "incident_delay",
+      "simulator_need": "Incident delay effect.",
+      "availability_class": "missing",
+      "source_relation": [],
+      "source_columns": [
+        "incident",
+        "incident_delay"
+      ],
+      "derivation_rule": "No incident log source in tensor fields.",
+      "is_allowed_in_v2_required_contract": false,
+      "is_allowed_in_reward": false,
+      "is_allowed_in_kpi": false,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "incident log absent",
+      "required_source_data": "incident/roadwork logs",
+      "acquisition_path": "external_data_required",
+      "notes": "External enrichment required."
+    },
+    {
+      "field_name": "energy_proxy",
+      "simulator_need": "Energy proxy metric.",
+      "availability_class": "derived",
+      "source_relation": [
+        "public.gatv2_edge_primary_active_mat",
+        "public.gatv2_edge_primary_active"
+      ],
+      "source_columns": [
+        "distance_m",
+        "hold_seconds",
+        "acceleration_event_count"
+      ],
+      "derivation_rule": "Compute from documented proxy formula if inputs are available or scenario-defined.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "",
+      "required_source_data": "distance plus scenario/action terms",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Proxy energy is not observed energy use."
+    },
+    {
+      "field_name": "energy_proxy_per_passenger",
+      "simulator_need": "Passenger-normalized energy proxy.",
+      "availability_class": "derived",
+      "source_relation": [],
+      "source_columns": [
+        "energy_proxy",
+        "passenger_served_count"
+      ],
+      "derivation_rule": "energy_proxy / max(passenger_served_count, epsilon) when both are defined.",
+      "is_allowed_in_v2_required_contract": true,
+      "is_allowed_in_reward": true,
+      "is_allowed_in_kpi": true,
+      "proxy_kpi": false,
+      "observed_kpi": false,
+      "paper_level_claim_allowed": false,
+      "causal_performance_claim_allowed": false,
+      "missing_reason": "",
+      "required_source_data": "energy proxy and served count",
+      "acquisition_path": "current_tensor_db",
+      "notes": "Derived proxy; claim remains restricted."
+    }
+  ]
+}

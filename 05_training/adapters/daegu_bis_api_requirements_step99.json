@@ -1,0 +1,62 @@
+{
+  "artifact_version": "daegu_bis_api_requirements_step99_v1",
+  "step": "Step 99 — Daegu BIS API data acquisition audit",
+  "created_at_utc": "2026-04-28T00:00:00Z",
+  "scope": "feasibility_audit_only",
+  "paper_level_claim_allowed": false,
+  "causal_performance_claim_allowed": false,
+  "fleet_reduction_claim_allowed": false,
+  "api_daily_limit_guard": {
+    "development_account_limit_per_day": 1000,
+    "max_routes_in_step99a": 3,
+    "bulk_collection_allowed": false,
+    "full_route_collection_allowed": false
+  },
+  "guardrails": {
+    "db_write_allowed": false,
+    "tensor_db_overwrite_allowed": false,
+    "csv_reload_allowed": false,
+    "api_key_hardcoding_allowed": false,
+    "self_test_must_pass_without_api_key": true
+  },
+  "target_apis": [
+    {
+      "step": "Step 99-A",
+      "endpoint_name": "/getBs02",
+      "korean_name": "노선별 경유 정류장 정보 조회 서비스",
+      "purpose": "route_id / direction_id / ordered_stop_sequence acquisition feasibility",
+      "required_for_route_aware_simulator": true,
+      "call_strategy": "sample_only_1_to_3_routes",
+      "expected_candidate_fields": [
+        "route_id",
+        "direction_id_or_move_dir_code_or_direction_label",
+        "stop_id",
+        "stop_name",
+        "stop_order_or_sequence"
+      ],
+      "promotion_rule": {
+        "route_id": "observed_candidate if response contains route_id-like field and matches route catalog/DB",
+        "direction_id": "observed_candidate or partial_observed_candidate if direction-equivalent field exists",
+        "ordered_stop_sequence": "observed_candidate only if stop_id and sequence/order are both present and graph coverage is acceptable"
+      }
+    },
+    {
+      "step": "Step 99-B",
+      "endpoint_name": "/getBasic02",
+      "purpose": "master snapshot audit",
+      "status": "planned_not_implemented_in_step99a"
+    },
+    {
+      "step": "Step 99-C",
+      "endpoint_name": "/getPos02",
+      "purpose": "live bus position sampling plan",
+      "status": "planned_not_implemented_in_step99a"
+    },
+    {
+      "step": "Step 99-D",
+      "endpoint_name": "/getRealtime02",
+      "purpose": "ETA sampling plan",
+      "status": "planned_not_implemented_in_step99a"
+    }
+  ]
+}
