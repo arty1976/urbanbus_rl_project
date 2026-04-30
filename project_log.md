@@ -4692,3 +4692,70 @@ operator_approval_granted = false
 - documentation_only = true
 - actual_execution_released = false
 
+<!-- STEP_158_OBSERVABILITY_H200_PENDING_PROJECT_LOG_UPDATE_START -->
+
+## 📅 2026-04-30 — Step 158 Observability + H200 Pending Project Log Update
+
+### Summary
+
+Step 158 closes the local observability preparation record after Step 152~157 and explicitly records that the real H200 server is not available yet.
+
+Current final local status:
+
+```text
+LOCAL_PREPARATION_AND_OBSERVABILITY_HANDOFF_COMPLETE
+WAITING_FOR_H200_SERVER_AVAILABILITY
+```
+
+Blocking reason:
+
+```text
+H200_SERVER_NOT_AVAILABLE_YET
+```
+
+### Observability scaffold status
+
+- Step 152 — H200 monitoring dashboard contract: manifest=present, status=match, locks=locked_ok
+- Step 153 — H200 TensorBoard + JSONL logger integration: manifest=present, status=match, locks=locked_ok
+- Step 154 — H200 nvidia-smi GPU monitor logger scaffold: manifest=present, status=match, locks=locked_ok
+- Step 155 — H200 observability dashboard index / status page: manifest=present, status=match, locks=locked_ok
+- Step 156 — H200 observability operator runbook: manifest=present, status=match, locks=locked_ok
+- Step 157 — H200 observability handoff packet index: manifest=present, status=match, locks=locked_ok
+
+### Locked guard state
+
+```text
+actual_execution_allowed = false
+actual_execution_released = false
+train_allowed = false
+live_mutation_allowed = false
+actual_results = false
+winner_selected = false
+trainable_reward_promoted = false
+operator_approval_recorded = false
+operator_approval_granted = false
+paper_level_claim_allowed = false
+causal_performance_claim_allowed = false
+```
+
+### Interpretation
+
+The local notebook has completed the monitoring-only observability scaffold and handoff documentation. However, the actual H200 Step 149 `--expect-h200` preflight cannot be executed until the real H200 server is available.
+
+No local placeholder, mock, expected checklist, or simulated GPU result may be substituted for the real H200 preflight manifest.
+
+### Next external gate
+
+```text
+WAITING_FOR_REAL_H200_STEP149_EXPECT_H200_RESULT
+```
+
+The next real action remains execution of Step 149 on the real H200 server:
+
+```bash
+python 05_training/rewards/h200_environment_preflight_result_manifest_step149.py   --project-root /workspace/urbanbus_rl_project   --expect-h200   --min-gpu-count 1   --output-root artifacts/rewards/h200_environment_preflight_result_manifest_step149_h200_actual
+```
+
+Generated at UTC: `2026-04-30T13:45:29.628138+00:00`
+
+<!-- STEP_158_OBSERVABILITY_H200_PENDING_PROJECT_LOG_UPDATE_END -->
