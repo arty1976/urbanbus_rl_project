@@ -60,3 +60,5 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+# Runtime latest manifest pointers
+05_training/rewards/*.latest.json
