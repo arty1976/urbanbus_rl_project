@@ -1,0 +1,14 @@
+{
+  "artifact_version": "reward_execution_gate_project_log_update_step138_v1",
+  "step": 138,
+  "created_at_utc": "2026-04-30T01:04:27.435145+00:00",
+  "audit_status": "PASS",
+  "project_log_updated": true,
+  "manifest_path": "C:\\Users\\ryujo\\urbanbus_rl_project\\artifacts\\rewards\\reward_execution_gate_project_log_update_step138\\reward_execution_gate_project_log_update_step138_manifest.json",
+  "actual_execution_allowed": false,
+  "actual_results": false,
+  "winner_selected": false,
+  "train_with_this_reward_allowed": false,
+  "paper_level_claim_allowed": false,
+  "causal_performance_claim_allowed": false
+}

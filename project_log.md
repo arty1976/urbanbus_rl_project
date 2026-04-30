@@ -141,7 +141,6 @@
 - Step 109: canonical 12-KPI 확장과 route-aware v2 연결 여부 재점검.
 <!-- STEP104_ROUTE_AWARE_V2_LOG_END -->
 
-
 ### 1. Phase 2 causal simulator 구조 확장
 Phase 1 full-year replay-backed canonical validation 통과 이후, Phase 2에서는 `HistoricalReplayAdapter` 기반 non-causal replay 검증과 별도로 정책 action이 다음 상태에 영향을 주는 `CausalSimulatorAdapter` 경로를 확장하였다.
 
@@ -4496,3 +4495,145 @@ Step 106:
 Current DB ridership lineage documentation or fact-to-tensor transformation rule inspection
 
 <!-- STEP_105_RIDERSHIP_2023_DB_INCLUSION_DECISION_END -->
+
+<!-- STEP130_REWARD_PIPELINE_STATUS_START -->
+## Step 130 ??Reward pipeline status update
+
+?묒꽦 ?쒓컖(UTC): 2026-04-30T00:23:17+00:00
+
+### 紐⑹쟻
+
+Step 111遺??Step 129源뚯? ?댁뼱吏?reward ?ㅺ퀎쨌寃利씲룹떎?됱?鍮?pipeline??project log??怨좎젙?쒕떎. ??湲곕줉? reward ?꾨낫援곗씠 ?뺤쓽?섏뿀?붾씪???꾩쭅 ?ㅼ젣 reward ablation 寃곌낵媛 ?녾퀬, ?곕씪??winner ?좏깮쨌reward ?밴꺽쨌MAPPO ?숈뒿 ?덉슜??紐⑤몢 湲덉? ?곹깭?꾩쓣 紐낇솗???④린湲??꾪븳 寃껋씠??
+
+### ?ы븿???④퀎
+
+- Step111 final reward specification draft
+- Step112 reward candidate protocol
+- Step113 reward normalization baseline lock
+- Step114 hard constraint review
+- Step115 reward ablation matrix
+- Step116 trainable reward promotion gate
+- Step117 reward ablation result schema
+- Step118 reward ablation result writer guard
+- Step119 reward ablation runner dry-run plan
+- Step120 reward ablation execution preflight
+- Step121 reward ablation execution manifest
+- Step122 reward ablation sandbox no-op runner guard
+- Step123 reward ablation no-op result ingestion guard
+- Step124 reward ablation actual result schema bridge
+- Step125 reward ablation selection criteria gate
+- Step126 reward ablation actual result ingestion preflight
+- Step127 trainable reward promotion decision package
+- Step128 reward pipeline actual ablation wait state
+- Step129 actual reward ablation runbook
+
+### ?꾩옱 reward pipeline ?곹깭
+
+- reward spec: `draft_not_trainable`
+- candidate matrix: `R0_to_R5_defined`
+- normalization reference: `B1_noop_reference_name_locked_numeric_values_not_locked`
+- hard constraints: `reviewed_not_training_unlock`
+- dry-run plan rows: `72`
+- execution manifest rows: `72`
+- sandbox runner: `noop_only`
+- actual result ingestion: `not_ingested`
+- promotion decision: `not_promoted`
+- runbook: `ready_not_executed`
+
+### Reward ablation matrix
+
+- candidates: `R0, R1, R2, R3, R4, R5`
+- conditions: `A, A90, A80, A70`
+- seeds: `1, 2, 3`
+- expected actual ablation runs: `72`
+
+### ?좎??섎뒗 guard flags
+
+- `actual_execution_started` = `false`
+- `actual_results` = `false`
+- `actual_ablation_data_available` = `false`
+- `winner_selected` = `false`
+- `trainable_reward_promoted` = `false`
+- `train_with_this_reward_allowed` = `false`
+- `actual_training_allowed` = `false`
+- `final_reward_design_claim_allowed` = `false`
+- `best_reward_claim_allowed` = `false`
+- `paper_level_claim_allowed` = `false`
+- `causal_performance_claim_allowed` = `false`
+
+### ?댁꽍
+
+?꾩옱源뚯????묒뾽? reward ?꾨낫 ?ㅺ퀎, ?꾨낫援?鍮꾧탳 怨꾪쉷, 寃곌낵 schema, dry-run plan, execution manifest, no-op guard, actual-result ingestion preflight, promotion decision package, actual ablation runbook??以鍮꾪븳 寃껋씠?? ?섏?留??ㅼ젣 reward ablation 寃곌낵???꾩쭅 議댁옱?섏? ?딅뒗??
+
+?곕씪???ㅼ쓬 二쇱옣? 紐⑤몢 湲덉??쒕떎.
+
+- R0~R5 以??뱀젙 reward媛 理쒓퀬?쇰뒗 二쇱옣
+- trainable reward媛 ?밴꺽?섏뿀?ㅻ뒗 二쇱옣
+- ?꾩옱 reward ?꾨낫濡?MAPPO ?숈뒿???쒖옉?대룄 ?쒕떎??二쇱옣
+- ?쇰Ц ?섏? ?깅뒫 媛쒖꽑 二쇱옣
+- causal performance claim
+
+### ?ㅼ쓬 ?곹깭
+
+`READY_FOR_STEP131_ACTUAL_ABLATION_EXECUTION_ENV_PREFLIGHT_OR_PUSH_SYNC`
+
+<!-- STEP130_REWARD_PIPELINE_STATUS_END -->
+
+<!-- STEP138_REWARD_EXECUTION_GATE_UPDATE_START -->
+
+## Step 138 - Reward execution gate project log update
+
+Created at UTC: `2026-04-30T01:04:27.435145+00:00`
+
+### Scope
+
+Step 138 records the reward ablation execution gate status after Step 131 through Step 137.
+This is a project-log update only. It does not run actual reward ablation.
+
+### Completed gate chain
+
+- Step 131: actual reward ablation execution environment preflight
+- Step 132: reward ablation command dry-run executor
+- Step 133: actual reward ablation runner guard
+- Step 134: command-to-guarded-runner integration
+- Step 135: actual execution readiness lock
+- Step 136: actual execution release request package
+- Step 137: actual runner implementation review gate
+
+### Manifest status summary
+
+| Step | Name | Audit status | Extra status | Manifest |
+|---:|---|---|---|---|
+| 131 | step131_environment_preflight | PASS |  | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\reward_ablation_execution_environment_preflight_step131\reward_ablation_execution_environment_preflight_step131_manifest.json` |
+| 132 | step132_command_dry_run | PASS |  | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\reward_ablation_command_dry_run_executor_step132\reward_ablation_command_dry_run_executor_step132_manifest.json` |
+| 134 | step134_command_runner_integration | PASS |  | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\reward_ablation_command_runner_integration_step134\reward_ablation_command_runner_integration_step134_manifest.json` |
+| 135 | step135_readiness_lock | PASS | LOCKED_READY_FOR_EXPLICIT_RELEASE | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\reward_ablation_actual_execution_readiness_lock_step135\reward_ablation_actual_execution_readiness_lock_step135_manifest.json` |
+| 136 | step136_release_request_package | PASS | REQUEST_PACKAGE_CREATED_PENDING_OPERATOR_APPROVAL | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\reward_ablation_actual_execution_release_request_step136\reward_ablation_actual_execution_release_request_step136_manifest.json` |
+| 137 | step137_runner_implementation_review | PASS | RUNNER_GUARD_REVIEW_PASS_ACTUAL_STILL_LOCKED | `C:\Users\ryujo\urbanbus_rl_project\artifacts\rewards\actual_reward_ablation_runner_implementation_review_step137\actual_reward_ablation_runner_implementation_review_step137_manifest.json` |
+
+### Locked guard state
+
+- actual_execution_allowed = false
+- actual_execution_released = false
+- actual_executed = false
+- actual_results = false
+- reward_result_written = false
+- winner_selected = false
+- trainable_reward_promoted = false
+- train_with_this_reward_allowed = false
+- actual_training_allowed = false
+- final_reward_design_claim_allowed = false
+- best_reward_claim_allowed = false
+- paper_level_claim_allowed = false
+- causal_performance_claim_allowed = false
+
+### Interpretation
+
+The reward ablation execution path is prepared through dry-run commands, guarded runner checks, readiness lock, release request packaging, and runner implementation review.
+However, actual execution remains locked. No reward ablation result exists yet, no winner has been selected, no reward has been promoted for MAPPO training, and no paper-level or causal-performance claim is allowed.
+
+### Recommended next step
+
+Step 139 should either update the project log commit/push status or define an explicit release-manifest design only if the operator is ready to unlock actual execution in a separate controlled step.
+
+<!-- STEP138_REWARD_EXECUTION_GATE_UPDATE_END -->
