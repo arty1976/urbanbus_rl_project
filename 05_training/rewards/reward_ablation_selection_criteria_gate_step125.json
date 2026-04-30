@@ -1,0 +1,68 @@
+﻿{
+  "artifact_version": "reward_ablation_selection_criteria_gate_step125_v1",
+  "step": 125,
+  "gate_status": "SELECTION_CRITERIA_DEFINED_NO_WINNER_SELECTED",
+  "purpose": "Define how a future reward ablation winner may be selected, without selecting any winner in this step.",
+  "candidate_ids": ["R0", "R1", "R2", "R3", "R4", "R5"],
+  "condition_ids": ["A", "A90", "A80", "A70"],
+  "seeds": [1, 2, 3],
+  "required_actual_result_rows": 72,
+  "selection_readiness": {
+    "actual_results_required": true,
+    "noop_results_allowed_for_selection": false,
+    "template_results_allowed_for_selection": false,
+    "dry_run_results_allowed_for_selection": false,
+    "winner_selected": false,
+    "winner_selection_allowed_now": false,
+    "train_with_selected_reward_allowed": false
+  },
+  "primary_selection_principles": {
+    "service_quality_first": true,
+    "hard_constraints_must_pass": true,
+    "no_energy_saving_by_stranding_passengers": true,
+    "long_wait_fairness_required": true,
+    "fleet_reduction_bonus_only": true,
+    "energy_fleet_secondary": true
+  },
+  "hard_constraint_requirements": [
+    "passenger_service_rate_floor_passed",
+    "avg_wait_regression_cap_passed",
+    "p95_wait_regression_cap_passed",
+    "qwen_off_for_A_family_passed",
+    "no_actual_observation_overclaim_passed"
+  ],
+  "selection_tiers": [
+    {"tier": 1, "name": "eligibility_filter", "description": "Only actual, complete, hard-constraint-passing results can be eligible."},
+    {"tier": 2, "name": "service_quality_rank", "description": "Prioritize passenger service rate, wait, p95 wait, bunching, headway CV, and on-time rate."},
+    {"tier": 3, "name": "efficiency_secondary_rank", "description": "Use energy per passenger and fleet reduction only as secondary tie-breakers."},
+    {"tier": 4, "name": "stability_and_seed_robustness", "description": "Prefer lower seed variance and no condition-specific collapse."}
+  ],
+  "disqualifying_conditions": [
+    "Any hard constraint failure",
+    "Any missing candidate/condition/seed result row",
+    "Any actual_result=false row",
+    "Any trained_model=false row",
+    "Any paper_level_claim_allowed=true before later evidence gate",
+    "Any causal_performance_claim_allowed=true before later evidence gate",
+    "Any reward candidate that improves energy by reducing passenger_service_rate below floor",
+    "Any winner chosen from no-op, template, mock, smoke-only, or dry-run outputs"
+  ],
+  "scorecard_columns_required_for_future_selection": [
+    "candidate_id", "eligible", "actual_result_count", "hard_constraint_failure_count",
+    "passenger_service_rate_mean", "avg_wait_seconds_mean", "passenger_wait_p95_seconds_mean",
+    "bunching_rate_mean", "cv_headway_mean", "on_time_rate_mean",
+    "energy_proxy_per_passenger_mean", "fleet_reduction_ratio_mean",
+    "seed_variance_summary", "selection_rank", "selection_reason", "winner_selected"
+  ],
+  "guard_flags": {
+    "actual_results": false,
+    "winner_selected": false,
+    "winner_selection_allowed_now": false,
+    "train_with_this_reward_allowed": false,
+    "actual_training_allowed": false,
+    "paper_level_claim_allowed": false,
+    "causal_performance_claim_allowed": false,
+    "best_reward_claim_allowed": false
+  },
+  "next_status": "READY_FOR_STEP126_REWARD_ABLATION_ACTUAL_RESULT_INGESTION_PREFLIGHT"
+}
