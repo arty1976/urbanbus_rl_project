@@ -1,3 +1,5 @@
+
+# B2 rule trigger calibration v1: low=520, high=780, night_budget=1
 import argparse
 import hashlib
 import json
@@ -12,13 +14,13 @@ DEFAULT_SIMULATOR_ADAPTER = "adapters.historical_replay_adapter.HistoricalReplay
 
 DEFAULT_RULE_CONFIG = {
     "target_headway_seconds": 600,
-    "low_headway_threshold_seconds": 360,
-    "high_headway_threshold_seconds": 900,
+    "low_headway_threshold_seconds": 520,
+    "high_headway_threshold_seconds": 780,
     "max_hold_seconds": 120,
     "allow_skip": True,
     "peak_intervention_budget": 2,
     "offpeak_intervention_budget": 1,
-    "night_intervention_budget": 0,
+    "night_intervention_budget": 1,
 }
 
 REQUIRED_SCENARIO_COLUMNS = ["window_id", "state_ts", "service_date", "time_band"]
@@ -142,7 +144,7 @@ def intervention_budget(time_band: str, cfg: Dict[str, Any]) -> int:
     if tb == "peak":
         return int(cfg.get("peak_intervention_budget", 2))
     if tb == "night":
-        return int(cfg.get("night_intervention_budget", 0))
+        return int(cfg.get("night_intervention_budget", 1))
     return int(cfg.get("offpeak_intervention_budget", 1))
 
 
@@ -164,8 +166,8 @@ def choose_rule_actions(
     but it does not change the replayed next state.
     """
     headway = proxy_headway_seconds(seed, window_id, time_band)
-    low = float(cfg.get("low_headway_threshold_seconds", 360))
-    high = float(cfg.get("high_headway_threshold_seconds", 900))
+    low = float(cfg.get("low_headway_threshold_seconds", 520))
+    high = float(cfg.get("high_headway_threshold_seconds", 780))
     allow_skip = bool(cfg.get("allow_skip", True))
     budget = max(0, min(len(agent_ids), intervention_budget(time_band, cfg)))
 
