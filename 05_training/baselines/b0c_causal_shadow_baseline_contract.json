@@ -1,0 +1,75 @@
+﻿{
+    "artifact_version":  "b0c_causal_shadow_baseline_contract_v1",
+    "contract_status":  "DRAFT_LOCKED_NOT_EXECUTED",
+    "condition_id":  "B0C",
+    "baseline_id":  "B0C_causal_shadow_v1",
+    "baseline_family":  "causal_shadow",
+    "parent_reference":  "B0R_historical_12kpi_compat",
+    "policy":  {
+                   "policy_source":  "historical_shadow_policy",
+                   "source_mode_target":  "causal_B0C_historical_shadow_v1",
+                   "action_mode":  "maintain_no_learned_intervention",
+                   "learned_policy":  false,
+                   "rule_based_policy":  false,
+                   "qwen_train":  false,
+                   "qwen_inference":  false,
+                   "qwen_trigger_rate":  0,
+                   "active_bus_ratio":  1,
+                   "fleet_reduction_ratio":  0
+               },
+    "evaluation":  {
+                       "evaluation_horizon_minutes":  30,
+                       "seeds":  [
+                                     1,
+                                     2,
+                                     3
+                                 ],
+                       "time_bands":  [
+                                          "peak",
+                                          "offpeak",
+                                          "night"
+                                      ],
+                       "kpi_schema":  [
+                                          "cv_headway",
+                                          "avg_wait_seconds",
+                                          "bunching_rate",
+                                          "on_time_rate",
+                                          "intervention_rate",
+                                          "energy_proxy",
+                                          "passenger_demand_generated",
+                                          "passenger_served_count",
+                                          "passenger_service_rate",
+                                          "passenger_wait_p95_seconds",
+                                          "energy_proxy_per_passenger",
+                                          "fleet_reduction_ratio"
+                                      ]
+                   },
+    "required_outputs":  [
+                             "raw_events.parquet",
+                             "window_rollup.parquet",
+                             "run_manifest.json",
+                             "status.json",
+                             "canonical_eval/kpi_by_window.parquet",
+                             "canonical_eval/kpi_by_seed.parquet",
+                             "canonical_eval/kpi_by_time_band.parquet",
+                             "canonical_eval/kpi_overall.json",
+                             "canonical_eval/aggregation_manifest.json"
+                         ],
+    "claim_guards":  {
+                         "causal_simulator_target":  true,
+                         "causal_comparison_allowed":  false,
+                         "causal_comparison_allowed_reason":  "Contract only. Requires B0C rollout, canonical aggregation, calibration sanity check, and simulator validation tolerance report.",
+                         "paper_level_claim_allowed":  false,
+                         "actual_results":  false,
+                         "winner_selected":  false,
+                         "trainable_reward_promoted":  false
+                     },
+    "success_gates":  [
+                          "B0C-1 contract validation PASS",
+                          "B0C-2 rollout writer PASS",
+                          "B0C-3 canonical 12-KPI aggregation PASS",
+                          "B0C-4 B0R vs B0C calibration sanity check PASS",
+                          "B0C-5 simulator validation tolerance report PASS"
+                      ],
+    "non_claim_statement":  "B0C is not observed historical operation. It is a simulator-generated causal-shadow baseline."
+}
