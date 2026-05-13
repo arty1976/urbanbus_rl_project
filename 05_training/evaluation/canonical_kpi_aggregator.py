@@ -58,6 +58,10 @@ NON_CAUSAL_SOURCE_MODES = {
     "replay_b1_noop_noncausal",
     "replay_b2_rulebased_noncausal",
     "replay_A_pure_mappo_noncausal",
+    "noncausal_B0C_causal_shadow_scaffold_not_validated_v1",
+
+    "causal_B0C_historical_shadow_v1_not_validated",
+
 }
 
 REQUIRED_OFFICIAL_COLUMNS = [
@@ -710,7 +714,7 @@ def compute_official_kpi_by_window(raw: pd.DataFrame) -> pd.DataFrame:
     df["computation_mode"] = "official_rollup"
 
     source_lower = df["source_mode"].astype(str).str.lower()
-    non_causal_pattern = "historical|legacy|stub|replay|smoke|non_causal|non-causal"
+    non_causal_pattern = "historical|legacy|stub|replay|smoke|noncausal|non_causal|non-causal|not_validated"
     df["causal_comparison_allowed"] = ~source_lower.str.contains(
         non_causal_pattern,
         regex=True,
