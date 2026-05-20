@@ -3,7 +3,24 @@
     "allow": [
       "Bash(ls -la artifacts/)",
       "Bash(ls -la 05_training/evaluation/)",
-      "Bash(python 05_training/run_b1_noop_rollout.py --help)"
+      "Bash(python 05_training/run_b1_noop_rollout.py --help)",
+      "Bash(Get-ChildItem -Directory)",
+      "Bash(Select-Object Name)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\ryujo\\\\urbanbus_onprem_solution\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\(\"C:\\\\Users\\\\ryujo\\\\urbanbus_onprem_solution\\\\\", \"\"\\) } | Sort-Object)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\ryujo\\\\urbanbus_onprem_solution\\\\engine_core\\\\config\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)",
+      "Bash(ls C:/Users/ryujo/urbanbus_rl_project/ 2>/dev/null || echo \"NOT FOUND\")",
+      "Bash(python -m pytest tests/contract/test_daegu_adapter_v1.py -v)",
+      "Bash(python -m pytest tests/contract/ -v --tb=short)",
+      "Bash(git checkout *)",
+      "Bash(ruff check *)",
+      "Bash(python -m pytest tests/contract/test_daegu_adapter_v1.py -q)",
+      "Bash(git merge *)"
     ]
   }
 }
