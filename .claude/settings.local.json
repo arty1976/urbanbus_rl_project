@@ -20,7 +20,14 @@
       "Bash(git checkout *)",
       "Bash(ruff check *)",
       "Bash(python -m pytest tests/contract/test_daegu_adapter_v1.py -q)",
-      "Bash(git merge *)"
+      "Bash(git merge *)",
+      "Bash(python3 -)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 05_training/run_prompt5_e01_r2d1r_estimation_result_audit_non_identification_freeze.py)",
+      "Bash(.venv/bin/python -c \"import sys,pandas,pyarrow;print\\(sys.version\\);print\\(pandas.__version__,pyarrow.__version__\\)\")",
+      "Bash(.venv/bin/python 05_training/run_prompt5_e01_r2d1r_estimation_result_audit_non_identification_freeze.py)",
+      "Bash(.venv/bin/python)",
+      "Bash(/Users/arty/Documents/Codex/urbanbus_rl_project/.venv/bin/python -)"
     ]
   }
 }

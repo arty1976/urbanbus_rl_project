@@ -1,0 +1,9 @@
+torch
+torch-geometric
+numpy
+pandas
+sqlalchemy
+psycopg2-binary
+pyarrow
+pyyaml
+pytest

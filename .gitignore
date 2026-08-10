@@ -65,3 +65,8 @@ Thumbs.db
 
 # Runtime/API sampling outputs
 1000005000/
+
+# Secrets — BIS/data.go.kr service key must never be committed
+.env
+.env.*
+*.env

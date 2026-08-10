@@ -27,6 +27,9 @@ EXPECTED_SHARED_KPIS = [
     "energy_proxy",
 ]
 
+PV8_REWARD_SEMANTICS_VERSION = "PV8_REWARD_SEMANTICS_V2"
+PV8_REWARD_V2_FREEZE_SHA256 = "966d3d8b091b87b033d2203cfb721983a5e66f77fe247e42885153a3b7fc3161"
+
 
 def load_json_any_encoding(path: Path) -> Dict[str, Any]:
     for enc in ("utf-8-sig", "utf-8"):
@@ -129,6 +132,41 @@ def maybe_pyg_batch(data_list: List[Any]) -> Optional[Any]:
     if Batch is None:
         return None
     return Batch.from_data_list(data_list)
+
+
+def validate_reward_v2_transition_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    required = [
+        "transition_id",
+        "reward_total",
+        "reward_service_component_weighted",
+        "reward_avg_wait_component_weighted",
+        "reward_intervention_component_weighted",
+        "reward_semantics_version",
+        "reward_freeze_sha256",
+    ]
+    missing = [key for key in required if payload.get(key) is None]
+    if missing:
+        raise RuntimeError(f"Reward V2 transition payload missing fields: {missing}")
+    if str(payload.get("reward_semantics_version")) != PV8_REWARD_SEMANTICS_VERSION:
+        raise RuntimeError("Reward V2 transition semantics version mismatch")
+    if str(payload.get("reward_freeze_sha256")) != PV8_REWARD_V2_FREEZE_SHA256:
+        raise RuntimeError("Reward V2 transition freeze hash mismatch")
+    if payload.get("p95_local_transition_owner") not in (None, "NONE"):
+        raise RuntimeError("p95 must not have a local transition owner in Reward V2")
+    if bool(payload.get("blanket_SKIP_penalty_applied", False)):
+        raise RuntimeError("blanket SKIP penalty is forbidden in Reward V2")
+    if bool(payload.get("direct_time_band_reward_term_applied", False)):
+        raise RuntimeError("direct time-band reward term is forbidden in Reward V2")
+    return {
+        "transition_id": str(payload["transition_id"]),
+        "reward_semantics_version": PV8_REWARD_SEMANTICS_VERSION,
+        "reward_freeze_sha256": PV8_REWARD_V2_FREEZE_SHA256,
+        "reward_total": float(payload["reward_total"]),
+        "reward_service_component_weighted": float(payload["reward_service_component_weighted"]),
+        "reward_avg_wait_component_weighted": float(payload["reward_avg_wait_component_weighted"]),
+        "reward_intervention_component_weighted": float(payload["reward_intervention_component_weighted"]),
+        "transition_owner_present": True,
+    }
 
 
 @dataclass
@@ -384,11 +422,16 @@ class MAPPOExperimentRunner:
             try:
                 dummy_actions = {agent_id: 0 for agent_id in obs["agent_ids"]}
                 step_result = adapter.step(dummy_actions)
+                reward_v2_payload = step_result.info.get("reward_v2_transition_payload")
+                reward_v2_validation = None
+                if reward_v2_payload is not None:
+                    reward_v2_validation = validate_reward_v2_transition_payload(dict(reward_v2_payload))
                 smoke_step_info = {
                     "terminated": step_result.terminated,
                     "truncated": step_result.truncated,
                     "reward_agent_count": len(step_result.rewards),
                     "effective_replay_step_minutes": step_result.info.get("effective_replay_step_minutes", 60),
+                    "reward_v2_transition_validation": reward_v2_validation,
                 }
             except Exception as step_exc:
                 smoke_step_info = {
