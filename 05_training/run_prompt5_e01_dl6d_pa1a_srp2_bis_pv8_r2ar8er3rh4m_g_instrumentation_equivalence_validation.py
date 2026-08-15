@@ -1578,19 +1578,24 @@ def shadow_training_separation_audit(created_at: str, recorder: TraceRecorder, s
         and all("PAIRED_COUNTERFACTUAL_SHADOW_TRACE" not in str(p) for p in actual_paths)
         and all("ACTUAL_ON_POLICY_TRACE" not in str(p) for p in shadow_paths),
         "shadow_pair_ids_absent_from_ppo_population": optimizer_population_uids.isdisjoint(shadow_pair_ids),
-        "shadow_data_entered_training": False,
-        "reward_normalizer_shadow_update": False,
-        "return_normalizer_shadow_update": False,
-        "critic_shadow_training": False,
-        "ppo_shadow_training": False,
+        "shadow_data_absent_from_training": True,
+        "reward_normalizer_not_updated_by_shadow": True,
+        "return_normalizer_not_updated_by_shadow": True,
+        "critic_not_trained_on_shadow": True,
+        "ppo_not_trained_on_shadow": True,
     }
     return {
         "stage": STAGE,
         "created_at": created_at,
-        "shadow_training_separation_passed": all(
-            value if key != "shadow_data_entered_training" else not value for key, value in checks.items()
-        ),
+        "shadow_training_separation_passed": all(checks.values()),
         "checks": checks,
+        "negative_observations": {
+            "shadow_data_entered_training": False,
+            "reward_normalizer_shadow_update": False,
+            "return_normalizer_shadow_update": False,
+            "critic_shadow_training": False,
+            "ppo_shadow_training": False,
+        },
         "shadow_smoke_result": shadow_result,
         "actual_trace_file_count": len(actual_paths),
         "shadow_trace_file_count": len(shadow_paths),
