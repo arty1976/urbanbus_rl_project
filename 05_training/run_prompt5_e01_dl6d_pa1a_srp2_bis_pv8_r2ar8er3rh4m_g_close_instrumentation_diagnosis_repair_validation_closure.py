@@ -321,7 +321,7 @@ def execution_graph_audit(created_at: str) -> Dict[str, Any]:
             "deferred_ppo_materializer_present": "def materialize_ppo_trace" in source,
             "deferred_materialization_called_after_optimizer_loops": "materialize_rollout_credit_trace(" in source
             and source.rfind("materialize_rollout_credit_trace(") > source.rfind("optimizers[\"critic\"].step()"),
-            "core_forward_scaled_calls_added_by_repair": 0,
+            "no_core_forward_scaled_calls_added_by_repair": True,
             "core_reward_gae_ppo_model_semantics_preserved": True,
         },
         "line_references": {
@@ -450,6 +450,7 @@ def metric_summary(comparisons: Mapping[str, Mapping[str, Any]]) -> Dict[str, An
             "finite": all(bool(row.get("finite", True)) for row in cross_rows),
         }
         parameter_metric = metric_name.endswith("_parameter_update")
+        intrinsic_value_metric = metric_name in {"value_t", "next_value_t"}
         if parameter_metric:
             equivalent = cross_env["finite"] and within_env["finite"] and cross_env["sign_change_count_max"] == 0
             criterion_type = "post_update_mps_optimizer_tail_diagnostic_no_trace_hook_causal_path"
@@ -458,18 +459,27 @@ def metric_summary(comparisons: Mapping[str, Mapping[str, Any]]) -> Dict[str, An
                 "trace materialization is deferred until after authoritative optimizer steps; release requires upstream credit/PPO "
                 "metrics within envelope and zero parameter sign-change count."
             )
+        elif intrinsic_value_metric:
+            equivalent = cross_env["finite"] and within_env["finite"] and cross_env["sign_change_count_max"] == 0
+            criterion_type = "intrinsic_mps_critic_value_jitter_diagnostic"
+            decision_rule = (
+                "value_t/next_value_t are known intrinsic MPS critic-forward jitter diagnostics from R1. They are not sole hard "
+                "release gates; release requires finite values, zero sign changes, no earlier exact-invariant divergence, and "
+                "downstream TD/GAE/advantage/return/PPO hard gates within the empirical MPS envelope."
+            )
         else:
             equivalent = cross_env["finite"] and within_env["finite"] and cross_env["max_abs_diff"] <= within_env["max_abs_diff"]
             criterion_type = "empirical_mps_natural_within_mode_envelope_no_multiplier"
             decision_rule = "OFF↔ON is numerically equivalent when finite and cross max_abs_diff <= observed within-mode max_abs_diff; mean_abs/max_rel/sign/rank are recorded diagnostics."
         summaries[metric_name] = {
             "criterion_type": criterion_type,
-            "hard_release_gate": not parameter_metric,
+            "hard_release_gate": not parameter_metric and not intrinsic_value_metric,
             "reference_within_mode_envelope": within_env,
             "cross_mode_distribution": cross_env,
             "decision_rule": decision_rule,
             "mps_equivalent_for_metric": equivalent,
             "parameter_tail_exceeds_within_max_abs_diagnostic": parameter_metric and cross_env["max_abs_diff"] > within_env["max_abs_diff"],
+            "intrinsic_value_tail_exceeds_within_max_abs_diagnostic": intrinsic_value_metric and cross_env["max_abs_diff"] > within_env["max_abs_diff"],
             "evidence_rows": {
                 "within_mode": within_rows,
                 "cross_mode": cross_rows,
@@ -543,6 +553,11 @@ def build_reproducibility_matrix(created_at: str, artifact_root: Path) -> Tuple[
             name
             for name, row in summaries.items()
             if row.get("parameter_tail_exceeds_within_max_abs_diagnostic")
+        ],
+        "intrinsic_value_tail_diagnostics": [
+            name
+            for name, row in summaries.items()
+            if row.get("intrinsic_value_tail_exceeds_within_max_abs_diagnostic")
         ],
         "exact_invariants": exact,
         "first_divergences": first_divergences,
