@@ -282,6 +282,7 @@ def model_hashes(dl1: Any, encoder: torch.nn.Module, actor: torch.nn.Module, cri
 class TraceRecorder:
     root: Path
     enabled: bool
+    deferred_materialization: bool = True
     pre_action_rows: List[Dict[str, Any]] = field(default_factory=list)
     reward_rows: List[Dict[str, Any]] = field(default_factory=list)
     critic_td_gae_rows: List[Dict[str, Any]] = field(default_factory=list)
@@ -717,6 +718,7 @@ def collect_controlled_rollout(
                         "cycle_index": cycle_index,
                         "window_id": window["window_id"],
                         "snapshot_id": int(window["snapshot_id"]),
+                        "time_band": str(window.get("time_band")),
                         "local_step": absolute,
                         "agent_slot": agent_slot,
                         "agent_id": agent_id,
@@ -841,7 +843,7 @@ def collect_controlled_rollout(
     td_delta_t = normalized_rewards_t + float(config["gamma"]) * next_values_t - values_t
     normalization_scope_id = f"H4M-G-ADV-NORM-SEED-{seed:03d}-CYCLE-{cycle_index:03d}"
 
-    if recorder and recorder.enabled:
+    if recorder and recorder.enabled and not recorder.deferred_materialization:
         recorder.pre_action_rows.extend(policy_rows)
         recorder.reward_rows.extend(reward_materialized_rows)
         valid_adv = advantages[masks_t.bool()].detach().cpu()
@@ -944,6 +946,8 @@ def collect_controlled_rollout(
         "advantages": advantages.detach(),
         "normalized_advantages": normalized_advantages.detach(),
         "gae_audit": gae_audit,
+        "gamma": float(config["gamma"]),
+        "gae_lambda": float(config["gae_lambda"]),
         "reward_rows": reward_materialized_rows,
         "policy_rows": policy_rows,
         "entropy_coef_mean": float(np.mean(entropy_coefficients)) if entropy_coefficients else 0.01,
@@ -958,6 +962,188 @@ def collect_controlled_rollout(
         "return_normalizer_state_before": return_norm_before,
         "return_normalizer_state_after": return_norm_after,
     }
+
+
+def materialize_rollout_credit_trace(
+    *,
+    seed: int,
+    cycle_index: int,
+    rollout: Mapping[str, Any],
+    recorder: TraceRecorder,
+) -> None:
+    if not recorder.enabled:
+        return
+    recorder.pre_action_rows.extend(rollout["policy_rows"])
+    recorder.reward_rows.extend(rollout["reward_rows"])
+    advantages = rollout["advantages"]
+    normalized_advantages = rollout["normalized_advantages"]
+    masks_t = rollout["agent_mask"].bool()
+    values_t = rollout["values_original"]
+    next_values_t = rollout["next_values_original"]
+    normalized_rewards_t = rollout["normalized_rewards"]
+    returns = rollout["returns_original"]
+    device = values_t.device
+    terminated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
+    truncated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
+    truncated[-1] = True
+    td_delta_t = rollout["td_delta"]
+    active_order = rollout["active_order"]
+    sample_uid_grid = rollout["sample_uid_grid"]
+    horizon = int(rollout["actions"].size(0))
+    policy_by_uid = {row["sample_uid"]: row for row in rollout["policy_rows"]}
+    normalization_scope_id = f"H4M-G-ADV-NORM-SEED-{seed:03d}-CYCLE-{cycle_index:03d}"
+    valid_adv = advantages[masks_t].detach().cpu()
+    valid_norm = normalized_advantages[masks_t].detach().cpu()
+    recorder.advantage_scope_rows.append(
+        {
+            "normalization_scope_id": normalization_scope_id,
+            "seed": seed,
+            "outer_cycle": cycle_index,
+            "population_count": int(advantages.numel()),
+            "active_sample_count": int(masks_t.sum().detach().cpu().item()),
+            "mean": float(valid_adv.mean().item()),
+            "std": float(valid_adv.std(unbiased=False).item()),
+            "epsilon": 1.0e-8,
+            "masking_semantics": "rollout_global_active_only_inactive_excluded",
+            "dtype": str(advantages.dtype),
+            "materialization_order": "deferred_after_authoritative_update",
+        }
+    )
+    for local_step, agent_slot, sample_uid in active_order:
+        raw_adv = float(advantages[local_step, agent_slot].detach().cpu().item())
+        norm_adv = float(normalized_advantages[local_step, agent_slot].detach().cpu().item())
+        raw_sign = sign_class(raw_adv)
+        norm_sign = sign_class(norm_adv)
+        change_class, changed = sign_change(raw_adv, norm_adv)
+        next_uid = sample_uid_grid[local_step + 1][agent_slot] if local_step + 1 < horizon else None
+        prev_uid = sample_uid_grid[local_step - 1][agent_slot] if local_step > 0 else None
+        policy = policy_by_uid[sample_uid]
+        recorder.critic_td_gae_rows.append(
+            {
+                "sample_uid": sample_uid,
+                "seed": seed,
+                "outer_cycle": cycle_index,
+                "value_t": float(values_t[local_step, agent_slot].detach().cpu().item()),
+                "next_sample_uid": next_uid,
+                "next_value_t": float(next_values_t[local_step, agent_slot].detach().cpu().item()),
+                "terminated": bool(terminated[local_step, agent_slot].detach().cpu().item()),
+                "truncated": bool(truncated[local_step, agent_slot].detach().cpu().item()),
+                "bootstrap_mask": 1.0,
+                "gamma": float(rollout["gamma"]),
+                "gae_lambda": float(rollout["gae_lambda"]),
+                "td_delta": float(td_delta_t[local_step, agent_slot].detach().cpu().item()),
+                "raw_gae_advantage": raw_adv,
+                "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
+                "gae_recursion_predecessor_uid": prev_uid,
+                "gae_recursion_successor_uid": next_uid,
+                "gae_formula_id": "DL1.compute_gae active-only rollout-global standardization",
+                "materialization_order": "deferred_after_authoritative_update",
+            }
+        )
+        recorder.advantage_sample_rows.append(
+            {
+                "normalization_scope_id": normalization_scope_id,
+                "sample_uid": sample_uid,
+                "seed": seed,
+                "outer_cycle": cycle_index,
+                "sampled_action_id": int(policy["action_id"]),
+                "sampled_action_name": policy["action"],
+                "raw_gae_advantage": raw_adv,
+                "normalized_advantage": norm_adv,
+                "raw_sign": raw_sign,
+                "normalized_sign": norm_sign,
+                "sign_changed": changed,
+                "sign_change_class": change_class,
+                "materialization_order": "deferred_after_authoritative_update",
+            }
+        )
+        value_error = float(returns[local_step, agent_slot].detach().cpu().item() - values_t[local_step, agent_slot].detach().cpu().item())
+        recorder.critic_value_error_rows.append(
+            {
+                "sample_uid": sample_uid,
+                "seed": seed,
+                "outer_cycle": cycle_index,
+                "sampled_action_id": int(policy["action_id"]),
+                "sampled_action_name": policy["action"],
+                "value_t_before_update": float(values_t[local_step, agent_slot].detach().cpu().item()),
+                "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
+                "normalized_return_target": None,
+                "value_error": value_error,
+                "squared_error": value_error * value_error,
+                "time_band": policy.get("time_band"),
+                "window_id": policy["window_id"],
+                "agent_id": int(policy["agent_id"]),
+                "materialization_order": "deferred_after_authoritative_update",
+            }
+        )
+
+
+def materialize_ppo_trace(
+    *,
+    seed: int,
+    cycle_index: int,
+    rollout: Mapping[str, Any],
+    ppo_fingerprint_rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    recorder: TraceRecorder,
+) -> None:
+    if not recorder.enabled:
+        return
+    effective_agents = int(config["effective_agents"])
+    for row in ppo_fingerprint_rows:
+        flat_index = int(row["selected_flat_index"])
+        local_step = flat_index // effective_agents
+        agent_slot = flat_index % effective_agents
+        sample_uid = rollout["sample_uid_grid"][local_step][agent_slot]
+        action_id = int(rollout["actions"][local_step, agent_slot].detach().cpu().item())
+        old_lp = float(row["old_log_prob"])
+        new_lp = float(row["current_log_prob"])
+        adv = float(row["normalized_advantage"])
+        clip_active = bool(float(row["unclipped"]) != float(row["effective"]))
+        labels = pressure_labels(action_id, adv, clip_active)
+        ppo_row = {
+            "ppo_update_id": f"H4M-G-SEED-{seed:03d}-CYCLE-{cycle_index:03d}-ACTOR",
+            "seed": seed,
+            "outer_cycle": cycle_index,
+            "ppo_epoch": int(row["epoch"]),
+            "minibatch_id": 0,
+            "selected_flat_index": flat_index,
+            "sample_uid": sample_uid,
+            "sampled_action_id": action_id,
+            "sampled_action_name": ACTION_NAMES[action_id],
+            "old_log_prob": old_lp,
+            "current_log_prob": new_lp,
+            "old_action_probability": float(math.exp(old_lp)),
+            "current_action_probability": float(math.exp(new_lp)),
+            "probability_ratio": float(row["ratio"]),
+            "normalized_advantage": adv,
+            "clip_epsilon": float(config["ppo_clip_epsilon"]),
+            "unclipped_surrogate": float(row["unclipped"]),
+            "clipped_ratio": float(row["clipped"] / adv) if adv != 0.0 else None,
+            "clipped_surrogate": float(row["clipped"]),
+            "clip_active": clip_active,
+            "effective_policy_surrogate_contribution": float(row["effective"]),
+            "entropy_contribution": float(row["entropy"]),
+            "sampled_action_pressure": labels["effective_direction_on_sampled_action_logit"],
+            "materialization_order": "deferred_after_authoritative_update",
+        }
+        recorder.ppo_rows.append(ppo_row)
+        recorder.actor_pressure_rows.append(
+            {
+                "sample_uid": sample_uid,
+                "seed": seed,
+                "outer_cycle": cycle_index,
+                "ppo_update_id": ppo_row["ppo_update_id"],
+                "ppo_epoch": int(row["epoch"]),
+                "minibatch_id": 0,
+                "sampled_action_id": action_id,
+                "sampled_action_name": ACTION_NAMES[action_id],
+                **labels,
+                "pressure_formula_id": "H4M-G detached PPO clipped-surrogate sign reconstruction plus entropy row storage",
+                "near_zero_rule": "05_training/rewards/mappo_reward_v1.py::PV8_REWARD_V2_NUMERIC_TOLERANCE",
+                "materialization_order": "deferred_after_authoritative_update",
+            }
+        )
 
 
 def ppo_update_controlled(
@@ -1039,7 +1225,7 @@ def ppo_update_controlled(
         value_loss = F.mse_loss(flat_critic_outputs[idx], target_for_loss[idx])
         entropy = entropy_t.reshape(-1)[idx].mean()
         total_loss = policy_loss + float(config["value_loss_coef"]) * value_loss - entropy_coef * entropy
-        if recorder and recorder.enabled:
+        if recorder and recorder.enabled and not recorder.deferred_materialization:
             for selected_position, flat_index in enumerate(selected_flat.detach().cpu().tolist()):
                 local_step = int(flat_index) // int(config["effective_agents"])
                 agent_slot = int(flat_index) % int(config["effective_agents"])
@@ -1252,6 +1438,22 @@ def ppo_update_controlled(
             }
         )
         loss_rows.append({"rollout_index": cycle_index, "ppo_update_index": ppo_update_index, **finite_losses})
+
+    if recorder and recorder.enabled and recorder.deferred_materialization:
+        materialize_rollout_credit_trace(
+            seed=seed,
+            cycle_index=cycle_index,
+            rollout=rollout,
+            recorder=recorder,
+        )
+        materialize_ppo_trace(
+            seed=seed,
+            cycle_index=cycle_index,
+            rollout=rollout,
+            ppo_fingerprint_rows=ppo_fingerprint_rows,
+            config=config,
+            recorder=recorder,
+        )
 
     return {
         "metrics_rows": metrics_rows,
