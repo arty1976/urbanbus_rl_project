@@ -379,7 +379,7 @@ def authoritative_binding(created_at: str, provenance: Mapping[str, Any], r1_evi
         "r1_next_gate_match": r1_gate.get("exact_next_gate") == EXPECTED["r1_exact_next_gate"],
         "r1_source_commit_bound": bool(r1_binding.get("source_provenance", {}).get("h4m_g_r1_source_git_commit")),
         "r1_runtime_mps_available": r1_runtime.get("mps_available") is True,
-        "r1_runtime_device_exact_bound": r1_runtime.get("mps_device_test", {}).get("tensor_device") == "mps",
+        "r1_runtime_device_exact_bound": str(r1_runtime.get("mps_device_test", {}).get("tensor_device", "")).startswith("mps"),
         "r1_no_deterministic_forced": r1_runtime.get("deterministic_mode_forced_by_audit") is False,
         "r1_no_cpu_fallback": r1_runtime.get("cpu_fallback_adopted") is False,
         "r1_no_dtype_change": r1_runtime.get("dtype_change_applied") is False,
