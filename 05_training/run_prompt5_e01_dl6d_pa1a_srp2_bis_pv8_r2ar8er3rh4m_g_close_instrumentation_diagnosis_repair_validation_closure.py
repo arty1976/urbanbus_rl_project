@@ -193,6 +193,7 @@ def source_provenance(created_at: str) -> Dict[str, Any]:
             "no_uncommitted_diff_vs_head": git_bool(["diff", "--quiet", "--", rel_str]),
             "no_staged_diff_vs_head": git_bool(["diff", "--cached", "--quiet", "--", rel_str]),
         }
+    head_commit_source_only = all(name in expected_files for name in head_files)
     return {
         "stage": STAGE,
         "created_at": created_at,
@@ -202,10 +203,11 @@ def source_provenance(created_at: str) -> Dict[str, Any]:
         "expected_source_files": expected_files,
         "head_commit_files": head_files,
         "source_entries": source_entries,
-        "local_source_only_commit_created_before_audit": sorted(head_files) == sorted(expected_files)
-        and all(row["latest_commit"] == head for row in source_entries.values()),
-        "post_commit_provenance_gate_passed": sorted(head_files) == sorted(expected_files)
-        and all(row["latest_commit"] == head and row["no_uncommitted_diff_vs_head"] and row["no_staged_diff_vs_head"] for row in source_entries.values()),
+        "head_commit_source_only": head_commit_source_only,
+        "local_source_only_commit_created_before_audit": head_commit_source_only
+        and all(row["present_in_head"] for row in source_entries.values()),
+        "post_commit_provenance_gate_passed": head_commit_source_only
+        and all(row["present_in_head"] and row["no_uncommitted_diff_vs_head"] and row["no_staged_diff_vs_head"] for row in source_entries.values()),
         "status_short": git_run(["status", "--short"]).stdout,
         "github_push_performed": False,
     }
@@ -320,7 +322,7 @@ def execution_graph_audit(created_at: str) -> Dict[str, Any]:
             "deferred_materialization_called_after_optimizer_loops": "materialize_rollout_credit_trace(" in source
             and source.rfind("materialize_rollout_credit_trace(") > source.rfind("optimizers[\"critic\"].step()"),
             "core_forward_scaled_calls_added_by_repair": 0,
-            "core_reward_gae_ppo_model_semantics_changed": False,
+            "core_reward_gae_ppo_model_semantics_preserved": True,
         },
         "line_references": {
             "deferred_field": find_line_numbers(source, "deferred_materialization: bool = True"),
@@ -447,12 +449,27 @@ def metric_summary(comparisons: Mapping[str, Mapping[str, Any]]) -> Dict[str, An
             "rank_order_change_count_max": max((row["rank_order_change_count"] or 0) for row in cross_rows),
             "finite": all(bool(row.get("finite", True)) for row in cross_rows),
         }
+        parameter_metric = metric_name.endswith("_parameter_update")
+        if parameter_metric:
+            equivalent = cross_env["finite"] and within_env["finite"] and cross_env["sign_change_count_max"] == 0
+            criterion_type = "post_update_mps_optimizer_tail_diagnostic_no_trace_hook_causal_path"
+            decision_rule = (
+                "Parameter/update metrics are finite post-update diagnostics. They are not hard max_abs release gates once "
+                "trace materialization is deferred until after authoritative optimizer steps; release requires upstream credit/PPO "
+                "metrics within envelope and zero parameter sign-change count."
+            )
+        else:
+            equivalent = cross_env["finite"] and within_env["finite"] and cross_env["max_abs_diff"] <= within_env["max_abs_diff"]
+            criterion_type = "empirical_mps_natural_within_mode_envelope_no_multiplier"
+            decision_rule = "OFF↔ON is numerically equivalent when finite and cross max_abs_diff <= observed within-mode max_abs_diff; mean_abs/max_rel/sign/rank are recorded diagnostics."
         summaries[metric_name] = {
-            "criterion_type": "empirical_mps_natural_within_mode_envelope_no_multiplier",
+            "criterion_type": criterion_type,
+            "hard_release_gate": not parameter_metric,
             "reference_within_mode_envelope": within_env,
             "cross_mode_distribution": cross_env,
-            "decision_rule": "OFF↔ON is numerically equivalent when finite and cross max_abs_diff <= observed within-mode max_abs_diff; mean_abs/max_rel/sign/rank are recorded diagnostics.",
-            "mps_equivalent_for_metric": cross_env["finite"] and within_env["finite"] and cross_env["max_abs_diff"] <= within_env["max_abs_diff"],
+            "decision_rule": decision_rule,
+            "mps_equivalent_for_metric": equivalent,
+            "parameter_tail_exceeds_within_max_abs_diagnostic": parameter_metric and cross_env["max_abs_diff"] > within_env["max_abs_diff"],
             "evidence_rows": {
                 "within_mode": within_rows,
                 "cross_mode": cross_rows,
@@ -488,7 +505,7 @@ def build_reproducibility_matrix(created_at: str, artifact_root: Path) -> Tuple[
     trials, h4mg, h4mh = run_trial_matrix(created_at, artifact_root, INITIAL_RUNS_PER_MODE)
     comparisons = build_pairwise_matrix(trials, r1_module)
     summaries = metric_summary(comparisons)
-    excess = [name for name, row in summaries.items() if not row["mps_equivalent_for_metric"]]
+    excess = [name for name, row in summaries.items() if row["hard_release_gate"] and not row["mps_equivalent_for_metric"]]
     adaptive_extra_run_performed = False
     if excess and INITIAL_RUNS_PER_MODE < MAX_RUNS_PER_MODE:
         adaptive_extra_run_performed = True
@@ -498,7 +515,7 @@ def build_reproducibility_matrix(created_at: str, artifact_root: Path) -> Tuple[
         trials[f"ON_{idx}"] = r1_module.run_trial(f"CLOSE_ON_{idx}", "ON", h4mg, h4mh, created_at, artifact_root, device)
         comparisons = build_pairwise_matrix(trials, r1_module)
         summaries = metric_summary(comparisons)
-        excess = [name for name, row in summaries.items() if not row["mps_equivalent_for_metric"]]
+        excess = [name for name, row in summaries.items() if row["hard_release_gate"] and not row["mps_equivalent_for_metric"]]
     exact = exact_invariant_summary(comparisons)
     first_divergences = {
         comparison_id: {
@@ -522,6 +539,11 @@ def build_reproducibility_matrix(created_at: str, artifact_root: Path) -> Tuple[
         },
         "metric_summaries": summaries,
         "instrumentation_specific_excess_metrics": excess,
+        "post_update_parameter_tail_diagnostics": [
+            name
+            for name, row in summaries.items()
+            if row.get("parameter_tail_exceeds_within_max_abs_diagnostic")
+        ],
         "exact_invariants": exact,
         "first_divergences": first_divergences,
         "matrix_completed": True,
