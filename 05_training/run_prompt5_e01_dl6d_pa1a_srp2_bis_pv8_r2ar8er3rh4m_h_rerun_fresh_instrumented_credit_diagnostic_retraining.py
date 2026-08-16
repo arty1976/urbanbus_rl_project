@@ -110,6 +110,10 @@ def canonical_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=jsonable) + "\n"
 
 
+def payload_sha256(payload: Any) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(canonical_json(payload), encoding="utf-8")
@@ -261,8 +265,8 @@ def shadow_integrity_snapshot(h4mg: Any, ctx: Mapping[str, Any]) -> Dict[str, An
         "rng": h4mg.rng_snapshot(),
         "model_hashes": h4mg.model_hashes(dl1, ctx["encoder"], ctx["actor"], ctx["critic"]),
         "optimizer_hashes": h4mg.optimizer_hashes(ctx["optimizers"]),
-        "reward_normalizer": h4mg.reward_normalizer_snapshot(ctx["reward_normalizer"]),
-        "return_normalizer": ctx["return_normalizer"].state_dict(),
+        "reward_normalizer": payload_sha256(h4mg.reward_normalizer_state(ctx["reward_normalizer"])),
+        "return_normalizer": payload_sha256(ctx["return_normalizer"].state_dict()),
     }
 
 
