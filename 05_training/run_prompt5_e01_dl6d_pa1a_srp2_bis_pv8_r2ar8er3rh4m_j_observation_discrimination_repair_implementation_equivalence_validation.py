@@ -184,7 +184,10 @@ def source_provenance(created_at: str) -> Dict[str, Any]:
         "head_commit_files": head_files,
         "head_commit_source_only": bool(head_files) and all(path.endswith(".py") for path in head_files),
         "status_short": status_short,
-        "local_source_only_commit_created_before_audit": status_short == "" and set(head_files) == {str(rel) for rel in SOURCE_RELS},
+        "local_source_only_commit_created_before_audit": status_short == ""
+        and bool(head_files)
+        and all(path.endswith(".py") for path in head_files)
+        and all(entry["present_in_head"] and bool(entry["latest_commit"]) for entry in source_entries.values()),
         "github_push_performed": False,
     }
 
