@@ -347,17 +347,102 @@ class GATv2Encoder(torch.nn.Module):
 
 
 class MAPPOActor(torch.nn.Module):
-    def __init__(self, hidden_channels: int, action_dim: int, target_context_dim: int = 0) -> None:
+    TARGET_HEAD_SPECIALIZATION_REPAIR_CONTRACT_SHA256 = (
+        "d672bce5d29fbdb26365bca351c69be09dd94559c5e1f3adc65067f3c6c40f97"
+    )
+
+    def __init__(
+        self,
+        hidden_channels: int,
+        action_dim: int,
+        target_context_dim: int = 0,
+        *,
+        target_head_specialization: bool = False,
+        target_head_count: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_channels = int(hidden_channels)
         self.action_dim = int(action_dim)
         self.target_context_dim = int(target_context_dim)
+        self.target_head_specialization_active = bool(target_head_specialization)
+        self.target_head_count = int(target_head_count if target_head_count is not None else self.action_dim)
+        if self.target_head_specialization_active:
+            if self.target_context_dim <= 0:
+                raise ValueError("target_head_specialization requires target_context_dim > 0.")
+            if self.target_head_count <= 0:
+                raise ValueError("target_head_specialization requires target_head_count > 0.")
+            if self.target_head_count > self.target_context_dim:
+                raise ValueError(
+                    f"target_head_count={self.target_head_count} exceeds target_context_dim={self.target_context_dim}."
+                )
         self.actor_conditioned_input_dim = self.hidden_channels + self.target_context_dim
         self.net = torch.nn.Sequential(
             torch.nn.Linear(self.actor_conditioned_input_dim, self.hidden_channels),
             torch.nn.Tanh(),
             torch.nn.Linear(self.hidden_channels, self.action_dim),
         )
+        self.target_heads = torch.nn.ModuleList(
+            [torch.nn.Linear(self.hidden_channels, self.action_dim) for _ in range(self.target_head_count)]
+            if self.target_head_specialization_active
+            else []
+        )
+        if self.target_head_specialization_active:
+            self.initialize_target_heads_from_legacy_head()
+
+    def initialize_target_heads_from_legacy_head(self) -> None:
+        """Copy the legacy decision head into every target-specific head.
+
+        This is the H4M-P compatibility bridge: before any retraining, a
+        specialized actor with migrated legacy weights is numerically identical
+        to the legacy direct-conditioned actor for the same embedding and
+        target context. Later gradients are routed only through the selected
+        target-specific decision head.
+        """
+
+        if not self.target_head_specialization_active:
+            return
+        legacy_head = self.net[-1]
+        with torch.no_grad():
+            for head in self.target_heads:
+                head.weight.copy_(legacy_head.weight)
+                head.bias.copy_(legacy_head.bias)
+
+    def _target_indices_from_context(self, target_context: torch.Tensor) -> torch.Tensor:
+        if target_context.size(-1) < self.target_head_count:
+            raise ValueError(
+                f"MAPPOActor target_head_count={self.target_head_count} exceeds "
+                f"provided target_context size={target_context.size(-1)}."
+            )
+        routing_context = target_context[..., : self.target_head_count].detach()
+        if not bool(torch.isfinite(routing_context).all().detach().cpu().item()):
+            raise ValueError("MAPPOActor target_context contains NaN or Inf.")
+        return torch.argmax(routing_context, dim=-1).long()
+
+    def _specialized_logits(self, hidden: torch.Tensor, target_context: torch.Tensor) -> torch.Tensor:
+        target_indices = self._target_indices_from_context(target_context)
+        all_head_logits = torch.stack([head(hidden) for head in self.target_heads], dim=-2)
+        batch_index = torch.arange(hidden.size(0), dtype=torch.long, device=hidden.device)
+        return all_head_logits[batch_index, target_indices.to(hidden.device)]
+
+    def load_state_dict(self, state_dict: Mapping[str, torch.Tensor], strict: bool = True, assign: bool = False) -> Any:
+        migrated_state: Mapping[str, torch.Tensor] = state_dict
+        if self.target_head_specialization_active:
+            legacy_weight = state_dict.get("net.2.weight")
+            legacy_bias = state_dict.get("net.2.bias")
+            target_head_keys_present = all(
+                f"target_heads.{idx}.weight" in state_dict and f"target_heads.{idx}.bias" in state_dict
+                for idx in range(self.target_head_count)
+            )
+            if legacy_weight is not None and legacy_bias is not None and not target_head_keys_present:
+                migrated = dict(state_dict)
+                for idx in range(self.target_head_count):
+                    migrated[f"target_heads.{idx}.weight"] = legacy_weight.detach().clone()
+                    migrated[f"target_heads.{idx}.bias"] = legacy_bias.detach().clone()
+                migrated_state = migrated
+        try:
+            return super().load_state_dict(migrated_state, strict=strict, assign=assign)
+        except TypeError:
+            return super().load_state_dict(migrated_state, strict=strict)
 
     def forward(self, agent_embeddings: torch.Tensor, target_context: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.target_context_dim > 0:
@@ -371,7 +456,12 @@ class MAPPOActor(torch.nn.Module):
             conditioned_input = torch.cat([agent_embeddings, target_context.to(agent_embeddings.device, dtype=agent_embeddings.dtype)], dim=-1)
         else:
             conditioned_input = agent_embeddings
-        return self.net(conditioned_input)
+        hidden = self.net[1](self.net[0](conditioned_input))
+        if self.target_head_specialization_active:
+            if target_context is None:
+                raise ValueError("MAPPOActor target_context is required for target head specialization.")
+            return self._specialized_logits(hidden, target_context.to(agent_embeddings.device, dtype=agent_embeddings.dtype))
+        return self.net[2](hidden)
 
 
 class CentralizedCritic(torch.nn.Module):
