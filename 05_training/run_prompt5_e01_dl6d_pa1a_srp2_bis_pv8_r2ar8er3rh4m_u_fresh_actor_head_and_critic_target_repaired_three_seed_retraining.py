@@ -4,10 +4,27 @@
 The execution path is the approved H4M-Q fresh MPS lineage.  This runner only
 binds the H4M-T critic target contract, records the additional credit evidence,
 and fail-closes on any frozen-contract or runtime-integrity violation.
+
+H4M-U-R1 repaired the evidence instrumentation and the reporting path only:
+
+* every seed x cycle persists its own durable evidence record (actual critic
+  loss, real pre/post cycle Actor and Critic parameter deltas, and the required
+  credit diagnostics) before the loop is allowed to advance
+* the post-training report is rendered from that persisted evidence instead of
+  volatile in-memory metrics, and ``--regenerate-report`` rebuilds it after a
+  reporter failure with zero training and zero optimizer steps
+* the post-training ``write_conditional_parquet`` reporting call is bound to
+  its owning H4M-K module instead of the H4M-Q module
+
+No training semantics changed: Reward V2, the S3 critic value-target repair,
+the target-conditioned Actor head repair, TD/GAE, advantage normalization,
+Actor logits, action/K masks, the observation contract, Zero-Loss semantics,
+and the frozen split/seed/schedule/budget are untouched.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -21,7 +38,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, median
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -43,6 +60,7 @@ SOURCE_REL = Path("05_training") / Path(__file__).name
 H4MQ_SOURCE = TRAINING_ROOT / "run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4m_q_fresh_target_conditioned_actor_head_specialized_three_seed_retraining.py"
 H4MG_SOURCE = TRAINING_ROOT / "run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4m_g_instrumentation_equivalence_validation.py"
 H4MK_SOURCE = TRAINING_ROOT / "run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4m_k_fresh_target_context_repaired_three_seed_retraining.py"
+DURABLE_EVIDENCE_SOURCE = TRAINING_ROOT / "durable_training_evidence.py"
 
 H4MT_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_t_ppo_credit_advantage_critic_value_target_repair_implementation_equivalence_validation_20260817_190257+09:00"
 H4MS_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_s_ppo_credit_advantage_repair_selection_and_freeze_20260817_171912+0900"
@@ -62,6 +80,7 @@ EXPECTED = {
     "reward_v2_sha256": "966d3d8b091b87b033d2203cfb721983a5e66f77fe247e42885153a3b7fc3161",
     "r3_split_sha256": "cf7c21c1e85ae8717678fbce85cdbff27ef5e4ca133593de31ad4884aefd476c",
     "zero_loss_adapter_sha256": "59da56122e24a22444842bc8aeea27162d919e26a5dd1114453cd76167fe3bce",
+    "h4m_b_schedule_sha256": "c8eb56b86854113c751e099f6dc9869234324005911d0ece125b857e47e06dcc",
 }
 
 HOLD = "HOLD_CURRENT_POSITION"
@@ -76,6 +95,7 @@ REQUIRED_ARTIFACTS = [
     "checkpoint_integrity.json", "gradient_isolation.json", "parameter_delta.json",
     "validation_discrimination.json", "training_integrity.json", "outcome_classification.json",
     "changed_files.json", "test_results.json", "gate_matrix.json",
+    "durable_evidence_report.json",
 ]
 
 
@@ -125,6 +145,14 @@ def import_module(name: str, path: Path) -> Any:
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_durable_evidence() -> Any:
+    """Load the H4M-U-R1 durable evidence recording device (idempotent)."""
+    cached = sys.modules.get("h4mu_durable_evidence")
+    if cached is not None:
+        return cached
+    return import_module("h4mu_durable_evidence", DURABLE_EVIDENCE_SOURCE)
 
 
 def numeric_stats(values: Sequence[Any]) -> Dict[str, Any]:
@@ -181,6 +209,7 @@ def authoritative_binding(provenance: Mapping[str, Any], compile_audit: Mapping[
         "actor_repair_sha_match": q_sha.get("h4m_p_repair_contract_sha256") == EXPECTED["actor_repair_contract_sha256"],
         "reward_v2_sha_match": q_sha.get("reward_v2_sha256") == EXPECTED["reward_v2_sha256"],
         "split_sha_match": q_sha.get("r3_split_sha256") == EXPECTED["r3_split_sha256"],
+        "schedule_sha_match": q_sha.get("h4m_b_schedule_sha256") == EXPECTED["h4m_b_schedule_sha256"],
         "zero_loss_sha_match": q_sha.get("zero_loss_adapter_sha256") == EXPECTED["zero_loss_adapter_sha256"],
         "s3_execution_path_present": all(marker in h4mg_text for marker in [
             "CRITIC_VALUE_TARGET_BINDING_SCHEMA", "critic_target_normalized",
@@ -196,7 +225,107 @@ def authoritative_binding(provenance: Mapping[str, Any], compile_audit: Mapping[
     }
 
 
-def configure_execution(qmod: Any, h4mg: Any, update_audits: List[Dict[str, Any]]) -> Any:
+class CycleEvidenceBinder:
+    """Bind durable seed x cycle evidence to the frozen H4M-Q execution path.
+
+    The binder only reads: it snapshots parameters around the existing update
+    call, extracts the actual update metrics, aggregates the already-recorded
+    cycle trace rows, and persists them.  It never changes rollout, loss, GAE,
+    normalization, masking, or optimizer behaviour.  Any persistence failure is
+    raised so the training loop stops before the next cycle instead of leaving
+    the trace and the evidence on different cycles.
+    """
+
+    def __init__(self, dte: Any, writer: Any, artifact_root: Path, stage: str, identity_base: Mapping[str, Any]) -> None:
+        self.dte = dte
+        self.writer = writer
+        self.artifact_root = Path(artifact_root)
+        self.stage = stage
+        self.identity_base = dict(identity_base)
+        self.pending: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self.persisted: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def snapshot_parameters(ctx: Mapping[str, Any]) -> Dict[str, Dict[str, torch.Tensor]]:
+        dl1 = ctx["dl1"]
+        return {
+            "actor": dl1.clone_state_dict(ctx["actor"]),
+            "critic": dl1.clone_state_dict(ctx["critic"]),
+            "gatv2": dl1.clone_state_dict(ctx["encoder"]),
+        }
+
+    def stage_update(
+        self,
+        *,
+        seed: int,
+        cycle: int,
+        ctx: Mapping[str, Any],
+        before_cycle_state: Mapping[str, Mapping[str, torch.Tensor]],
+        update_result: Mapping[str, Any],
+    ) -> None:
+        dl1 = ctx["dl1"]
+        modules = {"actor": ctx["actor"], "critic": ctx["critic"], "gatv2": ctx["encoder"]}
+        deltas = {
+            role: self.dte.annotate_parameter_delta(dl1.delta_stats(module, before_cycle_state[role]), role=role)
+            for role, module in modules.items()
+        }
+        metrics_rows = list(update_result.get("metrics_rows") or [])
+        last_row = metrics_rows[-1] if metrics_rows else {}
+        self.pending[(int(seed), int(cycle))] = {
+            "critic_loss": self.dte.extract_critic_loss(update_result, seed=int(seed), outer_cycle=int(cycle)),
+            "parameter_delta": {
+                **deltas,
+                "cumulative_from_seed_start": {
+                    "actor_parameter_delta_l2": last_row.get("actor_parameter_delta"),
+                    "critic_parameter_delta_l2": last_row.get("critic_parameter_delta"),
+                    "gatv2_parameter_delta_l2": last_row.get("gatv2_parameter_delta"),
+                    "source": "ppo_update_controlled.metrics_rows[-1] seed-start baseline",
+                },
+            },
+            "cycle_context": {
+                "critic_target_normalizer_state_sha256": update_result.get("critic_target_normalizer_state_sha256"),
+                "return_normalizer_update": update_result.get("return_normalizer_update"),
+                "staged_at": self.dte.kst_now(),
+            },
+        }
+
+    def flush_cycle(self, *, seed: int, cycle: int, recorder: Any, trace_entry: Mapping[str, Any]) -> Dict[str, Any]:
+        key = (int(seed), int(cycle))
+        staged = self.pending.pop(key, None)
+        if staged is None:
+            raise self.dte.EvidenceIntegrityError(
+                "CYCLE_UPDATE_EVIDENCE_NOT_STAGED",
+                f"key={key} cycle trace was written without a matching PPO update result",
+            )
+        credit = self.dte.credit_diagnostics_from_rows(
+            pre_action_rows=recorder.pre_action_rows,
+            td_gae_rows=recorder.critic_td_gae_rows,
+            advantage_rows=recorder.advantage_sample_rows,
+            critic_value_error_rows=recorder.critic_value_error_rows,
+            seed=int(seed),
+            outer_cycle=int(cycle),
+        )
+        trace_files, cycle_scoped = self.dte.trace_file_bindings(
+            trace_entry, artifact_root=self.artifact_root, seed=int(seed), outer_cycle=int(cycle)
+        )
+        record = self.dte.build_cycle_record(
+            stage=self.stage,
+            identity_base=self.identity_base,
+            seed=int(seed),
+            outer_cycle=int(cycle),
+            critic_loss=staged["critic_loss"],
+            parameter_delta=staged["parameter_delta"],
+            credit_diagnostics=credit,
+            trace_files=trace_files,
+            cycle_scoped_trace_binding=cycle_scoped,
+            extra=staged["cycle_context"],
+        )
+        result = self.writer.append_cycle_evidence(record)
+        self.persisted.append(result)
+        return result
+
+
+def configure_execution(qmod: Any, h4mg: Any, update_audits: List[Dict[str, Any]], binder: Optional[CycleEvidenceBinder] = None) -> Any:
     qmod.STAGE = STAGE
     qmod.SOURCE_REL = SOURCE_REL
     qmod.EXPECTED = {**qmod.EXPECTED, "h4m_t_critic_repair_contract_sha256": EXPECTED["critic_repair_contract_sha256"]}
@@ -234,10 +363,18 @@ def configure_execution(qmod: Any, h4mg: Any, update_audits: List[Dict[str, Any]
         return original_collect(branch="H4M_U_FRESH_ACTOR_AND_CRITIC_REPAIRED", **kwargs)
 
     def update_proxy(*, branch: str, **kwargs: Any) -> Dict[str, Any]:
+        seed = int(kwargs["seed"])
+        cycle = int(kwargs["cycle_index"])
+        ctx = kwargs["ctx"]
+        before_cycle_state = CycleEvidenceBinder.snapshot_parameters(ctx) if binder else None
         result = original_update(branch="H4M_U_FRESH_ACTOR_AND_CRITIC_REPAIRED", **kwargs)
+        if binder:
+            binder.stage_update(
+                seed=seed, cycle=cycle, ctx=ctx, before_cycle_state=before_cycle_state, update_result=result
+            )
         normalizer_update = result.get("return_normalizer_update", {})
         update_audits.append({
-            "seed": int(kwargs["seed"]), "outer_cycle": int(kwargs["cycle_index"]),
+            "seed": seed, "outer_cycle": cycle,
             "critic_target_normalizer_state_sha256": result.get("critic_target_normalizer_state_sha256"),
             "return_normalizer_update": normalizer_update,
             "state_binding_match": normalizer_update.get("state_before_sha256") == result.get("critic_target_normalizer_state_sha256"),
@@ -247,6 +384,24 @@ def configure_execution(qmod: Any, h4mg: Any, update_audits: List[Dict[str, Any]
     h4mg.collect_controlled_rollout = collect_proxy
     h4mg.ppo_update_controlled = update_proxy
     return qmod.configure_h4mk_module(import_module(f"h4mu_h4mk_{time.time_ns()}", H4MK_SOURCE))
+
+
+def bind_cycle_evidence_flush(base: Any, binder: CycleEvidenceBinder) -> None:
+    """Persist the cycle evidence right after its traces land, before advancing.
+
+    The wrapper deliberately does not catch anything: if the evidence cannot be
+    made durable, the exception propagates out of the training loop and the run
+    stops with the trace and the evidence on the same cycle.
+    """
+    original_write_cycle_trace = base.write_cycle_trace
+
+    def write_cycle_trace_proxy(artifact_root: Path, seed: int, cycle: int, recorder: Any, shadow_rows: Any) -> Dict[str, Any]:
+        entry = original_write_cycle_trace(artifact_root, seed, cycle, recorder, shadow_rows)
+        flush = binder.flush_cycle(seed=int(seed), cycle=int(cycle), recorder=recorder, trace_entry=entry)
+        entry["durable_evidence"] = flush
+        return entry
+
+    base.write_cycle_trace = write_cycle_trace_proxy
 
 
 def trace_frame(artifact_root: Path) -> pd.DataFrame:
@@ -361,9 +516,31 @@ def outcome_classification(validation: Mapping[str, Any], target: Mapping[str, A
     }
 
 
-def training_integrity(training: Mapping[str, Any], trace_meta: Mapping[str, Any], update_audits: Sequence[Mapping[str, Any]], credit: Mapping[str, Any], parameter_delta: Mapping[str, Any], gradient: Mapping[str, Any], checkpoints: Mapping[str, Any], validation: Mapping[str, Any]) -> Dict[str, Any]:
+def durable_evidence_checks(evidence: Mapping[str, Any], expected_records: int) -> Dict[str, Any]:
+    """Gate criteria that read the persisted evidence, never in-memory metrics."""
+    totals = evidence.get("totals", {})
+    critic_loss = totals.get("critic_loss", {})
+    actor_delta = totals.get("actor_parameter_delta_l2", {})
+    critic_delta = totals.get("critic_parameter_delta_l2", {})
+    return {
+        "durable_evidence_integrity": evidence.get("integrity_passed") is True,
+        "durable_evidence_complete": evidence.get("record_count") == expected_records and not evidence.get("missing_cycles"),
+        "durable_evidence_no_duplicate_or_conflict": not evidence.get("duplicate_cycles") and not evidence.get("conflicting_cycles"),
+        "persisted_critic_loss_every_cycle": critic_loss.get("count") == expected_records,
+        "persisted_actor_delta_every_cycle": actor_delta.get("count") == expected_records
+        and (actor_delta.get("min") or 0.0) > 0.0,
+        "persisted_critic_delta_every_cycle": critic_delta.get("count") == expected_records
+        and (critic_delta.get("min") or 0.0) > 0.0,
+        "report_rendered_from_persisted_evidence": evidence.get("report_source") == "PERSISTED_DURABLE_EVIDENCE_ONLY"
+        and evidence.get("volatile_in_memory_metrics_used") is False,
+        "persisted_evidence_nan_inf_zero": evidence.get("nan_inf_count") == 0,
+    }
+
+
+def training_integrity(training: Mapping[str, Any], trace_meta: Mapping[str, Any], update_audits: Sequence[Mapping[str, Any]], credit: Mapping[str, Any], parameter_delta: Mapping[str, Any], gradient: Mapping[str, Any], checkpoints: Mapping[str, Any], validation: Mapping[str, Any], evidence: Mapping[str, Any]) -> Dict[str, Any]:
     safety = trace_meta.get("safety_counts", {})
     checks = {
+        **durable_evidence_checks(evidence, len(EXPECTED["seeds"]) * EXPECTED["outer_training_count"]),
         "three_seeds": training.get("seeds") == EXPECTED["seeds"],
         "33_rollouts": training.get("total_rollouts") == 33,
         "132_ppo_updates": training.get("total_ppo_updates") == 132,
@@ -407,8 +584,17 @@ def make_manifest(root: Path, gate: Mapping[str, Any], started: float) -> Dict[s
     return {"stage": STAGE, "artifact_root": str(root), "source_commit": git_run(["rev-parse", "HEAD"]).stdout.strip(), "gate": gate.get("gate"), "decision": gate.get("decision"), "exact_next_gate": gate.get("exact_next_gate"), "required_artifacts_present": all((root / item).exists() for item in REQUIRED_ARTIFACTS if item != "manifest.json"), "output_sha256": {name: sha256_file(Path(path)) for name, path in files.items()}, "elapsed_seconds": time.perf_counter() - started, "device_backend": "MPS", "TEST6_opened": False, "test6_access_count": 0, "github_push_performed": False}
 
 
-def final_report(binding: Mapping[str, Any], training: Mapping[str, Any], integrity: Mapping[str, Any], outcome: Mapping[str, Any], gate: Mapping[str, Any]) -> str:
-    return f"""# H4M-U Fresh Actor-Head + Critic Value-Target Repaired Three-Seed Retraining
+REPORT_TITLE = "H4M-U Fresh Actor-Head + Critic Value-Target Repaired Three-Seed Retraining"
+
+
+def final_report(dte: Any, binding: Mapping[str, Any], evidence: Mapping[str, Any], integrity: Mapping[str, Any], outcome: Mapping[str, Any], gate: Mapping[str, Any]) -> str:
+    """Render the report from persisted evidence plus the post-run classification.
+
+    Every training-time number in this report comes from the durable evidence
+    reloaded from disk (``dte.render_final_report``); no volatile in-memory
+    training metric is read here.
+    """
+    header = f"""# {REPORT_TITLE}
 
 gate = {gate['gate']}
 source_commit = {binding['source_provenance']['source_commit_before_run']}
@@ -416,15 +602,37 @@ actor_repair_contract_sha256 = {EXPECTED['actor_repair_contract_sha256']}
 critic_repair_contract_sha256 = {EXPECTED['critic_repair_contract_sha256']}
 outcome_classification = {outcome['outcome_classification']}
 exact_next_review_gate = {gate['exact_next_gate']}
+training_evidence_source = {evidence.get('report_source')}
 
-## Execution
+## Post-run classification
 
 ```json
-{json.dumps({'seeds': training.get('seeds'), 'rollouts': training.get('total_rollouts'), 'ppo_updates': training.get('total_ppo_updates'), 'critic_updates': training.get('total_critic_updates'), 'integrity': integrity.get('checks'), 'outcome_evidence': outcome.get('evidence')}, ensure_ascii=False, indent=2, default=jsonable)}
+{json.dumps({'integrity': integrity.get('checks'), 'outcome_evidence': outcome.get('evidence')}, ensure_ascii=False, indent=2, default=jsonable)}
 ```
 
 No TEST6 access and no post-run tuning/extension/checkpoint selection occurred. This is diagnostic training evidence only, not a final performance claim.
+
+---
+
 """
+    return header + dte.render_final_report(evidence, title=f"{REPORT_TITLE} — persisted training evidence")
+
+
+def regenerate_report_only(root: Path) -> int:
+    """Rebuild the report from persisted evidence after a reporter failure.
+
+    No model, optimizer, device context, rollout, or training step is created
+    on this path.
+    """
+    dte = load_durable_evidence()
+    recovery = dte.regenerate_report(root, report_name="final_report.md", title=REPORT_TITLE)
+    print(
+        f"[H4M-U] report regenerated from persisted evidence: {recovery['final_report_path']}\n"
+        f"[H4M-U] report_status: {recovery['report_status']}\n"
+        f"[H4M-U] records: {recovery['record_count']}/{recovery['expected_record_count']} "
+        f"training_invocations={recovery['training_invocations']} optimizer_step_count={recovery['optimizer_step_count']}"
+    )
+    return 0 if recovery["recovered"] else 1
 
 
 def write_block(root: Path, binding: Mapping[str, Any], reason: str, started: float) -> None:
@@ -442,7 +650,50 @@ def write_block(root: Path, binding: Mapping[str, Any], reason: str, started: fl
     print(f"[H4M-U] artifact root: {root}\n[H4M-U] gate: {gate['gate']}\n[H4M-U] block_reason: {reason}")
 
 
+def recover_after_reporting_failure(dte: Any, root: Path, exc: BaseException) -> None:
+    """Emit the evidence-based report next to the block artifact, best effort.
+
+    The block gate stays authoritative; this only proves the persisted evidence
+    survived the failure and is still reportable without training.  Failures
+    here are recorded and never mask the original exception.
+    """
+    try:
+        recovery = dte.regenerate_report(
+            root,
+            report_name="final_report_from_durable_evidence.md",
+            title=f"{REPORT_TITLE} — recovered after {type(exc).__name__}",
+        )
+        print(
+            f"[H4M-U] durable evidence report after {type(exc).__name__}: "
+            f"{recovery['report_status']} records={recovery['record_count']}/{recovery['expected_record_count']}"
+        )
+    except Exception as recovery_exc:  # noqa: BLE001 - never mask the original failure
+        write_json(
+            root / "report_recovery.json",
+            {
+                "stage": STAGE,
+                "recovered": False,
+                "original_exception": type(exc).__name__,
+                "recovery_exception": repr(recovery_exc),
+                "training_invocations": 0,
+                "optimizer_step_count": 0,
+            },
+        )
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=REPORT_TITLE)
+    parser.add_argument(
+        "--regenerate-report",
+        type=Path,
+        default=None,
+        metavar="ARTIFACT_ROOT",
+        help="rebuild final_report.md from persisted durable evidence; no training, optimizer, or device is created",
+    )
+    args = parser.parse_args()
+    if args.regenerate_report is not None:
+        raise SystemExit(regenerate_report_only(args.regenerate_report))
+
     started = time.perf_counter()
     created_at = now().isoformat()
     stamp = now().strftime("%Y%m%d_%H%M%S%z")[:-2] + ":00"
@@ -458,16 +709,45 @@ def main() -> None:
         write_block(root, binding, "MPS_NOT_AVAILABLE", started)
         return
     update_audits: List[Dict[str, Any]] = []
+    dte = load_durable_evidence()
+    evidence_dir = root / dte.EVIDENCE_DIR_NAME
+    run_header = {
+        "stage": STAGE,
+        "created_at": created_at,
+        "artifact_root": str(root),
+        "seeds": EXPECTED["seeds"],
+        "outer_training_count": EXPECTED["outer_training_count"],
+        "source_commit": provenance["source_commit_before_run"],
+        "split_sha256": EXPECTED["r3_split_sha256"],
+        "schedule_sha256": EXPECTED["h4m_b_schedule_sha256"],
+        "actor_repair_contract_sha256": EXPECTED["actor_repair_contract_sha256"],
+        "critic_repair_contract_sha256": EXPECTED["critic_repair_contract_sha256"],
+        "reward_v2_sha256": EXPECTED["reward_v2_sha256"],
+        "zero_loss_adapter_sha256": EXPECTED["zero_loss_adapter_sha256"],
+        "ppo_updates_per_seed": EXPECTED["ppo_updates_per_seed"],
+        "critic_updates_per_seed": EXPECTED["critic_updates_per_seed"],
+        "device_backend": "MPS",
+        "training_execution_contract": "H4M-Q frozen lineage with H4M-P actor specialization plus H4M-T S3 critic target binding",
+    }
+    expected_grid = [(seed, cycle) for seed in EXPECTED["seeds"] for cycle in range(1, EXPECTED["outer_training_count"] + 1)]
+    writer = dte.DurableCycleEvidenceWriter(evidence_dir, run_header=run_header, expected_grid=expected_grid)
+    binder = CycleEvidenceBinder(dte, writer, root, STAGE, run_header)
     try:
         qmod = import_module(f"h4mu_q_{time.time_ns()}", H4MQ_SOURCE)
         h4mg = import_module(f"h4mu_g_{time.time_ns()}", H4MG_SOURCE)
-        kmod = configure_execution(qmod, h4mg, update_audits)
+        kmod = configure_execution(qmod, h4mg, update_audits, binder)
         base, _rerun = kmod.load_h4m_helpers()
+        bind_cycle_evidence_flush(base, binder)
         device = torch.device("mps")
         training, cycle_summaries, checkpoints_raw, trace_meta = kmod.run_training(base, h4mg, created_at, root, device)
+        writer.mark_training_complete({
+            "total_rollouts": training.get("total_rollouts"),
+            "total_ppo_updates": training.get("total_ppo_updates"),
+            "total_critic_updates": training.get("total_critic_updates"),
+        })
         training.update({"stage": STAGE, "actor_repair_contract_sha256": EXPECTED["actor_repair_contract_sha256"], "critic_repair_contract_sha256": EXPECTED["critic_repair_contract_sha256"], "critic_target_binding_schema": h4mg.CRITIC_VALUE_TARGET_BINDING_SCHEMA, "device_backend": "MPS"})
         conditional = kmod.conditional_policy_discrimination(trace_meta["joined_rows"])
-        conditional["conditional_policy_by_sample_parquet"] = qmod.write_conditional_parquet(base, root, trace_meta["joined_rows"])
+        conditional["conditional_policy_by_sample_parquet"] = kmod.write_conditional_parquet(base, root, trace_meta["joined_rows"])
         validation_plan = qmod.load_validation_plan()
         validation = qmod.validation_discrimination(checkpoints_raw, validation_plan, device)
         validation["large_row_data"] = qmod.write_parquet_large_rows(root, validation)
@@ -475,7 +755,8 @@ def main() -> None:
         gradient = qmod.gradient_audit(h4mg, checkpoints_raw, trace_meta["joined_rows"], created_at, device)
         checkpoints = qmod.checkpoint_manifest(checkpoints_raw)
         credit = critic_credit_diagnostics(root)
-        integrity = training_integrity(training, trace_meta, update_audits, credit, parameter_delta, gradient, checkpoints, validation)
+        evidence = dte.build_report_payload(evidence_dir)
+        integrity = training_integrity(training, trace_meta, update_audits, credit, parameter_delta, gradient, checkpoints, validation, evidence)
         target = target_conditioned_diagnostics(conditional, validation, credit)
         target["target_conditioned_gradient_separation_remains_intact"] = gradient.get("cross_specialized_head_gradient_leakage_count") == 0
         outcome = outcome_classification(validation, target, integrity["training_integrity_passed"])
@@ -485,14 +766,16 @@ def main() -> None:
         seed_rows = {int(row["seed"]): row for row in training["seed_summaries"]}
         for seed in EXPECTED["seeds"]:
             write_json(root / f"seed_{seed}_summary.json", {"seed_summary": seed_rows[seed], "cycle_summaries": [row for row in cycle_summaries if int(row["seed"]) == seed]})
-        payloads = {"repair_binding.json": binding, "training_summary.json": training, "cycle_action_evolution.json": qmod.cycle_action_evolution(training, conditional), "critic_credit_diagnostics.json": credit, "target_conditioned_diagnostics.json": target, "checkpoint_integrity.json": checkpoints, "gradient_isolation.json": gradient, "parameter_delta.json": parameter_delta, "validation_discrimination.json": validation, "training_integrity.json": integrity, "outcome_classification.json": outcome, "changed_files.json": changed, "test_results.json": test_results, "gate_matrix.json": gate, "conditional_policy_discrimination_training_trace.json": conditional}
+        payloads = {"repair_binding.json": binding, "training_summary.json": training, "cycle_action_evolution.json": qmod.cycle_action_evolution(training, conditional), "critic_credit_diagnostics.json": credit, "target_conditioned_diagnostics.json": target, "checkpoint_integrity.json": checkpoints, "gradient_isolation.json": gradient, "parameter_delta.json": parameter_delta, "validation_discrimination.json": validation, "training_integrity.json": integrity, "outcome_classification.json": outcome, "changed_files.json": changed, "test_results.json": test_results, "gate_matrix.json": gate, "conditional_policy_discrimination_training_trace.json": conditional, "durable_evidence_report.json": evidence}
         for name, payload in payloads.items():
             write_json(root / name, payload)
-        (root / "final_report.md").write_text(final_report(binding, training, integrity, outcome, gate), encoding="utf-8")
+        (root / "final_report.md").write_text(final_report(dte, binding, evidence, integrity, outcome, gate), encoding="utf-8")
         write_json(root / "manifest.json", make_manifest(root, gate, started))
+        writer.mark_report_complete({"gate": gate.get("gate"), "report_status": evidence.get("report_status")})
         print(f"[H4M-U] artifact root: {root}\n[H4M-U] gate: {gate['gate']}\n[H4M-U] outcome: {outcome['outcome_classification']}\n[H4M-U] exact next review gate: {gate['exact_next_gate']}")
     except Exception as exc:
         write_block(root, binding, f"EXECUTION_EXCEPTION_{type(exc).__name__}", started)
+        recover_after_reporting_failure(dte, root, exc)
         raise
 
 
