@@ -42,7 +42,7 @@ SOURCE_RELS = [
     Path("05_training") / Path(__file__).name,
 ]
 
-H4M_I_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_i_observation_discrimination_repair_selection_freeze_20260817_092043"
+H4M_I_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_i_observation_discrimination_repair_selection_freeze_20260817_092043+0900"
 H4M_H_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_h_rerun_fresh_instrumented_credit_diagnostic_retraining_20260816_233823+0900"
 H4M_G_CLOSE_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_g_close_instrumentation_diagnosis_repair_validation_closure_20260816_182923+0900"
 H4M_B_ROOT = ARTIFACTS_ROOT / "pv8_r2a_r8e_r3_r_h4m_b_training_budget_extension_selection_and_freeze_20260814_161227"
