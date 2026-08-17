@@ -447,6 +447,10 @@ def build_context(seed: int, created_at: str) -> Dict[str, Any]:
     dl1 = dl4.import_dl1(PROJECT_ROOT)
     mappo_mod = import_module_from_path(TRAINING_ROOT / "mappo_runner.py", f"h4m_g_mappo_{seed}_{time.time_ns()}")
     reward_mod = import_module_from_path(TRAINING_ROOT / "rewards/mappo_reward_v1.py", f"h4m_g_reward_{seed}_{time.time_ns()}")
+    observation_repair = import_module_from_path(
+        TRAINING_ROOT / "observation_target_context_repair.py",
+        f"h4m_g_observation_target_context_repair_{seed}_{time.time_ns()}",
+    )
     schedule = read_json(H4M_B_ROOT / "08_h4m_b_extended_training_schedule_freeze.json")
     window_plan = read_json(H4M_C_ROOT / "seed_001" / "r3_train_window_plan.json")
     train_paths = [Path(row["snapshot_path"]) for row in window_plan["train_rows"]]
@@ -457,7 +461,9 @@ def build_context(seed: int, created_at: str) -> Dict[str, Any]:
     sample_full = dl1.torch_load(train_paths[0])
     spec, inventory, connectivity, tensor_mask = dl1.build_subgraph_spec(PROJECT_ROOT, sample_full, mapping_artifact=mapping_artifact)
     sample_graph = dl1.make_subgraph_data(sample_full, spec)
-    train_data = dl4.load_subgraphs(dl1, train_paths, spec)
+    sample_graph, sample_observation_repair_audit = observation_repair.append_target_context_features(sample_graph, dl1, action_dim=3)
+    train_data_unrepaired = dl4.load_subgraphs(dl1, train_paths, spec)
+    train_data, observation_repair_audit = observation_repair.repair_data_sequence(train_data_unrepaired, dl1, action_dim=3)
     effective_horizon = len(train_data)
     config: Dict[str, Any] = {
         "created_at": created_at,
@@ -492,6 +498,11 @@ def build_context(seed: int, created_at: str) -> Dict[str, Any]:
         "h4g_runtime_sha256": EXPECTED["h4g_runtime_sha256"],
         "r3_split_sha256": EXPECTED["r3_split_sha256"],
         "zero_loss_adapter_sha256": EXPECTED["zero_loss_adapter_sha256"],
+        "observation_repair_contract_sha256": observation_repair.CONTRACT_SHA256,
+        "observation_schema_version": observation_repair.SCHEMA_VERSION,
+        "node_feature_dim_before_observation_repair": 9,
+        "node_feature_dim_after_observation_repair": int(sample_graph.x.size(1)),
+        "target_context_fields": observation_repair.TARGET_CONTEXT_FIELDS,
         "spec": spec,
         "started_at_perf": time.perf_counter(),
     }
@@ -523,6 +534,9 @@ def build_context(seed: int, created_at: str) -> Dict[str, Any]:
         "return_normalizer": return_normalizer,
         "optimizers": optimizers,
         "sample_graph": sample_graph,
+        "observation_repair_module": observation_repair,
+        "sample_observation_repair_audit": sample_observation_repair_audit,
+        "observation_repair_audit": observation_repair_audit,
         "connectivity": connectivity,
         "tensor_mask": tensor_mask,
         "inventory": inventory,
