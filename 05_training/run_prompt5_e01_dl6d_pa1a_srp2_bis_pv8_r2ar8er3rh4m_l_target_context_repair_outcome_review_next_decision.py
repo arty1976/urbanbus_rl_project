@@ -398,6 +398,12 @@ def merge_credit_frames(conditional: pd.DataFrame, reward: pd.DataFrame, td: pd.
 
 def group_summary(frame: pd.DataFrame, keys: Sequence[str]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    def values(group: pd.DataFrame, column: str) -> List[Any]:
+        return group[column].dropna().tolist() if column in group.columns else []
+
+    def mean_or_none(group: pd.DataFrame, column: str) -> Optional[float]:
+        return None if column not in group.columns or group[column].dropna().empty else float(group[column].dropna().mean())
+
     for key_values, group in frame.groupby(list(keys), dropna=False):
         if not isinstance(key_values, tuple):
             key_values = (key_values,)
@@ -409,27 +415,33 @@ def group_summary(frame: pd.DataFrame, keys: Sequence[str]) -> List[Dict[str, An
                 "count": count,
                 "pressure_row_sample_coverage_count": pressure_available,
                 "pressure_row_sample_coverage_rate": safe_rate(pressure_available, count),
-                "reward_v2_raw_total": stats(group["reward_v2_raw_total"].dropna().tolist()),
-                "td_delta": stats(group["td_delta"].dropna().tolist()),
-                "raw_gae_advantage": stats(group["raw_gae_advantage"].dropna().tolist()),
-                "normalized_advantage": stats(group["normalized_advantage"].dropna().tolist()),
-                "raw_gae_positive_rate": float((group["raw_gae_advantage"] > 0).mean()) if count else None,
-                "normalized_advantage_positive_rate": float((group["normalized_advantage"] > 0).mean()) if count else None,
-                "normalized_sign_flip_rate": float((group["sign_change_class"] != "sign_preserved").mean()) if count else None,
+                "reward_v2_raw_total": stats(values(group, "reward_v2_raw_total")),
+                "td_delta": stats(values(group, "td_delta")),
+                "raw_gae_advantage": stats(values(group, "raw_gae_advantage")),
+                "normalized_advantage": stats(values(group, "normalized_advantage")),
+                "raw_gae_positive_rate": None
+                if "raw_gae_advantage" not in group.columns or not count
+                else float((group["raw_gae_advantage"] > 0).mean()),
+                "normalized_advantage_positive_rate": None
+                if "normalized_advantage" not in group.columns or not count
+                else float((group["normalized_advantage"] > 0).mean()),
+                "normalized_sign_flip_rate": None
+                if "sign_change_class" not in group.columns or not count
+                else float((group["sign_change_class"] != "sign_preserved").mean()),
                 "sampled_pressure_increase_rate": None
                 if pressure_available == 0
-                else float(group["sampled_pressure_increase_rate"].dropna().mean()),
+                else mean_or_none(group, "sampled_pressure_increase_rate"),
                 "sampled_pressure_decrease_rate": None
                 if pressure_available == 0
-                else float(group["sampled_pressure_decrease_rate"].dropna().mean()),
-                "hold_pressure_increase_rate": None if pressure_available == 0 else float(group["hold_pressure_increase_rate"].dropna().mean()),
-                "serve_pressure_increase_rate": None if pressure_available == 0 else float(group["serve_pressure_increase_rate"].dropna().mean()),
+                else mean_or_none(group, "sampled_pressure_decrease_rate"),
+                "hold_pressure_increase_rate": None if pressure_available == 0 else mean_or_none(group, "hold_pressure_increase_rate"),
+                "serve_pressure_increase_rate": None if pressure_available == 0 else mean_or_none(group, "serve_pressure_increase_rate"),
                 "net_hold_minus_serve_pressure_increase_rate": None
-                if pressure_available == 0
+                if pressure_available == 0 or "hold_pressure_increase_rate" not in group.columns or "serve_pressure_increase_rate" not in group.columns
                 else float((group["hold_pressure_increase_rate"] - group["serve_pressure_increase_rate"]).dropna().mean()),
-                "P_HOLD": stats(group["P_HOLD"].dropna().tolist()),
-                "P_SERVE": stats(group["P_SERVE"].dropna().tolist()),
-                "policy_margin_hold_minus_serve": stats(group["policy_margin_hold_minus_serve"].dropna().tolist()),
+                "P_HOLD": stats(values(group, "P_HOLD")),
+                "P_SERVE": stats(values(group, "P_SERVE")),
+                "policy_margin_hold_minus_serve": stats(values(group, "policy_margin_hold_minus_serve")),
             }
         )
         rows.append(row)
