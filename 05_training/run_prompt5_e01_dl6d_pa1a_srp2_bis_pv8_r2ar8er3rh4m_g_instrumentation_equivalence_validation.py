@@ -72,6 +72,13 @@ ACTION_NAMES = {
 }
 ACTION_ORDER = [0, 1, 2]
 
+# H4M-T S3 critic target binding.  A critic output is interpreted in the
+# return-normalizer coordinate system that was active when its rollout value
+# was produced.  That coordinate system must therefore remain fixed through
+# all critic-loss evaluations for the rollout; the running statistics advance
+# only after those evaluations finish.
+CRITIC_VALUE_TARGET_BINDING_SCHEMA = "rollout_pre_update_return_normalizer_state_v1"
+
 REQUIRED_ARTIFACTS = [
     "01_authoritative_binding.json",
     "02_instrumentation_implementation_audit.json",
@@ -143,6 +150,68 @@ def sha256_file(path: Path) -> str:
 
 def canonical_sha(value: Any) -> str:
     return sha256_bytes(compact_json(value).encode("utf-8"))
+
+
+def return_normalizer_from_state(dl4: Any, state: Mapping[str, Any]) -> Any:
+    """Create an isolated ReturnNormalizer using an immutable state snapshot."""
+    frozen = dl4.ReturnNormalizer(bool(state.get("enabled", True)))
+    frozen.load_state_dict(state)
+    return frozen
+
+
+def bind_critic_value_target(
+    dl4: Any,
+    return_normalizer: Any,
+    returns_original: torch.Tensor,
+) -> Dict[str, Any]:
+    """Bind one rollout's critic target to the value-time normalizer state.
+
+    The original-scale return remains unchanged.  Only the coordinate system
+    used to present that return to the critic loss is frozen.  This is the
+    first boundary at which the pre-update V(s) and its training target can
+    otherwise be placed in different normalizer coordinate systems.
+    """
+    state = dict(return_normalizer.state_dict())
+    frozen = return_normalizer_from_state(dl4, state)
+    normalized = frozen.normalize(returns_original)
+    state_sha = canonical_sha(state)
+    return {
+        "schema": CRITIC_VALUE_TARGET_BINDING_SCHEMA,
+        "normalizer_state": state,
+        "normalizer_state_sha256": state_sha,
+        "normalized_return_target": normalized.detach(),
+        "normalized_return_target_sha256": tensor_hash(normalized),
+        "return_target_original_sha256": tensor_hash(returns_original),
+        "finite": bool(torch.isfinite(normalized).all().detach().cpu().item()),
+    }
+
+
+def apply_return_normalizer_update_after_critic_update(
+    return_normalizer: Any,
+    rollout: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Advance return statistics only after the rollout's critic updates."""
+    expected = str(rollout["critic_target_normalizer_state_sha256"])
+    before = dict(return_normalizer.state_dict())
+    before_sha = canonical_sha(before)
+    if before_sha != expected:
+        raise RuntimeError(
+            "Critic target normalizer drifted before the post-critic update: "
+            f"expected={expected} observed={before_sha}"
+        )
+    active_returns = rollout["returns_original"][rollout["agent_mask"].bool()]
+    return_normalizer.update(active_returns)
+    after = dict(return_normalizer.state_dict())
+    return {
+        "schema": CRITIC_VALUE_TARGET_BINDING_SCHEMA,
+        "update_timing": "after_all_critic_updates_for_rollout",
+        "state_before": before,
+        "state_after": after,
+        "state_before_sha256": before_sha,
+        "state_after_sha256": canonical_sha(after),
+        "active_return_count": int(active_returns.numel()),
+        "finite": bool(torch.isfinite(active_returns).all().detach().cpu().item()),
+    }
 
 
 def import_module_from_path(path: Path, name: str) -> Any:
@@ -886,7 +955,11 @@ def collect_controlled_rollout(
         float(config["gae_lambda"]),
     )
     return_norm_before = dict(ctx["return_normalizer"].state_dict())
-    return_normalizer.update(returns[masks_t.bool()])
+    critic_target_binding = bind_critic_value_target(dl4, return_normalizer, returns)
+    # Do not advance return-normalizer statistics here.  values_t, TD and GAE
+    # were all calculated in return_norm_before's coordinate system, so the
+    # critic loss must use that same state.  The running statistics advance at
+    # the end of ppo_update_controlled instead.
     return_norm_after = dict(ctx["return_normalizer"].state_dict())
     td_delta_t = normalized_rewards_t + float(config["gamma"]) * next_values_t - values_t
     normalization_scope_id = f"H4M-G-ADV-NORM-SEED-{seed:03d}-CYCLE-{cycle_index:03d}"
@@ -935,6 +1008,10 @@ def collect_controlled_rollout(
                     "td_delta": float(td_delta_t[local_step, agent_slot].detach().cpu().item()),
                     "raw_gae_advantage": raw_adv,
                     "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
+                    "normalized_return_target": float(
+                        critic_target_binding["normalized_return_target"][local_step, agent_slot].detach().cpu().item()
+                    ),
+                    "critic_target_normalizer_state_sha256": critic_target_binding["normalizer_state_sha256"],
                     "gae_recursion_predecessor_uid": prev_uid,
                     "gae_recursion_successor_uid": next_uid,
                     "gae_formula_id": "DL1.compute_gae active-only rollout-global standardization",
@@ -966,7 +1043,10 @@ def collect_controlled_rollout(
                     "sampled_action_name": policy["action"],
                     "value_t_before_update": float(values_t[local_step, agent_slot].detach().cpu().item()),
                     "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
-                    "normalized_return_target": None,
+                    "normalized_return_target": float(
+                        critic_target_binding["normalized_return_target"][local_step, agent_slot].detach().cpu().item()
+                    ),
+                    "critic_target_normalizer_state_sha256": critic_target_binding["normalizer_state_sha256"],
                     "value_error": value_error,
                     "squared_error": value_error * value_error,
                     "time_band": str(window_rows[local_step].get("time_band")),
@@ -991,6 +1071,12 @@ def collect_controlled_rollout(
         "sample_uid_grid": sample_uid_grid,
         "active_order": active_order,
         "returns_original": returns.detach(),
+        "critic_target_normalized": critic_target_binding["normalized_return_target"].detach(),
+        "critic_target_normalizer_state": critic_target_binding["normalizer_state"],
+        "critic_target_normalizer_state_sha256": critic_target_binding["normalizer_state_sha256"],
+        "critic_target_normalized_sha256": critic_target_binding["normalized_return_target_sha256"],
+        "critic_target_binding_schema": critic_target_binding["schema"],
+        "critic_target_binding_finite": critic_target_binding["finite"],
         "advantages": advantages.detach(),
         "normalized_advantages": normalized_advantages.detach(),
         "gae_audit": gae_audit,
@@ -1009,6 +1095,7 @@ def collect_controlled_rollout(
         "reward_normalizer_state_after": reward_norm_after,
         "return_normalizer_state_before": return_norm_before,
         "return_normalizer_state_after": return_norm_after,
+        "return_normalizer_update_deferred_until_after_critic_update": True,
     }
 
 
@@ -1030,6 +1117,7 @@ def materialize_rollout_credit_trace(
     next_values_t = rollout["next_values_original"]
     normalized_rewards_t = rollout["normalized_rewards"]
     returns = rollout["returns_original"]
+    normalized_return_targets = rollout["critic_target_normalized"]
     device = values_t.device
     terminated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
     truncated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
@@ -1082,6 +1170,10 @@ def materialize_rollout_credit_trace(
                 "td_delta": float(td_delta_t[local_step, agent_slot].detach().cpu().item()),
                 "raw_gae_advantage": raw_adv,
                 "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
+                "normalized_return_target": float(
+                    normalized_return_targets[local_step, agent_slot].detach().cpu().item()
+                ),
+                "critic_target_normalizer_state_sha256": rollout["critic_target_normalizer_state_sha256"],
                 "gae_recursion_predecessor_uid": prev_uid,
                 "gae_recursion_successor_uid": next_uid,
                 "gae_formula_id": "DL1.compute_gae active-only rollout-global standardization",
@@ -1115,7 +1207,10 @@ def materialize_rollout_credit_trace(
                 "sampled_action_name": policy["action"],
                 "value_t_before_update": float(values_t[local_step, agent_slot].detach().cpu().item()),
                 "raw_return_target": float(returns[local_step, agent_slot].detach().cpu().item()),
-                "normalized_return_target": None,
+                "normalized_return_target": float(
+                    normalized_return_targets[local_step, agent_slot].detach().cpu().item()
+                ),
+                "critic_target_normalizer_state_sha256": rollout["critic_target_normalizer_state_sha256"],
                 "value_error": value_error,
                 "squared_error": value_error * value_error,
                 "time_band": policy.get("time_band"),
@@ -1221,6 +1316,16 @@ def ppo_update_controlled(
     selected_flat = valid_flat[: min(int(config["minibatch_size"]), int(valid_flat.numel()))]
     if selected_flat.numel() == 0:
         raise RuntimeError("No active samples for controlled PPO update.")
+    expected_target_state_sha = str(rollout["critic_target_normalizer_state_sha256"])
+    live_target_state_sha = canonical_sha(return_normalizer.state_dict())
+    if live_target_state_sha != expected_target_state_sha:
+        raise RuntimeError(
+            "Critic target binding mismatch at PPO entry: "
+            f"expected={expected_target_state_sha} observed={live_target_state_sha}"
+        )
+    critic_target_normalizer = return_normalizer_from_state(
+        dl4, rollout["critic_target_normalizer_state"]
+    )
     entropy_coef = float(rollout.get("entropy_coef_mean", 0.01))
     metrics_rows: List[Dict[str, Any]] = []
     gradient_rows: List[Dict[str, Any]] = []
@@ -1241,7 +1346,7 @@ def ppo_update_controlled(
             absolute = offset + local_step
             data = data_seq[absolute].to(device)
             logits, critic_out, value_original, _mask = dl4.forward_scaled(
-                dl1, data, rollout["agent_indices"][local_step], encoder, actor, critic, return_normalizer
+                dl1, data, rollout["agent_indices"][local_step], encoder, actor, critic, critic_target_normalizer
             )
             masked_logits, _allowed = h4k.masked_logits_for_targets(logits, rollout["targets"][local_step].to(device))
             dist = Categorical(logits=masked_logits)
@@ -1262,7 +1367,7 @@ def ppo_update_controlled(
         flat_returns_original = returns_original.reshape(-1)
         flat_critic_outputs = critic_outputs_t.reshape(-1)
         flat_values_original = values_original_t.reshape(-1)
-        target_for_loss = return_normalizer.normalize(flat_returns_original)
+        target_for_loss = rollout["critic_target_normalized"].to(device).reshape(-1)
         idx = selected_flat.to(device)
         ratio = torch.exp(flat_new[idx] - flat_old[idx])
         unclipped = ratio * flat_adv[idx]
@@ -1368,6 +1473,8 @@ def ppo_update_controlled(
                 "ppo_update_index": ppo_update_index,
                 "update_role": "actor_gatv2_critic_joint",
                 "entropy_coef": entropy_coef,
+                "critic_target_normalizer_state_sha256": expected_target_state_sha,
+                "critic_target_binding_schema": rollout["critic_target_binding_schema"],
                 "policy_loss": float(policy_loss.detach().cpu().item()),
                 "value_loss": float(value_loss.detach().cpu().item()),
                 "actor_entropy": float(entropy.detach().cpu().item()),
@@ -1426,13 +1533,13 @@ def ppo_update_controlled(
         for agent_emb, graph_emb in zip(detached_embeddings, graph_embeddings):
             critic_out = critic(agent_emb, graph_emb).reshape(-1)
             critic_outputs.append(critic_out)
-            values_original.append(return_normalizer.denormalize(critic_out))
+            values_original.append(critic_target_normalizer.denormalize(critic_out))
         critic_outputs_t = torch.stack(critic_outputs)
         values_original_t = torch.stack(values_original)
         flat_returns_original = rollout["returns_original"].to(device).reshape(-1)
         flat_critic_outputs = critic_outputs_t.reshape(-1)
         flat_values_original = values_original_t.reshape(-1)
-        target_for_loss = return_normalizer.normalize(flat_returns_original)
+        target_for_loss = rollout["critic_target_normalized"].to(device).reshape(-1)
         mask_flat = torch.stack(masks).reshape(-1)
         valid_flat_extra = torch.where(mask_flat)[0]
         idx = valid_flat_extra[: min(int(config["minibatch_size"]), int(valid_flat_extra.numel()))].to(device)
@@ -1457,6 +1564,8 @@ def ppo_update_controlled(
                 "update_role": "critic_only_extra",
                 "policy_loss": None,
                 "value_loss": float(value_loss.detach().cpu().item()),
+                "critic_target_normalizer_state_sha256": expected_target_state_sha,
+                "critic_target_binding_schema": rollout["critic_target_binding_schema"],
                 "gatv2_grad_norm_before_clip": 0.0,
                 "gatv2_grad_norm_after_clip": 0.0,
                 "actor_grad_norm_before_clip": 0.0,
@@ -1487,6 +1596,8 @@ def ppo_update_controlled(
         )
         loss_rows.append({"rollout_index": cycle_index, "ppo_update_index": ppo_update_index, **finite_losses})
 
+    return_normalizer_update = apply_return_normalizer_update_after_critic_update(return_normalizer, rollout)
+
     if recorder and recorder.enabled and recorder.deferred_materialization:
         materialize_rollout_credit_trace(
             seed=seed,
@@ -1508,6 +1619,8 @@ def ppo_update_controlled(
         "gradient_rows": gradient_rows,
         "loss_rows": loss_rows,
         "ppo_fingerprint_rows": ppo_fingerprint_rows,
+        "critic_target_normalizer_state_sha256": expected_target_state_sha,
+        "return_normalizer_update": return_normalizer_update,
     }
 
 
