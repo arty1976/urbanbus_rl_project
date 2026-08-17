@@ -523,13 +523,27 @@ def instrumentation_compatibility(h4mg: Any, ctx: Mapping[str, Any], created_at:
     recorder = h4mg.TraceRecorder(root=artifact_root / "instrumentation_smoke_trace", enabled=True)
     before_rng = h4mg.rng_snapshot()
     before_model = h4mg.model_hashes(ctx["dl1"], ctx["encoder"], ctx["actor"], ctx["critic"])
-    rollout = h4mg.collect_controlled_rollout("H4M_J_INSTRUMENTATION_SMOKE", 1, 1, ctx, recorder)
+    rollout = h4mg.collect_controlled_rollout(
+        branch="H4M_J_INSTRUMENTATION_SMOKE",
+        seed=1,
+        cycle_index=1,
+        ctx=ctx,
+        recorder=recorder,
+    )
     before_state = {
         "gatv2": ctx["dl1"].clone_state_dict(ctx["encoder"]),
         "actor": ctx["dl1"].clone_state_dict(ctx["actor"]),
         "critic": ctx["dl1"].clone_state_dict(ctx["critic"]),
     }
-    update = h4mg.ppo_update_controlled("H4M_J_INSTRUMENTATION_SMOKE", 1, 1, ctx, rollout, before_state, recorder)
+    update = h4mg.ppo_update_controlled(
+        branch="H4M_J_INSTRUMENTATION_SMOKE",
+        seed=1,
+        cycle_index=1,
+        ctx=ctx,
+        rollout=rollout,
+        before_state=before_state,
+        recorder=recorder,
+    )
     after_update_rng = h4mg.rng_snapshot()
     after_update_model = h4mg.model_hashes(ctx["dl1"], ctx["encoder"], ctx["actor"], ctx["critic"])
     smoke_shadow = h4mg.TraceRecorder(root=artifact_root / "instrumentation_shadow_smoke", enabled=True)
