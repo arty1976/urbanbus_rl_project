@@ -589,7 +589,7 @@ def instrumentation_compatibility(h4mg: Any, ctx: Mapping[str, Any], created_at:
         "loss_rows_finite": all(all(bool(v) for k, v in row.items() if k.endswith("_finite")) for row in update["loss_rows"]),
         "instrumentation_compatibility_passed": target_context_present
         and all(count > 0 for count in row_counts.values())
-        and bool(shadow_result.get("rng_unchanged_by_private_shadow"))
+        and bool(shadow_result.get("global_rng_unchanged_by_private_shadow"))
         and after_update_model == after_model
         and before_model != after_model,
         "notes": [
