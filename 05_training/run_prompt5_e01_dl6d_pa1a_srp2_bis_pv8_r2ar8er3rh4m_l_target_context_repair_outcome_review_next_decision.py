@@ -735,9 +735,11 @@ def long_horizon_credit_alignment(merged: pd.DataFrame) -> Dict[str, Any]:
     focus = frame[(frame["target_name"] == ACTION_HOLD) & (frame["classification"] == CLASS_HOLD_BETTER)]
     return {
         "stage": STAGE,
-        "long_horizon_crosswalk_complete": int(len(frame)) == 11616
+        "long_horizon_crosswalk_complete": bool(
+            int(len(frame)) == 11616
         and frame["classification"].notna().all()
-        and frame["delta_full_bootstrapped_return_serve_minus_hold"].notna().all(),
+            and frame["delta_full_bootstrapped_return_serve_minus_hold"].notna().all()
+        ),
         "total_rows": int(len(frame)),
         "by_target_and_long_horizon_classification": rows,
         "focus_target_hold_hold_better": {
