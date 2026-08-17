@@ -347,16 +347,31 @@ class GATv2Encoder(torch.nn.Module):
 
 
 class MAPPOActor(torch.nn.Module):
-    def __init__(self, hidden_channels: int, action_dim: int) -> None:
+    def __init__(self, hidden_channels: int, action_dim: int, target_context_dim: int = 0) -> None:
         super().__init__()
+        self.hidden_channels = int(hidden_channels)
+        self.action_dim = int(action_dim)
+        self.target_context_dim = int(target_context_dim)
+        self.actor_conditioned_input_dim = self.hidden_channels + self.target_context_dim
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.Linear(self.actor_conditioned_input_dim, self.hidden_channels),
             torch.nn.Tanh(),
-            torch.nn.Linear(hidden_channels, action_dim),
+            torch.nn.Linear(self.hidden_channels, self.action_dim),
         )
 
-    def forward(self, agent_embeddings: torch.Tensor) -> torch.Tensor:
-        return self.net(agent_embeddings)
+    def forward(self, agent_embeddings: torch.Tensor, target_context: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.target_context_dim > 0:
+            if target_context is None:
+                raise ValueError("MAPPOActor target_context is required when target_context_dim > 0.")
+            if target_context.size(-1) != self.target_context_dim:
+                raise ValueError(
+                    f"MAPPOActor expected target_context_dim={self.target_context_dim}, "
+                    f"got {target_context.size(-1)}."
+                )
+            conditioned_input = torch.cat([agent_embeddings, target_context.to(agent_embeddings.device, dtype=agent_embeddings.dtype)], dim=-1)
+        else:
+            conditioned_input = agent_embeddings
+        return self.net(conditioned_input)
 
 
 class CentralizedCritic(torch.nn.Module):
@@ -866,7 +881,16 @@ def forward_policy(
     graph_embedding = masked_graph_embedding(node_embeddings, data.node_mask)
     idx = torch.tensor(list(agent_indices), dtype=torch.long, device=node_embeddings.device)
     agent_embeddings = node_embeddings[idx]
-    logits = actor(agent_embeddings)
+    target_context_dim = int(getattr(actor, "target_context_dim", 0))
+    if target_context_dim > 0:
+        if data.x.size(-1) < target_context_dim:
+            raise ValueError(
+                f"Actor target_context_dim={target_context_dim} exceeds node feature dim={data.x.size(-1)}."
+            )
+        target_context = data.x[idx, -target_context_dim:]
+        logits = actor(agent_embeddings, target_context)
+    else:
+        logits = actor(agent_embeddings)
     values = critic(agent_embeddings, graph_embedding).reshape(-1)
     agent_mask = data.node_mask[idx].bool()
     return logits, values, agent_mask, node_embeddings

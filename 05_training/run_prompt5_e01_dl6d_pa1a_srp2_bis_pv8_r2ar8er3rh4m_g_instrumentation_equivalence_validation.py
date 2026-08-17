@@ -503,11 +503,21 @@ def build_context(seed: int, created_at: str) -> Dict[str, Any]:
         "node_feature_dim_before_observation_repair": 9,
         "node_feature_dim_after_observation_repair": int(sample_graph.x.size(1)),
         "target_context_fields": observation_repair.TARGET_CONTEXT_FIELDS,
+        "actor_target_context_direct_conditioning_repair_active": True,
+        "actor_target_context_direct_conditioning_repair_contract_sha256": "5637381f6f450cbda6f01a76126a5940b31984edf6b782d71ca224c4accf8754",
+        "actor_target_context_source": "data.x[agent_id, -3:] existing pre-action 12D observation fields",
+        "actor_target_context_dim": 3,
+        "actor_conditioned_input_dim": 128 + 3,
+        "actor_conditioned_input_schema": "concat(GATv2_agent_embedding_128d, r3_action_target_one_hot_3d)",
         "spec": spec,
         "started_at_perf": time.perf_counter(),
     }
     encoder = dl1.GATv2Encoder(sample_graph.x.size(1), int(config["gatv2_hidden"]), sample_graph.edge_attr.size(1)).to(device)
-    actor = dl1.MAPPOActor(int(config["gatv2_hidden"]), int(config["action_dim"])).to(device)
+    actor = dl1.MAPPOActor(
+        int(config["gatv2_hidden"]),
+        int(config["action_dim"]),
+        target_context_dim=int(config["actor_target_context_dim"]),
+    ).to(device)
     critic = dl1.CentralizedCritic(int(config["gatv2_hidden"])).to(device)
     reward_normalizer = mappo_mod.RewardNormalizer(window_size=1000, clip_value=10.0)
     return_normalizer = dl4.ReturnNormalizer(True)
@@ -686,6 +696,16 @@ def collect_controlled_rollout(
                 if bool(is_active):
                     agent_id = int(indices[agent_slot])
                     actor_obs_hash = tensor_hash(data.x[agent_id])
+                    actor_target_context_dim = int(getattr(actor, "target_context_dim", 0))
+                    actor_target_context = (
+                        data.x[agent_id, -actor_target_context_dim:].detach().cpu()
+                        if actor_target_context_dim > 0
+                        else torch.empty(0, dtype=data.x.dtype)
+                    )
+                    actor_conditioned_input_shape = [
+                        int(config["gatv2_hidden"]) + actor_target_context_dim
+                    ]
+                    actor_target_context_values = [float(v) for v in actor_target_context.tolist()]
                     legal_ids = [int(i) for i, v in enumerate(allowed[agent_slot].detach().cpu().tolist()) if bool(v)]
                     state_ts = f"{window.get('start_iso')}#absolute_step={absolute}#agent_slot={agent_slot}"
                     state_hash = canonical_sha(
@@ -698,6 +718,8 @@ def collect_controlled_rollout(
                             "actor_observation_hash": actor_obs_hash,
                             "critic_observation_hash": critic_graph_hash,
                             "target_id": int(target_id),
+                            "actor_target_context_dim": actor_target_context_dim,
+                            "actor_target_context": actor_target_context_values,
                             "legal_action_ids": legal_ids,
                         }
                     )
@@ -747,6 +769,18 @@ def collect_controlled_rollout(
                         "critic_observation_hash": critic_graph_hash,
                         "actor_observation_shape": list(data.x[agent_id].detach().cpu().shape),
                         "critic_observation_shape": list(data.x.detach().cpu().shape),
+                        "actor_direct_conditioning_active": actor_target_context_dim > 0,
+                        "actor_target_context_dim": actor_target_context_dim,
+                        "actor_target_context_fields": list(config.get("target_context_fields", []))[-actor_target_context_dim:]
+                        if actor_target_context_dim > 0
+                        else [],
+                        "actor_target_context_values": actor_target_context_values,
+                        "actor_target_context_one_hot_sum": float(sum(actor_target_context_values)),
+                        "actor_target_context_hash": tensor_hash(actor_target_context)
+                        if actor_target_context_dim > 0
+                        else None,
+                        "actor_conditioned_input_shape": actor_conditioned_input_shape,
+                        "actor_conditioned_input_schema": config.get("actor_conditioned_input_schema", "GATv2_agent_embedding_only"),
                         "policy_entropy": float(entropy[agent_slot].detach().cpu().item()),
                         "sampled_action_log_prob": float(log_prob[agent_slot].detach().cpu().item()),
                         "action_sampling_rng_ref": rng_before_sample["torch_cpu_rng_sha256"],
