@@ -25,10 +25,19 @@ LEGACY_FALLBACK_MULTIPLIER = 1.65
 TOL = 1e-9
 
 
-def drive(adapter: Any, actions: List[int], steps: int) -> None:
+def vehicle_clock(adapter: Any) -> float:
+    return max(float(getattr(v, "clock_seconds", 0.0)) for v in adapter.state["vehicles"].values())
+
+
+def drive(adapter: Any, actions: List[int], steps: int = 0, *, cap: int = 4000) -> None:
+    """Step until the external evaluation boundary is reached (or the cap trips)."""
     adapter.reset()
     n = len(adapter.state["vehicles"])
-    for i in range(steps):
+    i = -1
+    while i + 1 < cap:
+        i += 1
+        if vehicle_clock(adapter) >= adapter.horizon_seconds and i >= steps:
+            break
         act = {a: actions[(i + a) % len(actions)] for a in range(n)}
         mask = {a: [True, True, True] for a in range(n)}
         targets = {a: 1 for a in range(n)}
@@ -43,11 +52,11 @@ def run_validations() -> Dict[str, Any]:
     energy_mod = r3.imp("energy", r3.ENERGY)
     agg = r3.imp("agg", r3.AGGREGATOR)
     plan, sample_graph, config, data, device, window = r3.build_env(bridge, qmod, dl1, dl4)
-    demand = r3.demand_fields_for(window["window_id"])
     agents = len(plan["agent_indices"]) if isinstance(plan.get("agent_indices"), list) else 4
+    adapter_inputs = r3.authoritative_adapter_inputs(window, num_agents=agents)
 
     def adapter(seed: int = 1):
-        return bridge.PV8CausalKpiAdapter(window=window, num_agents=agents, seed=seed, demand_fields=demand)
+        return bridge.PV8CausalKpiAdapter(**{**adapter_inputs, "seed": seed})
 
     checks: Dict[str, Any] = {}
 
@@ -194,9 +203,9 @@ def run_validations() -> Dict[str, Any]:
         "import sys,json;sys.path.insert(0,%r);"
         "import test_h4m_ae_r3_causal_kpi_bridge as r3;"
         "b=r3.imp('bridge',r3.BRIDGE);"
-        "a=b.PV8CausalKpiAdapter(window=%s,num_agents=%d,seed=1,demand_fields=%s);a.reset();"
+        "a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d));a.reset();"
         "print(json.dumps([s.arrival_schedule for s in a.state['stops'].values()]))"
-    ) % (str(TRAINING_ROOT), repr(dict(window)), agents, repr(demand))
+    ) % (str(TRAINING_ROOT), repr(dict(window)), agents)
     outs = [
         subprocess.run(
             [sys.executable, "-c", probe], cwd=TRAINING_ROOT,
@@ -279,6 +288,7 @@ def run_validations() -> Dict[str, Any]:
             and row["wait_tail_measured"] is True
             and row["wait_tail_fallback_used"] is False
             and abs(emitted - float(canonical["value_seconds"])) <= TOL
+            and np.isfinite(avg_wait)
             and abs(legacy_value - avg_wait * LEGACY_FALLBACK_MULTIPLIER) <= 1e-6
             and abs(emitted - legacy_value) > 1e-6
         ),
@@ -358,7 +368,8 @@ def run_validations() -> Dict[str, Any]:
     }
 
     # -- VpC frozen avg-wait semantics preserved (spec 2.1) --------------------
-    ledger_mean = float(np.mean(pop["completed_wait_ledger"])) if pop["completed_wait_ledger"] else 0.0
+    completed_present = bool(pop["completed_wait_ledger"])
+    ledger_mean = float(np.mean(pop["completed_wait_ledger"])) if completed_present else None
     censored_leak = abs(row["wait_total_passenger_seconds"] - ledger_sum) > 1e-6
     checks["VpC_avg_wait_semantics_preserved"] = {
         "definition": bridge.KPI_FIELD_PROVENANCE["avg_wait_seconds"],
@@ -366,7 +377,9 @@ def run_validations() -> Dict[str, Any]:
         "completed_ledger_mean": ledger_mean,
         "censored_leaked_into_mean": censored_leak,
         "formula_unchanged": "wait_total_passenger_seconds / wait_passenger_count",
-        "passed": not censored_leak and abs(avg_wait - ledger_mean) <= 1e-6,
+        "completed_population_present": completed_present,
+        "avg_wait_status": "MEASURED" if completed_present else "NOT_APPLICABLE_EMPTY_COMPLETED_LEDGER",
+        "passed": (not censored_leak) and completed_present and abs(avg_wait - ledger_mean) <= 1e-6,
     }
 
     return {

@@ -43,7 +43,6 @@ def run_validations() -> Dict[str, Any]:
     energy_mod = r3.imp("energy", r3.ENERGY)
     agg = r3.imp("agg", AGGREGATOR)
     plan, sample_graph, config, data, device, window = r3.build_env(bridge, qmod, dl1, dl4)
-    demand_fields = r3.demand_fields_for(window["window_id"])
     checkpoints = r3.promoted_checkpoints()
     policy = bridge.PromotedPolicyBridge(checkpoints[0], dl1, dl4, sample_graph, device)
     graph = data[0].to(device)
@@ -51,8 +50,10 @@ def run_validations() -> Dict[str, Any]:
     num_agents = len(agent_indices)
     checks: Dict[str, Any] = {}
 
+    adapter_inputs = r3.authoritative_adapter_inputs(window, num_agents=num_agents)
+
     def adapter(seed: int = 1):
-        return bridge.PV8CausalKpiAdapter(window=window, num_agents=num_agents, seed=seed, demand_fields=demand_fields)
+        return bridge.PV8CausalKpiAdapter(**{**adapter_inputs, "seed": seed})
 
     def promoted_actions(adp: Any, legal_mask: Dict[int, List[bool]]) -> Dict[int, int]:
         decision = policy.act(graph, agent_indices, qmod.masked_logits_for_targets)
@@ -79,7 +80,7 @@ def run_validations() -> Dict[str, Any]:
             "environment": arms.environment_contract(adp, module_shas),
             "contract": contract.payload(),
         }
-        for _ in range(STEPS):
+        while max(float(getattr(v, "clock_seconds", 0.0)) for v in adp.state["vehicles"].values()) < adp.horizon_seconds:
             mask = {a: [True, True, True] for a in range(num_agents)}
             actions = contract.action_fn(adp, mask)
             adp.step(actions, legal_mask=mask, target_ids={a: 1 for a in range(num_agents)},
@@ -96,7 +97,7 @@ def run_validations() -> Dict[str, Any]:
     served_by_horizon = len(a_pop["completed_wait_ledger"])
     unserved_at_horizon = len(a_pop["censored_wait_ledger"])
     post_horizon = int(a_pop["post_horizon_boarding_count"])
-    eventually_served = int(a_row["passenger_served_count"])
+    eventually_served = int(a_row["diagnostic_passenger_eventual_served_count"])
 
     # ---- D0: population closure --------------------------------------------
     checks["R4_01_population_closure"] = {
@@ -192,30 +193,37 @@ def run_validations() -> Dict[str, Any]:
         "passed": True,
     }
 
+    bridge_source = r3.BRIDGE.read_text(encoding="utf-8")
+    request_ids = [rid for stop in adp.state["stops"].values() for rid in stop.request_ids]
+    authoritative_ids = [r.request_id for r in adapter_inputs["demand_population"]]
+    retired_tokens = {
+        "aggregate_per_stop_expansion": "_arrival_schedule",
+        "six_hundred_second_rescaling": "/ 600.0",
+        "demand_score_multiplier": "* 0.1",
+        "demand_fields_input": "demand_fields",
+        "uniform_arrival_draw": "rng.uniform",
+    }
+    active_tokens = {name: token for name, token in retired_tokens.items() if token in bridge_source}
     duplication = {
-        "bridge_rate_expression": "historical_boarding_intensity + 0.1 * historical_demand_score",
-        "bridge_rate_value": bridge_rate,
-        "bridge_per_stop_expected": per_stop,
-        "bridge_stop_count": int(adp.stop_count),
-        "bridge_total": per_stop * int(adp.stop_count),
+        "authoritative_population_count": len(authoritative_ids),
+        "simulator_request_count": len(request_ids),
+        "distinct_simulator_request_ids": len(set(request_ids)),
+        "request_ids_match_authoritative": sorted(request_ids) == sorted(authoritative_ids),
+        "duplicated_request_ids": len(request_ids) - len(set(request_ids)),
         "observed_demand_generated": demand_total,
-        "arithmetic_reproduced": per_stop * int(adp.stop_count) == demand_total,
+        "active_synthetic_demand_tokens": active_tokens,
+        "aggregate_per_stop_expansion_active": "_arrival_schedule" in bridge_source,
         "defects": [],
     }
-    if intensity > 0 and per_stop * adp.stop_count > 10 * intensity:
-        duplication["defects"].append("WINDOW_LEVEL_AGGREGATE_APPLIED_PER_STOP")
-    if abs(adp.horizon_seconds / 600.0 - 1.0) > 1e-9:
-        duplication["defects"].append("UNPROVEN_600_SECOND_RATE_RESCALING")
-    if score > 0:
-        duplication["defects"].append("UNTRACEABLE_0_1_DEMAND_SCORE_ADDITION")
-    if int(adp.stop_count) != int(reg_row["mapped_stop_count"]):
-        duplication["defects"].append("SIMULATOR_STOP_UNIVERSE_DIFFERS_FROM_REGISTRY_MAPPED_STOPS")
-    if len(auth_window) and demand_total > 10 * len(auth_window):
-        duplication["defects"].append("IGNORES_AUTHORITATIVE_FROZEN_DEMAND_REALIZATION")
+    if duplication["duplicated_request_ids"]:
+        duplication["defects"].append("DUPLICATE_REQUEST_MATERIALIZED_IN_SIMULATOR")
+    if not duplication["request_ids_match_authoritative"]:
+        duplication["defects"].append("SIMULATOR_POPULATION_DIFFERS_FROM_AUTHORITATIVE_REALIZATION")
+    if demand_total != len(authoritative_ids):
+        duplication["defects"].append("DEMAND_COUNT_MISMATCH")
+    if active_tokens:
+        duplication["defects"].append("SYNTHETIC_DEMAND_PATH_STILL_PRESENT")
     duplication["duplication_detected"] = bool(duplication["defects"])
-    duplication["overgeneration_factor_vs_authoritative"] = (
-        demand_total / len(auth_window) if len(auth_window) else None
-    )
     duplication["passed"] = not duplication["duplication_detected"]
     checks["R4_08_demand_expansion_no_duplication"] = duplication
 
@@ -225,9 +233,9 @@ def run_validations() -> Dict[str, Any]:
         "import sys,json;sys.path.insert(0,%r);"
         "import test_h4m_ae_r3_causal_kpi_bridge as r3;import causal_arm_contracts as arms;"
         "b=r3.imp('bridge',r3.BRIDGE);"
-        "a=b.PV8CausalKpiAdapter(window=%s,num_agents=%d,seed=1,demand_fields=%s);a.reset();"
+        "a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d));a.reset();"
         "print(arms.demand_realization_hash(a))"
-    ) % (str(TRAINING_ROOT), repr(dict(window)), num_agents, repr(demand_fields))
+    ) % (str(TRAINING_ROOT), repr(dict(window)), num_agents)
     cross = [
         subprocess.run([sys.executable, "-c", probe], cwd=TRAINING_ROOT,
                        env=dict(os.environ, PYTHONHASHSEED=salt), capture_output=True, text=True, check=True).stdout.strip()

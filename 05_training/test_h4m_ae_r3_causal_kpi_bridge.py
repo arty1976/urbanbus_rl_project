@@ -56,18 +56,43 @@ def promoted_checkpoints() -> List[Path]:
     return sorted(ARTIFACTS_ROOT.glob(PROMOTED_GLOB))
 
 
-def demand_fields_for(window_id: str) -> Dict[str, Any]:
+AUTHORITATIVE_DEMAND = (
+    ARTIFACTS_ROOT
+    / "prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3r_representative_b1_regeneration_20260809_200442"
+    / "r8er3r_generated_demand.parquet"
+)
+
+
+def registry_row(window_id: str):
     import pandas as pd
 
     registry = pd.read_parquet(REGISTRY)
     row = registry[registry["window_id"].astype(str) == str(window_id)]
     if row.empty:
         raise RuntimeError(f"window {window_id} missing from the representative registry")
-    record = row.iloc[0]
+    return row.iloc[0]
+
+
+def authoritative_adapter_inputs(window: Mapping[str, Any], *, seed: int = 1, num_agents: int = 4) -> Dict[str, Any]:
+    """Adapter kwargs bound to the frozen demand realization and the external evaluation boundary."""
+    demand_mod = imp("authoritative_demand", TRAINING_ROOT / "authoritative_demand_realization.py")
+    record = registry_row(window["window_id"])
+    contract = demand_mod.EvaluationTimeContract(
+        evaluation_start_ts=float(record["start_ts"]),
+        evaluation_end_ts=float(record["evaluation_end_ts"]),
+        reporting_window_ids=[str(window["window_id"])],
+        scope_label="MAC_MINI_REDUCED_VALIDATION",
+    )
+    realization = demand_mod.load_demand_realization(AUTHORITATIVE_DEMAND)
+    selection = demand_mod.select_population(realization, contract)
     return {
-        "historical_boarding_intensity": float(record["historical_boarding_intensity"]),
-        "historical_alighting_intensity": float(record["historical_alighting_intensity"]),
-        "historical_demand_score": float(record["historical_demand_score"]),
+        "window": dict(window),
+        "num_agents": num_agents,
+        "seed": seed,
+        "evaluation_contract": contract,
+        "demand_population": selection["requests"],
+        "demand_provenance": realization.provenance(),
+        "population_audit": selection["audit"],
     }
 
 
@@ -126,7 +151,7 @@ def run_validations() -> Dict[str, Any]:
         and prov["policy_source_mode"] == "actual_promoted_mappo_checkpoint",
     }
 
-    demand = demand_fields_for(window["window_id"])
+    adapter_inputs = authoritative_adapter_inputs(window, num_agents=len(agent_indices))
     provenance = {
         "condition_id": "A",
         "policy_source_mode": prov["policy_source_mode"],
@@ -135,7 +160,7 @@ def run_validations() -> Dict[str, Any]:
     }
 
     def fresh_adapter(seed: int = 1):
-        return bridge.PV8CausalKpiAdapter(window=window, num_agents=len(agent_indices), seed=seed, demand_fields=demand)
+        return bridge.PV8CausalKpiAdapter(**{**adapter_inputs, "seed": seed})
 
     mask = {agent: [True] * 3 for agent in range(len(agent_indices))}
     targets = {agent: int(decision["targets"][agent]) for agent in range(len(agent_indices))}
@@ -148,8 +173,8 @@ def run_validations() -> Dict[str, Any]:
     checks["V4_action_changes_next_state"] = {
         "hold_post_hash": hold_step["post_state"]["hash"][:16],
         "serve_post_hash": serve_step["post_state"]["hash"][:16],
-        "hold_served": hold_adapter.accounting.passenger_served_count,
-        "serve_served": serve_adapter.accounting.passenger_served_count,
+        "hold_served": hold_adapter.accounting.passenger_eventual_served_count,
+        "serve_served": serve_adapter.accounting.passenger_eventual_served_count,
         "hold_distance_m": hold_adapter.accounting.distance_m,
         "serve_distance_m": serve_adapter.accounting.distance_m,
         "passed": hold_step["post_state"]["hash"] != serve_step["post_state"]["hash"]
