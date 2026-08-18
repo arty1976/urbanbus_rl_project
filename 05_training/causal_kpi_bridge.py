@@ -33,6 +33,74 @@ NODE_FEATURE_DIM = 12
 ACTION_DIM = 3
 ACTION_NAMES = {0: "HOLD_CURRENT_POSITION", 1: "SERVE_AND_MOVE_TO_NEXT_STOP", 2: "CONDITIONAL_SKIP_EMPTY_STOP"}
 SOURCE_MODE = "causal_pv8_kpi_bridge_v1"
+
+# -- measured passenger wait tail accounting (H4M-AE-R3.1) --------------------
+WAIT_TAIL_REPAIR_ID = "R3_1_MEASURED_PASSENGER_WAIT_TAIL_ACCOUNTING"
+ARRIVAL_ENTRY_SEMANTICS = "ONE_ENTRY_ONE_SIMULATED_PASSENGER_UNIT_WEIGHT"
+CARRY_IN_CASE = "A_NO_INITIAL_WAITING_QUEUE"
+P95_SEMANTICS = "LOWER_BOUND_UNDER_RIGHT_CENSORING"
+P95_POPULATION = "SERVED_COMPLETED_PLUS_CENSORED_LOWER_BOUND"
+PERCENTILE_Q = 95.0
+PERCENTILE_METHOD = "linear"
+PERCENTILE_LIBRARY = "numpy.percentile"
+CENSOR_REFERENCE = "FIXED_EVALUATION_HORIZON_END"
+
+
+def measured_wait_p95(completed: Sequence[float], censored: Sequence[float]) -> Dict[str, Any]:
+    """Frozen unweighted empirical p95 over the canonical censored-inclusive population."""
+    labelled = [(float(x), False) for x in completed] + [(float(x), True) for x in censored]
+    population = [value for value, _ in labelled]
+    payload = {
+        "population_definition": P95_POPULATION,
+        "semantics": P95_SEMANTICS,
+        "censor_reference": CENSOR_REFERENCE,
+        "percentile_q": PERCENTILE_Q,
+        "percentile_method": PERCENTILE_METHOD,
+        "percentile_library": PERCENTILE_LIBRARY,
+        "weighting": "UNWEIGHTED_UNIT_MULTIPLICITY",
+        "completed_count": len(completed),
+        "censored_count": len(censored),
+        "population_count": len(population),
+        "censored_share": (len(censored) / len(population)) if population else None,
+    }
+    if not population:
+        payload.update({"value_seconds": None, "status": "NOT_APPLICABLE"})
+        return payload
+    value = float(np.percentile(np.asarray(population, dtype=float), PERCENTILE_Q, method=PERCENTILE_METHOD))
+    ordered = sorted(labelled, key=lambda item: item[0])
+    rank = (len(ordered) - 1) * (PERCENTILE_Q / 100.0)
+    low_index = int(math.floor(rank))
+    high_index = int(math.ceil(rank))
+    support = [
+        {"value_seconds": ordered[low_index][0], "censored": ordered[low_index][1]},
+        {"value_seconds": ordered[high_index][0], "censored": ordered[high_index][1]},
+    ]
+    payload.update(
+        {
+            "value_seconds": value,
+            "status": "MEASURED",
+            "median_seconds": float(np.median(np.asarray(population, dtype=float))),
+            "max_seconds": float(max(population)),
+            "p95_support": support,
+            "p95_support_includes_censored_observation": bool(ordered[low_index][1] or ordered[high_index][1]),
+            "p95_exact_support_is_censored": bool(ordered[low_index][1]) if low_index == high_index else None,
+            "p95_interpolated_between_two_support_points": low_index != high_index,
+        }
+    )
+    return payload
+
+
+def pooled_wait_p95(payloads: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Pool raw per-passenger ledgers across windows; never average window p95 values."""
+    completed: List[float] = []
+    censored: List[float] = []
+    for payload in payloads:
+        completed.extend(float(x) for x in payload.get("completed_wait_ledger", []))
+        censored.extend(float(x) for x in payload.get("censored_wait_ledger", []))
+    pooled = measured_wait_p95(completed, censored)
+    pooled["aggregation"] = "POOLED_RAW_PASSENGER_LEDGER"
+    pooled["window_count"] = len(payloads)
+    return pooled
 CAUSAL_COMPARISON_ALLOWED = True
 
 # transition constants are physical/geometric parameters of the accounting model,
@@ -170,12 +238,17 @@ class PromotedPolicyBridge:
 # ---------------------------------------------------------------------------
 @dataclass
 class StopState:
+    """One entry in arrival_schedule is one simulated passenger (unit weight)."""
+
     stop_id: int
-    waiting_person_seconds: float = 0.0
-    waiting_count: int = 0
     arrival_schedule: List[float] = field(default_factory=list)
     next_arrival_index: int = 0
+    queue_arrival_ts: List[float] = field(default_factory=list)
     last_vehicle_arrival_ts: Optional[float] = None
+
+    @property
+    def waiting_count(self) -> int:
+        return len(self.queue_arrival_ts)
 
 
 @dataclass
@@ -194,6 +267,9 @@ class VehicleState:
 class CausalAccounting:
     """Every canonical KPI input, accumulated from transitions only."""
 
+    boarding_ledger: List[Tuple[float, float]] = field(default_factory=list)
+    completed_wait_ledger: List[float] = field(default_factory=list)
+    censored_wait_ledger: List[float] = field(default_factory=list)
     wait_total_passenger_seconds: float = 0.0
     wait_passenger_count: int = 0
     passenger_demand_generated: int = 0
@@ -242,7 +318,8 @@ class PV8CausalKpiAdapter:
         intensity = float(self.demand_fields.get("historical_boarding_intensity", 0.0))
         score = float(self.demand_fields.get("historical_demand_score", 0.0))
         rate = max(0.0, intensity) + max(0.0, score) * 0.1
-        rng = np.random.default_rng(abs(hash((self.seed, str(self.window.get("window_id")), stop_id))) % (2**32))
+        digest = hashlib.sha256(f"{self.seed}|{self.window.get('window_id')}|{stop_id}".encode("utf-8")).digest()
+        rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))
         expected = max(1, int(round(rate * self.horizon_seconds / 600.0)))
         offsets = np.sort(rng.uniform(0.0, self.horizon_seconds, size=expected))
         return [float(value) for value in offsets]
@@ -259,6 +336,7 @@ class PV8CausalKpiAdapter:
         self.state = {"stops": stops, "vehicles": vehicles}
         self.events = []
         self.accounting = CausalAccounting()
+        self._wait_population = None
         self.accounting.passenger_demand_generated = sum(len(stop.arrival_schedule) for stop in stops.values())
         self.accounting.active_vehicle_ids = set(vehicles)
         return self.state_identity()
@@ -268,7 +346,7 @@ class PV8CausalKpiAdapter:
         stops = self.state["stops"]
         payload = {
             "vehicles": [[v.agent_id, v.stop_index, round(v.clock_seconds, 6), round(v.distance_m, 6), v.acceleration_event_count, round(v.hold_seconds, 6), v.served_count] for v in vehicles.values()],
-            "stops": [[s.stop_id, round(s.waiting_person_seconds, 6), s.waiting_count, s.next_arrival_index] for s in stops.values()],
+            "stops": [[s.stop_id, s.waiting_count, s.next_arrival_index, round(sum(s.queue_arrival_ts), 6)] for s in stops.values()],
         }
         return {
             "hash": hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
@@ -277,16 +355,55 @@ class PV8CausalKpiAdapter:
             "served_total": self.accounting.passenger_served_count,
         }
 
-    def _advance_waiting(self, stop: StopState, from_ts: float, to_ts: float) -> None:
-        """Accrue passenger waiting seconds for everyone already queued."""
-        if to_ts <= from_ts:
-            return
+    def _advance_arrivals(self, stop: StopState, to_ts: float) -> None:
+        """Move every passenger whose authoritative arrival_ts has passed into the queue."""
         while stop.next_arrival_index < len(stop.arrival_schedule) and stop.arrival_schedule[stop.next_arrival_index] <= to_ts:
-            arrival_ts = stop.arrival_schedule[stop.next_arrival_index]
-            stop.waiting_count += 1
-            stop.waiting_person_seconds += max(0.0, to_ts - max(arrival_ts, from_ts))
+            stop.queue_arrival_ts.append(stop.arrival_schedule[stop.next_arrival_index])
             stop.next_arrival_index += 1
-        stop.waiting_person_seconds += stop.waiting_count * max(0.0, to_ts - from_ts) * 0.0
+
+    def finalize_wait_population(self) -> Dict[str, Any]:
+        """Close the passenger wait population at the fixed evaluation horizon end."""
+        if self._wait_population is not None:
+            return self._wait_population
+        horizon_end = self.horizon_seconds
+        completed: List[float] = []
+        censored: List[float] = []
+        post_horizon_boardings = 0
+        for arrival_ts, board_ts in self.accounting.boarding_ledger:
+            if board_ts <= horizon_end:
+                completed.append(max(0.0, board_ts - arrival_ts))
+            else:
+                # Still waiting at the fixed horizon end: censored, never credited as served wait.
+                censored.append(max(0.0, horizon_end - arrival_ts))
+                post_horizon_boardings += 1
+        for stop in self.state["stops"].values():
+            pending = list(stop.queue_arrival_ts) + list(stop.arrival_schedule[stop.next_arrival_index:])
+            for arrival_ts in pending:
+                if arrival_ts <= horizon_end:
+                    censored.append(max(0.0, horizon_end - arrival_ts))
+        self.accounting.completed_wait_ledger = completed
+        self.accounting.censored_wait_ledger = censored
+        self.accounting.wait_total_passenger_seconds = float(sum(completed))
+        self.accounting.wait_passenger_count = len(completed)
+        canonical = measured_wait_p95(completed, censored)
+        served_only = measured_wait_p95(completed, [])
+        served_only.update({"canonical": False, "promotion_use_allowed": False, "performance_claim_allowed": False})
+        self._wait_population = {
+            "horizon_end_seconds": horizon_end,
+            "arrival_entry_semantics": ARRIVAL_ENTRY_SEMANTICS,
+            "carry_in_case": CARRY_IN_CASE,
+            "completed_wait_ledger": completed,
+            "censored_wait_ledger": censored,
+            "canonical_p95": canonical,
+            "served_only_p95_diagnostic": served_only,
+            "boarding_event_count": len(self.accounting.boarding_ledger),
+            "post_horizon_boarding_count": post_horizon_boardings,
+            "boarded_within_horizon_count": len(completed),
+            "unboarded_at_horizon_end_count": len(censored) - post_horizon_boardings,
+            "demand_generated": int(self.accounting.passenger_demand_generated),
+            "population_reconciles_demand": len(completed) + len(censored) == int(self.accounting.passenger_demand_generated),
+        }
+        return self._wait_population
 
     def step(self, agent_actions: Mapping[int, int], *, legal_mask: Mapping[int, Sequence[bool]], target_ids: Mapping[int, int], provenance: Mapping[str, Any]) -> Dict[str, Any]:
         """Apply one causal decision step; the action changes the next state."""
@@ -324,18 +441,21 @@ class PV8CausalKpiAdapter:
             served = 0
             if action == 0:  # HOLD: vehicle stays, queue keeps waiting
                 elapsed = HOLD_STEP_SECONDS
-                self._advance_waiting(stop, start_ts, start_ts + elapsed)
-                stop.waiting_person_seconds += stop.waiting_count * elapsed
+                self._advance_arrivals(stop, start_ts + elapsed)
                 vehicle.hold_seconds += elapsed
                 self.accounting.hold_seconds += elapsed
             elif action == 1:  # SERVE: board the queue, then move
-                self._advance_waiting(stop, start_ts, start_ts)
-                served = stop.waiting_count
-                self.accounting.wait_total_passenger_seconds += stop.waiting_person_seconds
-                self.accounting.wait_passenger_count += served
+                self._advance_arrivals(stop, start_ts)
+                board_ts = start_ts
+                boarded = list(stop.queue_arrival_ts)
+                served = len(boarded)
+                for arrival_ts in boarded:
+                    self.accounting.boarding_ledger.append((arrival_ts, board_ts))
+                within = [max(0.0, b - a) for a, b in self.accounting.boarding_ledger if b <= self.horizon_seconds]
+                self.accounting.wait_total_passenger_seconds = float(sum(within))
+                self.accounting.wait_passenger_count = len(within)
                 self.accounting.passenger_served_count += served
-                stop.waiting_count = 0
-                stop.waiting_person_seconds = 0.0
+                stop.queue_arrival_ts.clear()
                 dwell = DWELL_BASE_SECONDS + DWELL_PER_PASSENGER_SECONDS * served
                 travel = SEGMENT_DISTANCE_M / CRUISE_SPEED_MPS
                 elapsed = dwell + travel
@@ -348,8 +468,7 @@ class PV8CausalKpiAdapter:
             else:  # CONDITIONAL_SKIP: move without boarding
                 travel = SEGMENT_DISTANCE_M / CRUISE_SPEED_MPS
                 elapsed = travel
-                self._advance_waiting(stop, start_ts, start_ts + elapsed)
-                stop.waiting_person_seconds += stop.waiting_count * elapsed
+                self._advance_arrivals(stop, start_ts + elapsed)
                 vehicle.distance_m += SEGMENT_DISTANCE_M
                 vehicle.acceleration_event_count += 1
                 self.accounting.distance_m += SEGMENT_DISTANCE_M
@@ -402,6 +521,8 @@ class PV8CausalKpiAdapter:
         if not self.events:
             raise BridgeContractError("NO_EVENTS_TO_ROLL_UP", "the rollup may only be built from simulator events")
         acc = self.accounting
+        wait_population = self.finalize_wait_population()
+        canonical_p95 = wait_population["canonical_p95"]
         energy = energy_model.compute_energy_proxy_from_components(
             distance_m=acc.distance_m,
             acceleration_event_count=acc.acceleration_event_count,
@@ -424,6 +545,21 @@ class PV8CausalKpiAdapter:
             "headway_event_count": int(acc.headway_event_count),
             "wait_total_passenger_seconds": float(acc.wait_total_passenger_seconds),
             "wait_passenger_count": int(acc.wait_passenger_count),
+            "passenger_wait_p95_seconds": canonical_p95["value_seconds"],
+            "passenger_wait_p95_status": canonical_p95["status"],
+            "passenger_wait_p95_semantics": canonical_p95["semantics"],
+            "passenger_wait_p95_population": canonical_p95["population_definition"],
+            "passenger_wait_p95_percentile_method": canonical_p95["percentile_method"],
+            "passenger_wait_p95_censor_reference": canonical_p95["censor_reference"],
+            "wait_completed_passenger_count": int(canonical_p95["completed_count"]),
+            "wait_censored_passenger_count": int(canonical_p95["censored_count"]),
+            "wait_population_passenger_count": int(canonical_p95["population_count"]),
+            "wait_censored_total_seconds": float(sum(wait_population["censored_wait_ledger"])),
+            "wait_tail_measured": canonical_p95["status"] == "MEASURED",
+            "wait_tail_fallback_used": False,
+            "wait_tail_repair_id": WAIT_TAIL_REPAIR_ID,
+            "wait_post_horizon_boarding_count": int(wait_population["post_horizon_boarding_count"]),
+            "wait_censored_share": canonical_p95["censored_share"],
             "ontime_event_count": int(acc.ontime_event_count),
             "schedulable_arrival_count": int(acc.schedulable_arrival_count),
             "intervention_count": int(acc.intervention_count),
@@ -453,7 +589,10 @@ class PV8CausalKpiAdapter:
 
 
 KPI_FIELD_PROVENANCE = {
-    "avg_wait_seconds": "wait_total_passenger_seconds / wait_passenger_count, both accumulated at SERVE settlement",
+    "avg_wait_seconds": (
+        "wait_total_passenger_seconds / wait_passenger_count over passengers boarded at SERVE settlement on or "
+        "before the fixed evaluation horizon end; censored passengers never enter the mean"
+    ),
     "cv_headway": "headway_std_seconds / headway_mean_seconds from vehicle arrival headway samples",
     "bunching_rate": "bunching_event_count / headway_event_count from headway samples",
     "on_time_rate": "ontime_event_count / schedulable_arrival_count from headway deviation",
@@ -462,7 +601,11 @@ KPI_FIELD_PROVENANCE = {
     "passenger_demand_generated": "seeded arrival schedule bound to the authoritative window demand fields",
     "passenger_served_count": "passengers boarded at SERVE transitions",
     "passenger_service_rate": "served / demand, both transition accounted",
-    "passenger_wait_p95_seconds": "aggregator fallback; no measured tail is emitted by the bridge",
+    "passenger_wait_p95_seconds": (
+        "measured unweighted numpy.percentile(q=95, method='linear') over served completed waits plus "
+        "right-censored lower-bound waits of unserved passengers at the fixed evaluation horizon end; "
+        "semantics LOWER_BOUND_UNDER_RIGHT_CENSORING"
+    ),
     "energy_proxy_per_passenger": "energy proxy / served passengers",
     "fleet_reduction_ratio": "1 - active_bus_count / baseline_bus_count from vehicle accounting",
     "in_vehicle_time_seconds": "NOT_YET_MEASURABLE: no alighting event exists; no proxy emitted",
