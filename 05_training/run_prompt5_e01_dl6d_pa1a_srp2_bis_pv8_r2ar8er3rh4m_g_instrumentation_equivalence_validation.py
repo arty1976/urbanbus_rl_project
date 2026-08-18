@@ -684,6 +684,36 @@ def pressure_labels(action_id: int, normalized_advantage: float, clip_active: bo
     return labels
 
 
+W1_REPAIR_ID = "W1_WINDOW_EPISODE_BOUNDARY_MASKING"
+W1_REPAIR_CONTRACT_SHA256 = "d1bb5b4c68de19746ffde42fed57bc55b6a0b328c0d31acad1743139e416cef3"
+WINDOW_EPISODE_BOUNDARY_SCHEMA = "independent_window_causal_horizon_termination_v1"
+
+
+def window_episode_boundary_mask(
+    window_rows: Sequence[Mapping[str, Any]],
+    offset: int,
+    horizon: int,
+    template: torch.Tensor,
+) -> torch.Tensor:
+    """True at every step that ends its own decision window (H4M-W W1 repair).
+
+    Each rollout step is drawn from an independent offline window whose sampled
+    action provably cannot influence any later window, so the decision's causal
+    horizon ends at its window boundary.  The mask is derived from the window
+    plan rather than assumed, so a schedule with several steps per window still
+    terminates only at the real boundary.  ``compute_gae`` is unchanged: it
+    already zeroes the bootstrap and the GAE carry wherever this flag is set.
+    """
+    mask = torch.zeros_like(template, dtype=torch.bool)
+    for local_step in range(horizon):
+        absolute = offset + local_step
+        last_step = local_step == horizon - 1
+        boundary = last_step or window_rows[absolute + 1]["window_id"] != window_rows[absolute]["window_id"]
+        if boundary:
+            mask[local_step] = True
+    return mask
+
+
 def collect_controlled_rollout(
     *,
     branch: str,
@@ -941,13 +971,18 @@ def collect_controlled_rollout(
     next_values_t = torch.zeros_like(values_t)
     next_values_t[:-1] = values_t[1:]
     next_values_t[-1] = last_next_value_original.detach()
-    terminated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool)
+    # H4M-W W1 repair: an independent window is one episode for credit purposes.
+    terminated = window_episode_boundary_mask(window_rows, offset, horizon, normalized_rewards_t)
+    # Nothing is truncated any more: every step's causal horizon genuinely ends.
     truncated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool)
-    truncated[-1] = True
+    # The next window's value is not offered to the credit path at a boundary,
+    # so no unrelated window can reach the previous window's TD residual.
+    next_values_for_gae = torch.where(terminated, torch.zeros_like(next_values_t), next_values_t)
+    bootstrap_mask_t = (~terminated).to(normalized_rewards_t.dtype)
     returns, advantages, normalized_advantages, gae_audit = dl1.compute_gae(
         normalized_rewards_t,
         values_t,
-        next_values_t,
+        next_values_for_gae,
         terminated,
         truncated,
         masks_t,
@@ -961,7 +996,8 @@ def collect_controlled_rollout(
     # critic loss must use that same state.  The running statistics advance at
     # the end of ppo_update_controlled instead.
     return_norm_after = dict(ctx["return_normalizer"].state_dict())
-    td_delta_t = normalized_rewards_t + float(config["gamma"]) * next_values_t - values_t
+    # the recorded TD residual must be the one the credit path actually used
+    td_delta_t = normalized_rewards_t + float(config["gamma"]) * next_values_for_gae - values_t
     normalization_scope_id = f"H4M-G-ADV-NORM-SEED-{seed:03d}-CYCLE-{cycle_index:03d}"
 
     if recorder and recorder.enabled and not recorder.deferred_materialization:
@@ -1002,7 +1038,7 @@ def collect_controlled_rollout(
                     "next_value_t": float(next_values_t[local_step, agent_slot].detach().cpu().item()),
                     "terminated": bool(terminated[local_step, agent_slot].detach().cpu().item()),
                     "truncated": bool(truncated[local_step, agent_slot].detach().cpu().item()),
-                    "bootstrap_mask": 1.0,
+                    "bootstrap_mask": float(bootstrap_mask_t[local_step, agent_slot].detach().cpu().item()),
                     "gamma": float(config["gamma"]),
                     "gae_lambda": float(config["gae_lambda"]),
                     "td_delta": float(td_delta_t[local_step, agent_slot].detach().cpu().item()),
@@ -1062,6 +1098,14 @@ def collect_controlled_rollout(
         "normalized_rewards": normalized_rewards_t.detach(),
         "values_original": values_t.detach(),
         "next_values_original": next_values_t.detach(),
+        "next_values_used_for_credit": next_values_for_gae.detach(),
+        "terminated": terminated.detach(),
+        "truncated": truncated.detach(),
+        "bootstrap_mask": bootstrap_mask_t.detach(),
+        "window_episode_boundary_schema": WINDOW_EPISODE_BOUNDARY_SCHEMA,
+        "w1_repair_id": W1_REPAIR_ID,
+        "w1_repair_contract_sha256": W1_REPAIR_CONTRACT_SHA256,
+        "window_boundary_count": int(terminated.any(dim=1).sum().detach().cpu().item()),
         "td_delta": td_delta_t.detach(),
         "old_log_probs": torch.stack(old_log_probs).detach(),
         "actions": torch.stack(actions).detach(),
@@ -1119,9 +1163,9 @@ def materialize_rollout_credit_trace(
     returns = rollout["returns_original"]
     normalized_return_targets = rollout["critic_target_normalized"]
     device = values_t.device
-    terminated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
-    truncated = torch.zeros_like(normalized_rewards_t, dtype=torch.bool, device=device)
-    truncated[-1] = True
+    terminated = rollout["terminated"].to(device)
+    truncated = rollout["truncated"].to(device)
+    bootstrap_mask_t = rollout["bootstrap_mask"].to(device)
     td_delta_t = rollout["td_delta"]
     active_order = rollout["active_order"]
     sample_uid_grid = rollout["sample_uid_grid"]
@@ -1164,7 +1208,7 @@ def materialize_rollout_credit_trace(
                 "next_value_t": float(next_values_t[local_step, agent_slot].detach().cpu().item()),
                 "terminated": bool(terminated[local_step, agent_slot].detach().cpu().item()),
                 "truncated": bool(truncated[local_step, agent_slot].detach().cpu().item()),
-                "bootstrap_mask": 1.0,
+                "bootstrap_mask": float(bootstrap_mask_t[local_step, agent_slot].detach().cpu().item()),
                 "gamma": float(rollout["gamma"]),
                 "gae_lambda": float(rollout["gae_lambda"]),
                 "td_delta": float(td_delta_t[local_step, agent_slot].detach().cpu().item()),
