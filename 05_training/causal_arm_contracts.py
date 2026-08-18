@@ -23,8 +23,30 @@ ARM_B2 = "B2"
 
 POLICY_SOURCE = {
     ARM_A: "actual_promoted_mappo",
-    ARM_B1: "causal_noop_baseline",
+    ARM_B1: "causal_baseline_normal_service_no_policy_intervention",
     ARM_B2: "causal_rulebased_baseline",
+}
+
+# H4M-AE-R6.1: canonical B1 means "no discretionary policy intervention", not
+# "hold forever".  The frozen representative B1 regeneration executes SERVE at
+# every occurrence with hold_seconds = 0.0, so normal base service is part of
+# the baseline, and only discretionary HOLD/SKIP counts as intervention.
+B1_SEMANTICS_ID = "CAUSAL_BASELINE_NORMAL_SERVICE_NO_POLICY_INTERVENTION"
+B1_AUTHORITY = (
+    "prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3r_representative_b1_regeneration_20260809_200442: "
+    "r8er3r_b1_kpi_summary.json hold_seconds=0.0, 414 generated / 414 served; "
+    "regeneration source emits executed_action='SERVE' at every occurrence"
+)
+BASE_SERVICE_ACTION = 1  # SERVE: normal boarding and route progression
+DISCRETIONARY_ACTIONS = {0: "HOLD", 2: "CONDITIONAL_SKIP"}
+
+PERSISTENT_HOLD_CONTROL_ID = "PERSISTENT_HOLD_CONTROL"
+PERSISTENT_HOLD_CONTROL_STATUS = {
+    "control_id": PERSISTENT_HOLD_CONTROL_ID,
+    "canonical_baseline": False,
+    "performance_reference_allowed": False,
+    "B1_alias_allowed": False,
+    "role": "negative control for tail/censoring detectors only",
 }
 
 # The environment side of every arm is identical by contract; only these keys
@@ -115,9 +137,30 @@ def _legal(mask: Sequence[bool], preferred: int, fallback: int = 0) -> int:
     raise ArmContractError("NO_LEGAL_ACTION", "the K-mask left no admissible action")
 
 
-def noop_actions(adapter: Any, legal_mask: Mapping[int, Sequence[bool]]) -> Dict[int, int]:
-    """B1: never intervene.  HOLD wherever HOLD is legal."""
+def base_service_actions(adapter: Any, legal_mask: Mapping[int, Sequence[bool]]) -> Dict[int, int]:
+    """Canonical B1: normal baseline service, zero discretionary intervention.
+
+    The vehicle progresses along its route and serves every occurrence, exactly
+    as the frozen representative B1 regeneration does.  No HOLD and no
+    CONDITIONAL_SKIP is ever chosen by policy; a non-service action can only
+    appear if the K-mask makes SERVE illegal, which is a legality constraint
+    rather than a discretionary decision.
+    """
+    return {agent: _legal(mask, preferred=BASE_SERVICE_ACTION) for agent, mask in legal_mask.items()}
+
+
+def persistent_hold_control_actions(adapter: Any, legal_mask: Mapping[int, Sequence[bool]]) -> Dict[int, int]:
+    """Non-canonical negative control: hold forever.  Never a B1 alias."""
     return {agent: _legal(mask, preferred=0) for agent, mask in legal_mask.items()}
+
+
+# Retired alias kept only so no caller silently resolves the old meaning.
+def noop_actions(adapter: Any, legal_mask: Mapping[int, Sequence[bool]]) -> Dict[int, int]:
+    raise ArmContractError(
+        "RETIRED_B1_NOOP_SEMANTICS",
+        "no-op no longer means persistent HOLD; use base_service_actions for canonical B1 "
+        "or persistent_hold_control_actions for the non-canonical control",
+    )
 
 
 def rulebased_actions(adapter: Any, legal_mask: Mapping[int, Sequence[bool]]) -> Dict[int, int]:
@@ -153,13 +196,21 @@ class ArmContract:
             "mock_action_used": False,
             "random_fallback_used": False,
             "historical_replay_source": False,
+            "learned_policy_used": self.arm_id == ARM_A,
+            "discretionary_policy_intervention": self.arm_id != ARM_B1,
+            "normal_vehicle_progression": True,
+            "required_boarding_alighting_enabled": True,
         }
 
 
 def build_arm_contracts(promoted_action_fn: Callable[..., Dict[int, int]], checkpoint_path: str) -> Dict[str, ArmContract]:
     return {
         ARM_A: ArmContract(ARM_A, POLICY_SOURCE[ARM_A], f"promoted checkpoint {checkpoint_path}", True, promoted_action_fn),
-        ARM_B1: ArmContract(ARM_B1, POLICY_SOURCE[ARM_B1], "HOLD wherever legal; never intervenes", False, noop_actions),
+        ARM_B1: ArmContract(
+            ARM_B1, POLICY_SOURCE[ARM_B1],
+            "normal baseline service: SERVE every occurrence, zero discretionary HOLD/SKIP",
+            False, base_service_actions,
+        ),
         ARM_B2: ArmContract(ARM_B2, POLICY_SOURCE[ARM_B2], "SERVE when the current stop has waiting passengers, else HOLD", False, rulebased_actions),
     }
 
