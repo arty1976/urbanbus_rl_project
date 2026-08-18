@@ -323,8 +323,13 @@ def window_boundary_diagnostics(root: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # primary questions
 # ---------------------------------------------------------------------------
-def cycle_dominance(root: Path) -> List[Dict[str, Any]]:
-    conditional = read_json(root / "conditional_policy_discrimination_training_trace.json")
+def cycle_dominance(conditional: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Per-cycle dominance from the conditional summary.
+
+    The summary is passed in rather than read back from the artifact root: it is
+    only written at the end of main(), so reading it here would make reporting
+    depend on a file that does not exist yet.
+    """
     rows = conditional.get("by_seed_cycle_label", [])
     out: List[Dict[str, Any]] = []
     for cycle in range(1, EXPECTED["outer_training_count"] + 1):
@@ -374,8 +379,8 @@ def validation_summary(path: Path) -> Dict[str, Any]:
     }
 
 
-def primary_questions(root: Path, boundary: Mapping[str, Any], w1_evidence: Mapping[str, Any], credit: Mapping[str, Any], validation: Mapping[str, Any], gradient: Mapping[str, Any]) -> Dict[str, Any]:
-    dominance = cycle_dominance(root)
+def primary_questions(conditional: Mapping[str, Any], boundary: Mapping[str, Any], w1_evidence: Mapping[str, Any], credit: Mapping[str, Any], validation: Mapping[str, Any], gradient: Mapping[str, Any]) -> Dict[str, Any]:
+    dominance = cycle_dominance(conditional)
     baseline = validation_summary(H4MU_R2_ROOT / "validation_discrimination.json")
     current = {
         label: {
@@ -890,7 +895,7 @@ def main() -> None:
         integrity["failing_criteria"] = [key for key, value in integrity["checks"].items() if not value]
         integrity["zero_loss_counts"] = r2_evidence["zero_loss_totals"]
 
-        questions = primary_questions(root, boundary, w1_evidence, credit, validation, gradient)
+        questions = primary_questions(conditional, boundary, w1_evidence, credit, validation, gradient)
         outcome = outcome_classification(questions, integrity["training_integrity_passed"])
         changed = umod.changed_files_audit()
         gate = gate_matrix(binding, integrity, outcome, changed, evidence, r2_evidence, w1_evidence, boundary, checkpoints, training)
