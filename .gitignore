@@ -70,3 +70,6 @@ Thumbs.db
 .env
 .env.*
 *.env
+
+# STCIS API secret source (never commit)
+stcis api/
