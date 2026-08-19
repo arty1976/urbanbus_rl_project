@@ -73,3 +73,6 @@ Thumbs.db
 
 # STCIS API secret source (never commit)
 stcis api/
+
+# STCIS user exports (redistribution rights not established)
+이용객 수요*.xlsx
