@@ -35,7 +35,9 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import constrained_od_engine as E
 import od_seeded_sampler as S
+import request_identity as RI
 import request_timestamp_realization as TS
+import terminal_feasibility_filter as F
 
 LEDGER_ID = "SCOPED_ONE_TO_ONE_INFERRED_REQUEST_LEDGER_V1"
 REQUEST_REALIZATION_MODE = "ONE_HISTORICAL_BOARDING_ONE_REQUEST"
@@ -45,6 +47,8 @@ ORIGIN_SEMANTICS = "HISTORICAL_BOARDING_ORIGIN"
 STATUS_REALIZED = "REALIZED"
 STATUS_UNATTRIBUTABLE = "UNATTRIBUTABLE_ORIGIN"
 STATUS_TERMINAL = "UNREALIZABLE_TERMINAL_OCCURRENCE"
+STATUS_NO_FEASIBLE_ROUTE = "UNREALIZABLE_NO_FEASIBLE_ROUTE_DIRECTION"
+UNREALIZABLE_STATUSES = (STATUS_UNATTRIBUTABLE, STATUS_TERMINAL, STATUS_NO_FEASIBLE_ROUTE)
 
 DEMAND_SEMANTICS = {
     "request_realization_mode": REQUEST_REALIZATION_MODE,
@@ -62,7 +66,8 @@ DEMAND_SEMANTICS = {
 }
 
 HANDOFF_SCHEMA: Tuple[Tuple[str, str], ...] = (
-    ("request_id", "unique request identifier, stable under replay"),
+    ("historical_request_key", "seed-independent identity of one historical boarding"),
+    ("request_realization_id", "identity of one inferred realization of that boarding"),
     ("request_ts", "inferred realization time inside the authoritative bucket"),
     ("origin_stop_id", "observed historical boarding stop"),
     ("destination_stop_id", "inferred seeded OD realization; null when unrealizable"),
@@ -74,6 +79,8 @@ HANDOFF_SCHEMA: Tuple[Tuple[str, str], ...] = (
     ("origin_stop_sequence", "occurrence-level origin ordering"),
     ("destination_stop_sequence", "occurrence-level destination ordering"),
     ("realization_status", "REALIZED | UNATTRIBUTABLE_ORIGIN | UNREALIZABLE_TERMINAL_OCCURRENCE"),
+    ("window_id", "reporting window, the authoritative source bucket"),
+    ("request_ts_epoch", "request_ts as epoch seconds, the numeric form the interface requires"),
     ("demand_realization_seed", "global demand seed governing the whole ledger"),
     ("provenance_digest", "digest over every authoritative source SHA behind the row"),
 )
@@ -96,6 +103,7 @@ class LedgerConfig:
     bucket_unit: str = "service_hour"
     experiment_id: str = "H4M_AE_R9_5"
     chunk_rows: int = 50_000
+    feasibility_filter: bool = False
 
     def payload(self) -> Dict[str, Any]:
         return {
@@ -103,11 +111,24 @@ class LedgerConfig:
             "variant": self.variant, "global_seed": self.global_seed,
             "bucket_unit": self.bucket_unit, "chunk_rows": self.chunk_rows,
             "scope": self.scope, "provenance": self.provenance,
+            "feasibility_filter_applied": self.feasibility_filter,
+            "feasibility_filter_contract": F.FILTER_CONTRACT if self.feasibility_filter else None,
+            "realization_version": self.realization_version,
+            "identity_contract": self.identity.payload(),
             "scope_hardcoded_in_core": False,
             "citywide_capable": True, "day_long_capable": True, "larger_fleet_capable": True,
             "variant_choice_is_a_superiority_claim": False,
             **DEMAND_SEMANTICS,
         }
+
+    @property
+    def realization_version(self) -> str:
+        state = F.FILTER_VERSION if self.feasibility_filter else "NO_FEASIBILITY_FILTER"
+        return f"{self.experiment_id}|{self.variant}|{state}"
+
+    @property
+    def identity(self) -> RI.IdentityContract:
+        return RI.IdentityContract(realization_version=self.realization_version)
 
     @property
     def provenance_digest(self) -> str:
@@ -127,11 +148,21 @@ class OriginPlan:
     destinations: Dict[str, E.Occurrence]
     terminal: frozenset
     unattributable_reason: Optional[str] = None
+    removed_occurrence_ids: tuple = ()
+    feasibility_filter_applied: bool = False
 
 
 def build_origin_plan(index: E.RouteNetworkIndex, config: E.EngineConfig, stop_id: str,
-                      alight_by_stop: Optional[Dict[str, float]] = None) -> OriginPlan:
-    """Derive one stop's realization support from the frozen engine, at unit mass."""
+                      alight_by_stop: Optional[Dict[str, float]] = None,
+                      feasibility_filter: bool = False) -> OriginPlan:
+    """Derive one stop's realization support from the frozen engine, at unit mass.
+
+    Takes no seed: what the evidence permits is a property of the network, not of
+    the draw.  With `feasibility_filter` on, candidate occurrences that offer an
+    observed boarding no legal downstream destination are excluded before the
+    route-direction realization; occurrences holding any legal destination are
+    always kept.
+    """
     rows = E.attribute_origin(index, config, source_key="PLAN", service_date="1970-01-01",
                               service_hour=0, origin_stop_id=str(stop_id), boarding_count=1.0,
                               alight_by_stop=alight_by_stop)
@@ -141,13 +172,30 @@ def build_origin_plan(index: E.RouteNetworkIndex, config: E.EngineConfig, stop_i
                           od_digest={}, destinations={}, terminal=frozenset(),
                           unattributable_reason=rows[0]["unattributable_reason"])
 
-    occurrences = {o.occurrence_id: o for o in index.route_candidates(str(stop_id))}
+    removed: tuple = ()
+    if feasibility_filter:
+        info = F.classify_stop(index, str(stop_id))
+        removed = tuple(info["removed_occurrence_ids"])
+        if not info["attributable"]:
+            # Every candidate is a dead end: the boarding stays an explicit request
+            # identity with a reason, and is never fabricated onto a route.
+            return OriginPlan(route_support={}, route_digest="", occurrences={}, od_support={},
+                              od_digest={}, destinations={}, terminal=frozenset(),
+                              unattributable_reason=info["reason"], removed_occurrence_ids=removed,
+                              feasibility_filter_applied=True)
+        candidates = info["legal"]
+    else:
+        candidates = index.route_candidates(str(stop_id))
+
+    occurrences = {o.occurrence_id: o for o in candidates}
     route_support = {oid: 1.0 / len(occurrences) for oid in occurrences}
     od_support: Dict[str, Dict[str, float]] = {}
     destinations: Dict[str, E.Occurrence] = {}
     terminal = set()
     for row in rows:
         oid = row["origin_occurrence_id"]
+        if oid not in occurrences:
+            continue
         if row["attribution_status"] == E.UNATTRIBUTABLE:
             terminal.add(oid)
             continue
@@ -157,7 +205,8 @@ def build_origin_plan(index: E.RouteNetworkIndex, config: E.EngineConfig, stop_i
             destinations[d.occurrence_id] = d
     return OriginPlan(route_support, S.distribution_digest(route_support), occurrences,
                       od_support, {oid: S.distribution_digest(dist) for oid, dist in od_support.items()},
-                      destinations, frozenset(terminal))
+                      destinations, frozenset(terminal), removed_occurrence_ids=removed,
+                      feasibility_filter_applied=feasibility_filter)
 
 
 def _draw_route(plan: OriginPlan, contract: S.SeedContract, *, variant: str, source_key: str,
@@ -182,17 +231,29 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
     if n == 0:
         return []
     source_key = f"{service_date}|{service_hour}|{stop_id}"
+    window_id = f"{service_date}|{service_hour}"
+    identity = config.identity
+
+    def ident(ordinal: int) -> Dict[str, Any]:
+        key = identity.historical_request_key(source_key=source_key, request_ordinal=ordinal)
+        return {"historical_request_key": key,
+                "request_realization_id": identity.request_realization_id(
+                    historical_request_key=key, global_seed=config.global_seed),
+                "simulator_anonymous_passenger_id": key}
     stamps = TS.realize_bucket_timestamps(service_date=service_date, service_hour=service_hour,
                                           count=n, source_key=source_key, contract=ts_contract)
     common = {
         "service_date": str(service_date), "service_hour": int(service_hour),
-        "source_key": source_key, "origin_stop_id": str(stop_id),
+        "source_key": source_key, "window_id": window_id, "origin_stop_id": str(stop_id),
         "origin_semantics": ORIGIN_SEMANTICS,
         "boarding_count_semantics": TS.BOARDING_COUNT_SEMANTICS,
         "source_boarding_count": n,
         "passenger_count": REQUEST_WEIGHT,
         "od_prior_variant": config.variant,
         "demand_realization_seed": config.global_seed,
+        "realization_version": config.realization_version,
+        "feasibility_filter_applied": config.feasibility_filter,
+        "feasibility_filter_version": F.FILTER_VERSION if config.feasibility_filter else None,
         "destination_observed": False, "od_ground_truth": False,
         "request_ts_observed": False,
         "provenance_digest": config.provenance_digest,
@@ -201,10 +262,11 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
 
     # Unattributable origin: every request is preserved, none receives a destination.
     if plan.unattributable_reason is not None:
+        status = (STATUS_NO_FEASIBLE_ROUTE if plan.unattributable_reason == F.REASON_ALL_ZERO
+                  else STATUS_UNATTRIBUTABLE)
         return [{
-            **common, **stamps[i],
-            "request_id": _request_id(config, source_key, i),
-            "realization_status": STATUS_UNATTRIBUTABLE,
+            **common, **stamps[i], **ident(i),
+            "realization_status": status,
             "unattributable_reason": plan.unattributable_reason,
             "route_id": None, "direction_id": None, "origin_occurrence_id": None,
             "origin_stop_sequence": None, "destination_occurrence_id": None,
@@ -212,6 +274,7 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
             "route_distribution_digest": None, "od_distribution_digest": None,
             "route_realization_seed": None, "destination_realization_seed": None,
             "destination_semantics": "NOT_APPLICABLE", "support_size": 0,
+            "removed_candidate_count": len(plan.removed_occurrence_ids),
         } for i in range(n)]
 
     # Stage 1 for every request, then one sampler call per drawn occurrence.
@@ -230,10 +293,11 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
             **common, "route_id": origin.route_id, "direction_id": origin.direction_id,
             "origin_occurrence_id": oid, "origin_stop_sequence": origin.stop_sequence,
             "route_distribution_digest": plan.route_digest,
+            "removed_candidate_count": len(plan.removed_occurrence_ids),
         }
         if oid in plan.terminal:
             for i in ordinals:
-                out[i] = {**base, **stamps[i], "request_id": _request_id(config, source_key, i),
+                out[i] = {**base, **stamps[i], **ident(i),
                           "realization_status": STATUS_TERMINAL,
                           "unattributable_reason": "TERMINAL_OCCURRENCE_NO_DOWNSTREAM",
                           "destination_occurrence_id": None, "destination_stop_id": None,
@@ -248,7 +312,7 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
                           realization_count=len(ordinals))
         for i, draw in zip(sorted(ordinals), draws):
             dest = plan.destinations[draw["destination_occurrence_id"]]
-            out[i] = {**base, **stamps[i], "request_id": _request_id(config, source_key, i),
+            out[i] = {**base, **stamps[i], **ident(i),
                       "realization_status": STATUS_REALIZED, "unattributable_reason": None,
                       "destination_occurrence_id": dest.occurrence_id,
                       "destination_stop_id": dest.stop_id,
@@ -259,11 +323,6 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
                       "destination_semantics": S.DESTINATION_SEMANTICS,
                       "support_size": draw["support_size"]}
     return [out[i] for i in range(n)]
-
-
-def _request_id(config: LedgerConfig, source_key: str, ordinal: int) -> str:
-    payload = f"{LEDGER_ID}|{config.experiment_id}|{config.global_seed}|{source_key}|{ordinal}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def materialize(index: E.RouteNetworkIndex, engine_config: E.EngineConfig, config: LedgerConfig,
@@ -282,7 +341,8 @@ def materialize(index: E.RouteNetworkIndex, engine_config: E.EngineConfig, confi
     for row in source_rows:
         stop = str(row["stop_id"])
         if stop not in cache:
-            cache[stop] = build_origin_plan(index, engine_config, stop, alight_by_stop)
+            cache[stop] = build_origin_plan(index, engine_config, stop, alight_by_stop,
+                                            feasibility_filter=config.feasibility_filter)
         yield from realize_bucket(cache[stop], config=config, route_contract=route_contract,
                                   dest_contract=dest_contract, ts_contract=ts_contract,
                                   service_date=str(row["service_date"]),
@@ -290,7 +350,8 @@ def materialize(index: E.RouteNetworkIndex, engine_config: E.EngineConfig, confi
                                   boarding_count=int(row["boardings"]))
 
 
-CANONICAL_ORDER = ("service_date", "service_hour", "origin_stop_id", "request_ts", "request_id")
+CANONICAL_ORDER = ("service_date", "service_hour", "origin_stop_id", "request_ts",
+                   "historical_request_key")
 
 
 def canonical_sort(frame):
@@ -306,29 +367,37 @@ def ledger_digest(frame) -> str:
 
 
 def conservation_report(source_rows: List[Dict[str, Any]], frame) -> Dict[str, Any]:
-    """Exact accounting: every historical boarding is one row, nothing is dropped."""
+    """Exact accounting: every historical boarding is one request identity, nothing dropped."""
     mass = int(sum(int(r["boardings"]) for r in source_rows))
     rows = int(len(frame))
     status = frame["realization_status"].value_counts().to_dict()
     realized = int(status.get(STATUS_REALIZED, 0))
     unattr = int(status.get(STATUS_UNATTRIBUTABLE, 0))
     terminal = int(status.get(STATUS_TERMINAL, 0))
+    nofeasible = int(status.get(STATUS_NO_FEASIBLE_ROUTE, 0))
     per_bucket = frame.groupby("source_key").size().to_dict()
     expected = {f"{r['service_date']}|{r['service_hour']}|{r['stop_id']}": int(r["boardings"])
                 for r in source_rows if int(r["boardings"]) > 0}
     mismatched = sorted(k for k, v in expected.items() if per_bucket.get(k, 0) != v)
+    keys = frame["historical_request_key"]
     return {
         "historical_boarding_mass": mass,
         "request_rows_generated": rows,
+        "stable_request_identities": int(keys.nunique()),
+        "duplicate_stable_identities": int(keys.duplicated().sum()),
         "realized_request_count": realized,
         "unattributable_request_count": unattr,
         "unrealizable_terminal_request_count": terminal,
-        "accounted_total": realized + unattr + terminal,
+        "unrealizable_no_feasible_route_count": nofeasible,
+        "other_unrealizable_count": nofeasible,
+        "accounted_total": realized + unattr + terminal + nofeasible,
         "dropped_mass": mass - rows,
-        "exact_one_to_one": mass == rows and realized + unattr + terminal == mass,
+        "exact_one_to_one": (mass == rows and realized + unattr + terminal + nofeasible == mass
+                             and int(keys.nunique()) == mass),
         "buckets_with_wrong_row_count": mismatched,
         "passenger_count_values": sorted({int(v) for v in frame["passenger_count"].unique()}),
         "compression_applied": False, "scaling_applied": False,
+        "fabricated_destination_count": 0,
         **DEMAND_SEMANTICS,
     }
 
@@ -339,6 +408,8 @@ def manifest(config: LedgerConfig, index: E.RouteNetworkIndex, engine_config: E.
         "ledger_id": LEDGER_ID, "config": config.payload(),
         "engine_id": E.ENGINE_ID, "engine_config": engine_config.payload(),
         "sampler_id": S.SAMPLER_ID, "timestamp_rule_id": TS.RULE_ID,
+        "identity_contract": config.identity.payload(),
+        "feasibility_filter": F.FILTER_CONTRACT if config.feasibility_filter else None,
         "engine_source_sha256": index.source_sha256,
         "handoff_schema": [{"field": f, "meaning": m} for f, m in HANDOFF_SCHEMA],
         "conservation": conservation, "ledger_digest": digest,
@@ -351,5 +422,7 @@ def manifest(config: LedgerConfig, index: E.RouteNetworkIndex, engine_config: E.
             "variant_superiority_claim_allowed": False, "paper_level_claim_allowed": False,
             "causal_performance_claim_allowed": False,
             "scoped_inferred_request_ledger_created": True,
+            "simulator_demand_handoff_schema_validated": False,
+            "simulator_demand_load_validation_complete": False,
         },
     }

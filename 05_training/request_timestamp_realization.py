@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import date as _date, datetime, timedelta
+from datetime import date as _date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 RULE_ID = "UNIFORM_WITHIN_AUTHORITATIVE_BUCKET_SORTED_ASCENDING_V1"
@@ -128,6 +128,10 @@ def realize_bucket_timestamps(*, service_date: str, service_hour: int, count: in
         out.append({
             "request_ordinal": ordinal,
             "request_ts": ts.isoformat(sep=" ", timespec="milliseconds"),
+            # Epoch form for interfaces that require a numeric timestamp.  The naive
+            # service-local stamp is read as UTC so the value is identical on every
+            # machine regardless of host timezone.
+            "request_ts_epoch": ts.replace(tzinfo=timezone.utc).timestamp(),
             "request_ts_offset_seconds": round(offset, 6),
             "bucket_start": start.isoformat(sep=" "), "bucket_end": end.isoformat(sep=" "),
             "request_ts_semantics": TIMESTAMP_SEMANTICS,
