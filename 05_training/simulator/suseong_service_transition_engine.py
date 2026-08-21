@@ -3,6 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 try:
     from simulator.k_safety_state import DecisionTimeObligationSnapshot, ServiceObligationStateMachine, StaticGuardStatus
 except ImportError:  # Direct simulator-directory test execution.
@@ -441,6 +453,7 @@ def advance_vehicle_time_budget(
     vehicle_token: Optional[str] = None,
     static_guard_status: Optional[StaticGuardStatus] = None,
 ) -> VehicleStepTrace:
+    _authz.require_capability("simulator_execution", site="simulator/suseong_service_transition_engine.py::advance_vehicle_time_budget")
     if delta_t_seconds < 0:
         raise ValueError("delta_t_seconds must be non-negative")
     vehicle_id = int(getattr(vehicle, "agent_id"))

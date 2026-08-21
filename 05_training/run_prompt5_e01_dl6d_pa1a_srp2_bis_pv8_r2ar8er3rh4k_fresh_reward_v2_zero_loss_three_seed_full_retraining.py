@@ -22,6 +22,18 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 STAGE = "PV8-R2A-R8E-R3-R-H4K-RERUN"
 PASS_GATE = "PASS_SUSEONG_DL6D_PA1A_SRP2_BIS_PV8_R2AR8ER3RH4K_RERUN_FRESH_REWARD_V2_ZERO_LOSS_THREE_SEED_FULL_RETRAINING_COMPLETE"
@@ -687,6 +699,7 @@ def ppo_update_h4k(
     rollout_index: int,
     ppo_start_index: int,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    _authz.require_capability("training", site="run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4k_fresh_reward_v2_zero_loss_three_seed_full_retraining.py::ppo_update_h4k")
     metrics_rows: List[Dict[str, Any]] = []
     gradient_rows: List[Dict[str, Any]] = []
     loss_rows: List[Dict[str, Any]] = []
@@ -963,6 +976,7 @@ def save_final_checkpoint(
     device: torch.device,
     metadata: Mapping[str, Any],
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4k_fresh_reward_v2_zero_loss_three_seed_full_retraining.py::save_final_checkpoint")
     config_public = {k: v for k, v in config.items() if k not in {"spec", "started_at_perf"}}
     training_configuration_sha256 = canonical_sha(config_public)
     checkpoint_path = seed_dir / f"{namespace}.pt"

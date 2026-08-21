@@ -13,6 +13,18 @@ from simulator.dynamics_event_trace import DynamicsEvent, DynamicsEventType, ada
 from simulator.dynamics_replay_contract import ReplayFrame, canonical_hash
 from simulator.dynamics_state_snapshot import DynamicsStateSnapshot, hash_dynamics_state
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 ORCHESTRATION_SEMANTICS = "DETERMINISTIC_GLOBAL_STEP_WITH_CANONICAL_TIEBREAK"
 DECISION_INTERVAL_SECONDS = 60
@@ -841,6 +853,7 @@ def advance_multiagent_global_step(
     branch_context: Optional[BranchExecutionContext] = None,
     evaluation_context: Optional[EvaluationExecutionContext] = None,
 ) -> Tuple[DynamicsStateSnapshot, GlobalStepTrace]:
+    _authz.require_capability("simulator_execution", site="simulator/dynamics_multiagent_orchestrator.py::advance_multiagent_global_step")
     if branch_context is None:
         raise MissingBranchExecutionContextError("advance_multiagent_global_step requires explicit BranchExecutionContext")
     evaluation_run_id = (

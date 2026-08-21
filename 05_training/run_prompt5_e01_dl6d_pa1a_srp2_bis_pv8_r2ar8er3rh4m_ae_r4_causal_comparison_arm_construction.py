@@ -20,6 +20,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 TRAINING_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = TRAINING_ROOT.parent
 ARTIFACTS_ROOT = TRAINING_ROOT / "artifacts"
@@ -62,6 +74,7 @@ def r3_1_artifact_dir() -> Path:
 
 
 def main() -> None:
+    _authz.require_capability("performance_comparison", site="run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4m_ae_r4_causal_comparison_arm_construction.py::main")
     sys.path.insert(0, str(TRAINING_ROOT))
     import pandas as pd
     import test_h4m_ae_r4_pre_evaluation_integrity as r4_mod

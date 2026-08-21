@@ -4,6 +4,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 K_SAFETY_STATE_SCHEMA_VERSION = "SUSEONG_K_SAFETY_STATE_V2"
 
@@ -415,6 +427,7 @@ class ServiceObligationStateMachine:
         self.pending_transitions.append(ScheduledTransition(timestamp, self._schedule_sequence, transition, dict(payload)))
 
     def advance_to(self, decision_ts: int) -> None:
+        _authz.require_capability("simulator_execution", site="simulator/k_safety_state.py::advance_to")
         timestamp = int(decision_ts)
         if timestamp < self.current_ts:
             raise KSafetyChronologyError(

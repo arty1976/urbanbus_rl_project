@@ -20,6 +20,16 @@ import numpy as np
 
 import test_h4m_ae_r3_causal_kpi_bridge as r3
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent,):
+    if (_authz_dir / "simulator_authorization.py").exists() and str(_authz_dir) not in _authz_sys.path:
+        _authz_sys.path.insert(0, str(_authz_dir))
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 TRAINING_ROOT = Path(__file__).resolve().parent
 LEGACY_FALLBACK_MULTIPLIER = 1.65
 TOL = 1e-9
@@ -44,7 +54,7 @@ def drive(adapter: Any, actions: List[int], steps: int = 0, *, cap: int = 4000) 
         adapter.step(act, legal_mask=mask, target_ids=targets, provenance={"policy_source_mode": "validation_fixture"})
 
 
-def run_validations() -> Dict[str, Any]:
+def _run_validations_inner() -> Dict[str, Any]:
     bridge = r3.imp("bridge", r3.BRIDGE)
     qmod = r3.imp("h4mq", r3.H4MQ)
     dl1 = r3.imp("dl1", r3.DL1)
@@ -200,11 +210,16 @@ def run_validations() -> Dict[str, Any]:
     drive(repeat, [1, 0, 1], 12)
     rep = repeat.finalize_wait_population()
     probe = (
-        "import sys,json;sys.path.insert(0,%r);"
-        "import test_h4m_ae_r3_causal_kpi_bridge as r3;"
-        "b=r3.imp('bridge',r3.BRIDGE);"
-        "a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d));a.reset();"
-        "print(json.dumps([s.arrival_schedule for s in a.state['stops'].values()]))"
+        "import sys,json\n"
+        "sys.path.insert(0,%r)\n"
+        # R9.8 guards the bridge; this probe is entitled to run it and says so.
+        "import simulator_authorization as _A\n"
+        "import test_h4m_ae_r3_causal_kpi_bridge as r3\n"
+        "b=r3.imp('bridge',r3.BRIDGE)\n"
+        "with _A.granted('simulator_execution', reason='cross-process determinism probe'):\n"
+        "    a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d))\n"
+        "    a.reset()\n"
+        "print(json.dumps([s.arrival_schedule for s in a.state['stops'].values()]))\n"
     ) % (str(TRAINING_ROOT), repr(dict(window)), agents)
     outs = [
         subprocess.run(
@@ -389,6 +404,17 @@ def run_validations() -> Dict[str, Any]:
         "measured_p95_seconds": canonical["value_seconds"],
         "all_passed": all(bool(c["passed"]) for c in checks.values()),
     }
+
+
+def run_validations() -> Dict[str, Any]:
+    """Validation harness.
+
+    This exercises the causal bridge, which R9.8 protects with the
+    simulator_execution capability. The harness is entitled to run it, so it
+    declares that explicitly here rather than the guard being weakened.
+    """
+    with _authz.granted("simulator_execution", reason="R3.1 measured wait-tail validation harness"):
+        return _run_validations_inner()
 
 
 def main() -> None:

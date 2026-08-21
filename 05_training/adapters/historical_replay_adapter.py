@@ -7,6 +7,18 @@ from simulator_adapter_interface import (
     StepResult,
 )
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 class HistoricalReplayAdapter(SimulatorAdapterInterface):
     """
@@ -88,12 +100,14 @@ class HistoricalReplayAdapter(SimulatorAdapterInterface):
         seed: Optional[int] = None,
         scenario_config: Optional[dict] = None,
     ) -> ObsDict:
+        _authz.require_capability("simulator_execution", site="adapters/historical_replay_adapter.py::reset")
         self.current_scenario = scenario_config or {}
         time_band = self.current_scenario.get("time_band", "offpeak")
         state_ts = self.current_scenario.get("state_ts", "2024-01-01T08:00:00Z")
         return self._get_stub_obs(time_band=time_band, state_ts=state_ts)
 
     def step(self, actions: Dict[int, Any]) -> StepResult:
+        _authz.require_capability("simulator_execution", site="adapters/historical_replay_adapter.py::step")
         obs = self._get_stub_obs(
             time_band=(self.current_scenario or {}).get("time_band", "offpeak"),
             state_ts=(self.current_scenario or {}).get("state_ts", "2024-01-01T08:00:00Z"),

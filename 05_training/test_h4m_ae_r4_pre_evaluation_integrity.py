@@ -22,6 +22,16 @@ import torch
 import causal_arm_contracts as arms
 import test_h4m_ae_r3_causal_kpi_bridge as r3
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent,):
+    if (_authz_dir / "simulator_authorization.py").exists() and str(_authz_dir) not in _authz_sys.path:
+        _authz_sys.path.insert(0, str(_authz_dir))
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 TRAINING_ROOT = Path(__file__).resolve().parent
 ARTIFACTS_ROOT = TRAINING_ROOT / "artifacts"
 AGGREGATOR = TRAINING_ROOT / "evaluation" / "canonical_kpi_aggregator.py"
@@ -35,7 +45,7 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_validations() -> Dict[str, Any]:
+def _run_validations_inner() -> Dict[str, Any]:
     bridge = r3.imp("bridge", r3.BRIDGE)
     qmod = r3.imp("h4mq", r3.H4MQ)
     dl1 = r3.imp("dl1", r3.DL1)
@@ -230,11 +240,17 @@ def run_validations() -> Dict[str, Any]:
     # ---- R4-09/R4-10 identical demand realization ---------------------------
     hashes = {arm: universe[arm]["demand_hash"] for arm in contracts}
     probe = (
-        "import sys,json;sys.path.insert(0,%r);"
-        "import test_h4m_ae_r3_causal_kpi_bridge as r3;import causal_arm_contracts as arms;"
-        "b=r3.imp('bridge',r3.BRIDGE);"
-        "a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d));a.reset();"
-        "print(arms.demand_realization_hash(a))"
+        "import sys,json\n"
+        "sys.path.insert(0,%r)\n"
+        # R9.8 guards the bridge; this probe is entitled to run it and says so.
+        "import simulator_authorization as _A\n"
+        "import test_h4m_ae_r3_causal_kpi_bridge as r3\n"
+        "import causal_arm_contracts as arms\n"
+        "b=r3.imp('bridge',r3.BRIDGE)\n"
+        "with _A.granted('simulator_execution', reason='cross-process determinism probe'):\n"
+        "    a=b.PV8CausalKpiAdapter(**r3.authoritative_adapter_inputs(%s,num_agents=%d))\n"
+        "    a.reset()\n"
+        "print(arms.demand_realization_hash(a))\n"
     ) % (str(TRAINING_ROOT), repr(dict(window)), num_agents)
     cross = [
         subprocess.run([sys.executable, "-c", probe], cwd=TRAINING_ROOT,
@@ -409,6 +425,17 @@ def run_validations() -> Dict[str, Any]:
         "failed_checks": failed,
         "all_passed": not failed,
     }
+
+
+def run_validations() -> Dict[str, Any]:
+    """Validation harness.
+
+    This exercises the causal bridge, which R9.8 protects with the
+    simulator_execution capability. The harness is entitled to run it, so it
+    declares that explicitly here rather than the guard being weakened.
+    """
+    with _authz.granted("simulator_execution", reason="R4 pre-evaluation integrity validation harness"):
+        return _run_validations_inner()
 
 
 def main() -> None:

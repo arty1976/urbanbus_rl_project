@@ -23,6 +23,18 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 BRIDGE_ID = "A_PV8_ADAPTER_KPI_STATE_EXTENSION"
 BRIDGE_CONTRACT_SHA256 = "73cde1eb4300719e"  # short prefix of the R2 selection contract; full value bound by the runner
@@ -343,6 +355,7 @@ class PV8CausalKpiAdapter:
         self.reset()
 
     def reset(self) -> Dict[str, Any]:
+        _authz.require_capability("simulator_execution", site="causal_kpi_bridge.py::reset")
         stops = {index: StopState(stop_id=index) for index in range(self.stop_count)}
         for request in self.demand_population:
             index = self.stop_index_by_id[request.origin_stop_id]
@@ -433,6 +446,7 @@ class PV8CausalKpiAdapter:
 
     def step(self, agent_actions: Mapping[int, int], *, legal_mask: Mapping[int, Sequence[bool]], target_ids: Mapping[int, int], provenance: Mapping[str, Any]) -> Dict[str, Any]:
         """Apply one causal decision step; the action changes the next state."""
+        _authz.require_capability("simulator_execution", site="causal_kpi_bridge.py::step")
         if self.state is None:
             raise BridgeContractError("RESET_REQUIRED")
         pre_identity = self.state_identity()

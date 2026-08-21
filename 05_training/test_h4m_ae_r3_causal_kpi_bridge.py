@@ -19,6 +19,16 @@ from typing import Any, Dict, List, Mapping
 
 import torch
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent,):
+    if (_authz_dir / "simulator_authorization.py").exists() and str(_authz_dir) not in _authz_sys.path:
+        _authz_sys.path.insert(0, str(_authz_dir))
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRAINING_ROOT = PROJECT_ROOT / "05_training"
@@ -104,7 +114,7 @@ def build_env(bridge: Any, qmod: Any, dl1: Any, dl4: Any):
     return plan, sample_graph, config, data, device, window
 
 
-def run_validations() -> Dict[str, Any]:
+def _run_validations_inner() -> Dict[str, Any]:
     torch.set_num_threads(1)
     bridge = imp("r3_bridge", BRIDGE)
     dl1 = imp("r3_dl1", DL1)
@@ -342,6 +352,17 @@ def run_validations() -> Dict[str, Any]:
         "failed": [name for name, row_ in checks.items() if not row_["passed"]],
         "passed": all(row_["passed"] for row_ in checks.values()),
     }
+
+
+def run_validations() -> Dict[str, Any]:
+    """Validation harness.
+
+    This exercises the causal bridge, which R9.8 protects with the
+    simulator_execution capability. The harness is entitled to run it, so it
+    declares that explicitly here rather than the guard being weakened.
+    """
+    with _authz.granted("simulator_execution", reason="R3 causal KPI bridge validation harness"):
+        return _run_validations_inner()
 
 
 def main() -> None:

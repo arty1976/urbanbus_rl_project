@@ -7,6 +7,18 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Dict, List, Optional
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -221,6 +233,7 @@ def write_markdown(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def main() -> None:
+    _authz.require_capability("performance_comparison", site="compare_gatv2_mappo_trace_modes.py::main")
     parser = argparse.ArgumentParser()
     parser.add_argument("--audit-manifest", required=True)
     parser.add_argument("--benchmark-manifest", action="append", required=True)

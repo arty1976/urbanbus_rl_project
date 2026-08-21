@@ -39,6 +39,18 @@ from simulator.zero_loss_admission_adapter import (
     canonical_hash,
 )
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 STAGE = "PV8-R2A-R8E-R3-R-H4J-ZL2"
 PASS_GATE = "PASS_SUSEONG_DL6D_PA1A_SRP2_BIS_PV8_R2AR8ER3RH4J_ZL2_PATENT_AWARE_EXECUTION_INTEGRITY_COMPLETE"
@@ -485,6 +497,7 @@ class AttemptSpec:
 
 
 def collect_and_optimize(output_root: Path) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4j_zl2_patent_aware_execution_integrity.py::collect_and_optimize")
     set_seeds(SEED)
     device = torch.device("cpu")
     model = FreshZL2MAPPO(in_channels=7, hidden_channels=16, edge_dim=3).to(device)

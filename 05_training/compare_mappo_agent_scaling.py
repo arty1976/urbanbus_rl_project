@@ -6,6 +6,18 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -76,6 +88,7 @@ def section_shares(profile: Dict[str, Any]) -> Dict[str, Optional[float]]:
 
 
 def main() -> None:
+    _authz.require_capability("performance_comparison", site="compare_mappo_agent_scaling.py::main")
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-comparison", required=True)
     parser.add_argument("--source-manifest", required=True)
