@@ -33,8 +33,12 @@ DEFAULT_COLUMN_MAP: Dict[str, str] = {
     "destination_stop_id": "destination_stop_id",
     "route_id": "route_id",
     "direction_id": "direction_id",
+    "destination_realizable": "destination_realizable",
+    "realization_status": "realization_status",
+    "unrealizable_reason": "unrealizable_reason",
 }
-OPTIONAL_ROLES = ("destination_stop_id", "route_id", "direction_id")
+OPTIONAL_ROLES = ("destination_stop_id", "route_id", "direction_id",
+                  "destination_realizable", "realization_status", "unrealizable_reason")
 REQUIRED_ROLES = tuple(r for r in DEFAULT_COLUMN_MAP if r not in OPTIONAL_ROLES)
 
 
@@ -79,9 +83,31 @@ class EvaluationTimeContract:
         }
 
 
+def _optional(value: Any) -> Optional[str]:
+    """Carry a value without stringifying a null.
+
+    A request with no legal destination must reach a consumer as an absent
+    destination, not as the text of a missing value.  `str()` on a null would
+    produce "None" or "nan", which a consumer cannot distinguish from a stop id.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 @dataclass(frozen=True)
 class DemandRequest:
-    """One authoritative request.  Identity is carried, never fabricated."""
+    """One authoritative request.  Identity is carried, never fabricated.
+
+    `destination_stop_id` is None exactly when the request has no legal
+    destination; `destination_realizable` states the same fact explicitly so a
+    consumer never has to infer it.
+    """
 
     request_id: str
     passenger_id: str
@@ -93,6 +119,9 @@ class DemandRequest:
     route_id: Optional[str] = None
     direction_id: Optional[str] = None
     destination_stop_id: Optional[str] = None
+    destination_realizable: bool = True
+    realization_status: Optional[str] = None
+    unrealizable_reason: Optional[str] = None
 
 
 @dataclass
@@ -192,9 +221,15 @@ def select_population(
                 arrival_ts_relative=absolute - float(contract.evaluation_start_ts),
                 origin_stop_id=str(row[cmap["origin_stop_id"]]),
                 reporting_window_id=str(row[cmap["reporting_window_id"]]),
-                route_id=str(row[cmap["route_id"]]) if cmap.get("route_id") in frame.columns else None,
-                direction_id=str(row[cmap["direction_id"]]) if cmap.get("direction_id") in frame.columns else None,
-                destination_stop_id=str(row[cmap["destination_stop_id"]]) if cmap.get("destination_stop_id") in frame.columns else None,
+                route_id=_optional(row[cmap["route_id"]]) if cmap.get("route_id") in frame.columns else None,
+                direction_id=_optional(row[cmap["direction_id"]]) if cmap.get("direction_id") in frame.columns else None,
+                destination_stop_id=_optional(row[cmap["destination_stop_id"]]) if cmap.get("destination_stop_id") in frame.columns else None,
+                destination_realizable=(bool(row[cmap["destination_realizable"]])
+                                        if cmap.get("destination_realizable") in frame.columns
+                                        else _optional(row[cmap["destination_stop_id"]]) is not None
+                                        if cmap.get("destination_stop_id") in frame.columns else True),
+                realization_status=_optional(row[cmap["realization_status"]]) if cmap.get("realization_status") in frame.columns else None,
+                unrealizable_reason=_optional(row[cmap["unrealizable_reason"]]) if cmap.get("unrealizable_reason") in frame.columns else None,
             )
         )
     if any(r.arrival_ts_relative < 0.0 for r in requests):

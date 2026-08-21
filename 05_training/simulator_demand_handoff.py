@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -37,6 +37,10 @@ COLUMN_MAP: Dict[str, str] = {
     "destination_stop_id": "destination_stop_id",
     "route_id": "route_id",
     "direction_id": "direction_id",
+    # Null-safe destination contract: carried explicitly, never inferred downstream.
+    "destination_realizable": "destination_realizable",
+    "realization_status": "realization_status",
+    "unrealizable_reason": "unrealizable_reason",
 }
 
 # Fields the handoff must carry through unchanged.
@@ -74,7 +78,8 @@ class HandoffView:
 def project(ledger: pd.DataFrame, out_path: Path) -> HandoffView:
     """Write the handoff view.  Every ledger row appears exactly once."""
     needed = sorted({*COLUMN_MAP.values(), "historical_request_key", "realization_status",
-                     "unattributable_reason", "passenger_count", "service_date", "service_hour",
+                     "unattributable_reason", "unrealizable_reason", "destination_realizable",
+                     "schema_version", "passenger_count", "service_date", "service_hour",
                      "request_ts", "bucket_start", "bucket_end", "provenance_digest",
                      "demand_realization_seed", "realization_version", "od_prior_variant",
                      "od_distribution_digest", "route_distribution_digest",
@@ -124,9 +129,8 @@ def interface_capability(ledger: pd.DataFrame, realization: ADR.DemandRealizatio
         if req is None:
             continue
         carried += 1
-        # DemandRequest applies str() to whatever sits in the destination column, so a
-        # null destination arrives as the text of a missing value rather than as an
-        # absent destination.
+        # A null destination must arrive as an absent destination, not as the text of a
+        # missing value.  Anything that merely looks like a null is a degradation.
         value = req.destination_stop_id
         if value is not None and value.strip().lower() in MISSING_VALUE_TEXT:
             degraded.append(value)
@@ -150,7 +154,11 @@ def interface_capability(ledger: pd.DataFrame, realization: ADR.DemandRealizatio
         "degraded_destination_values": sorted(set(degraded))[:3],
         "blocker": blocker,
         "realization_status_preserved_in_view": "realization_status" in realization.frame.columns,
-        "consumer_must_read": "realization_status and unattributable_reason",
+        "realizable_flag_carried": "destination_realizable" in realization.frame.columns,
+        "reason_carried": "unrealizable_reason" in realization.frame.columns,
+        "reasons_resolved": sorted({str(r.unrealizable_reason) for r in requests
+                                    if not r.destination_realizable}),
+        "consumer_must_read": "destination_realizable, or test destination_stop_id for null",
     }
 
 
@@ -188,11 +196,26 @@ def field_invariance(ledger: pd.DataFrame, view: HandoffView) -> Dict[str, Any]:
             "fields_checked": list(INVARIANT_FIELDS)}
 
 
+def _nullable_field(value: Optional[str]) -> str:
+    """Serialize a nullable field so a null can never collide with a real value.
+
+    Applying str() to a null would emit the text "None", which is indistinguishable
+    from a stop id that happens to be the string "None".  A leading presence flag
+    keeps absence structurally separate from any value a stop id could take.
+    """
+    return "0:" if value is None else f"1:{value}"
+
+
 def loaded_demand_digest(requests: List[ADR.DemandRequest]) -> str:
-    """Digest of what the simulator would actually receive."""
+    """Digest of what the simulator would actually receive.
+
+    Nullable fields are presence-flagged, so this digest distinguishes an absent
+    destination from every possible stop id rather than flattening both to text.
+    """
     lines = ["|".join([r.request_id, r.passenger_id, f"{r.arrival_ts_absolute:.6f}",
                        f"{r.arrival_ts_relative:.6f}", r.origin_stop_id, r.reporting_window_id,
-                       str(r.destination_stop_id), str(r.route_id), str(r.direction_id),
-                       f"{r.weight:.6f}"])
+                       _nullable_field(r.destination_stop_id), _nullable_field(r.route_id),
+                       _nullable_field(r.direction_id), f"{r.weight:.6f}",
+                       "1" if r.destination_realizable else "0"])
              for r in sorted(requests, key=lambda x: x.request_id)]
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()

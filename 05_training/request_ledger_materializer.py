@@ -36,6 +36,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import constrained_od_engine as E
 import od_seeded_sampler as S
 import request_identity as RI
+import request_ledger_schema as SCHEMA
 import request_timestamp_realization as TS
 import terminal_feasibility_filter as F
 
@@ -66,6 +67,9 @@ DEMAND_SEMANTICS = {
 }
 
 HANDOFF_SCHEMA: Tuple[Tuple[str, str], ...] = (
+    ("schema_version", "versioned ledger schema this row conforms to"),
+    ("destination_realizable", "false exactly when no legal destination exists"),
+    ("unrealizable_reason", "nullable reason, non-null exactly when not realizable"),
     ("historical_request_key", "seed-independent identity of one historical boarding"),
     ("request_realization_id", "identity of one inferred realization of that boarding"),
     ("request_ts", "inferred realization time inside the authoritative bucket"),
@@ -256,6 +260,7 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
         "feasibility_filter_version": F.FILTER_VERSION if config.feasibility_filter else None,
         "destination_observed": False, "od_ground_truth": False,
         "request_ts_observed": False,
+        "schema_version": SCHEMA.CURRENT_SCHEMA,
         "provenance_digest": config.provenance_digest,
         **{f"src_{k}": v for k, v in sorted(config.provenance.items())},
     }
@@ -267,6 +272,8 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
         return [{
             **common, **stamps[i], **ident(i),
             "realization_status": status,
+            "destination_realizable": False,
+            "unrealizable_reason": plan.unattributable_reason,
             "unattributable_reason": plan.unattributable_reason,
             "route_id": None, "direction_id": None, "origin_occurrence_id": None,
             "origin_stop_sequence": None, "destination_occurrence_id": None,
@@ -299,6 +306,8 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
             for i in ordinals:
                 out[i] = {**base, **stamps[i], **ident(i),
                           "realization_status": STATUS_TERMINAL,
+                          "destination_realizable": False,
+                          "unrealizable_reason": "TERMINAL_OCCURRENCE_NO_DOWNSTREAM",
                           "unattributable_reason": "TERMINAL_OCCURRENCE_NO_DOWNSTREAM",
                           "destination_occurrence_id": None, "destination_stop_id": None,
                           "destination_stop_sequence": None, "od_distribution_digest": None,
@@ -313,7 +322,8 @@ def realize_bucket(plan: OriginPlan, *, config: LedgerConfig, route_contract: S.
         for i, draw in zip(sorted(ordinals), draws):
             dest = plan.destinations[draw["destination_occurrence_id"]]
             out[i] = {**base, **stamps[i], **ident(i),
-                      "realization_status": STATUS_REALIZED, "unattributable_reason": None,
+                      "realization_status": STATUS_REALIZED, "destination_realizable": True,
+                      "unrealizable_reason": None, "unattributable_reason": None,
                       "destination_occurrence_id": dest.occurrence_id,
                       "destination_stop_id": dest.stop_id,
                       "destination_stop_sequence": dest.stop_sequence,
@@ -405,7 +415,9 @@ def conservation_report(source_rows: List[Dict[str, Any]], frame) -> Dict[str, A
 def manifest(config: LedgerConfig, index: E.RouteNetworkIndex, engine_config: E.EngineConfig,
              conservation: Dict[str, Any], digest: str) -> Dict[str, Any]:
     return {
-        "ledger_id": LEDGER_ID, "config": config.payload(),
+        "ledger_id": LEDGER_ID, "schema_version": SCHEMA.CURRENT_SCHEMA,
+        "schema_contract": SCHEMA.SCHEMA_REGISTRY[SCHEMA.CURRENT_SCHEMA],
+        "config": config.payload(),
         "engine_id": E.ENGINE_ID, "engine_config": engine_config.payload(),
         "sampler_id": S.SAMPLER_ID, "timestamp_rule_id": TS.RULE_ID,
         "identity_contract": config.identity.payload(),
@@ -424,5 +436,7 @@ def manifest(config: LedgerConfig, index: E.RouteNetworkIndex, engine_config: E.
             "scoped_inferred_request_ledger_created": True,
             "simulator_demand_handoff_schema_validated": False,
             "simulator_demand_load_validation_complete": False,
+            "null_safe_destination_contract_validated": False,
+            "versioned_request_ledger_contract_validated": False,
         },
     }
