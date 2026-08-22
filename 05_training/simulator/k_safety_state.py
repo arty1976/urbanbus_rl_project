@@ -426,8 +426,32 @@ class ServiceObligationStateMachine:
         self._schedule_sequence += 1
         self.pending_transitions.append(ScheduledTransition(timestamp, self._schedule_sequence, transition, dict(payload)))
 
+    def __deepcopy__(self, memo):
+        """A copy taken inside a declared shadow scope is disposable.
+
+        The frozen Zero-Loss adapter deep-copies state, advances the copy and
+        discards it.  Marking the copy here lets `advance_to` charge that to
+        shadow_counterfactual while the live object still requires
+        simulator_execution.  The adapter itself is untouched.
+        """
+        import copy as _copy
+        clone = self.__class__.__new__(self.__class__)
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            setattr(clone, key, _copy.deepcopy(value, memo))
+        clone._disposable_shadow_copy = _authz.is_granted("shadow_counterfactual")
+        return clone
+
     def advance_to(self, decision_ts: int) -> None:
-        _authz.require_capability("simulator_execution", site="simulator/k_safety_state.py::advance_to")
+        # A disposable counterfactual copy is charged to shadow_counterfactual;
+        # the live authoritative state still requires simulator_execution.
+        if getattr(self, "_disposable_shadow_copy", False):
+            _authz.require_capability(
+                "shadow_counterfactual",
+                site="simulator/k_safety_state.py::advance_to[disposable_shadow_copy]")
+        else:
+            _authz.require_capability(
+                "simulator_execution", site="simulator/k_safety_state.py::advance_to")
         timestamp = int(decision_ts)
         if timestamp < self.current_ts:
             raise KSafetyChronologyError(

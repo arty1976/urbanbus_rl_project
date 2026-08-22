@@ -40,6 +40,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 AUTHORIZATION_ID = "SIMULATOR_CAPABILITY_AUTHORIZATION_V1"
 
 SIMULATOR_BINDING = "simulator_binding"
+SHADOW_COUNTERFACTUAL = "shadow_counterfactual"
 SIMULATOR_EXECUTION = "simulator_execution"
 TRAINING = "training"
 PERFORMANCE_COMPARISON = "performance_comparison"
@@ -49,6 +50,7 @@ CAUSAL_PERFORMANCE_CLAIM = "causal_performance_claim"
 # deliberately NOT used to imply anything: holding one never grants another.
 CAPABILITY_LADDER: Tuple[str, ...] = (
     SIMULATOR_BINDING,
+    SHADOW_COUNTERFACTUAL,
     SIMULATOR_EXECUTION,
     TRAINING,
     PERFORMANCE_COMPARISON,
@@ -57,7 +59,9 @@ CAPABILITY_LADDER: Tuple[str, ...] = (
 
 CAPABILITY_MEANING: Dict[str, str] = {
     SIMULATOR_BINDING: "attach the frozen demand ledger to the causal simulator input",
-    SIMULATOR_EXECUTION: "advance causal simulator state",
+    SHADOW_COUNTERFACTUAL: ("advance a disposable deep copy of state for a counterfactual that is "
+                            "discarded; never the live authoritative state"),
+    SIMULATOR_EXECUTION: "advance the live authoritative causal simulator state",
     TRAINING: "update parameters, step an optimizer, or write a checkpoint",
     PERFORMANCE_COMPARISON: "run an official B1/B2/A causal comparison",
     CAUSAL_PERFORMANCE_CLAIM: "publish a causal performance claim",
@@ -72,6 +76,9 @@ AUTHORIZATION_CONTRACT = {
     "ladder": list(CAPABILITY_LADDER),
     "meaning": dict(CAPABILITY_MEANING),
     "implicit_escalation": False,
+    "shadow_counterfactual_is_not_execution": True,
+    "shadow_counterfactual_may_touch_live_state": False,
+    "simulator_execution_meaning_unchanged": True,
     "holding_one_capability_grants_another": False,
     "policy_independent": True,
     "arm_or_policy_specific_bypass": False,
