@@ -34,6 +34,7 @@ PASS_CLASS = "A_SUSEONG_LS3_ADDITIONAL_BOUNDED_TRAINING_COMPLETE_READY_FOR_FROZE
 MPS_BLOCK = "BLOCKED_SUSEONG_H4M_AE_R9_8_LS3_BT8_A1_MPS_PREFLIGHT_FAILED"
 INTEGRITY_BLOCK = "BLOCKED_SUSEONG_H4M_AE_R9_8_LS3_BT8_A1_EXECUTION_INTEGRITY_FAILURE"
 BT8_S0_SOURCE = "593c94d8fa80e87d37758b2a7c0383605229ed1f"
+A1_EXECUTOR_V1_SOURCE = "1e3a394fa436ca23c56dc94a24873731c2a4551e"
 BT8_S0_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_S0_ADDITIONAL_TRAINING_ADEQUACY_AND_DISCRIMINATION_EXPOSURE_DESIGN_COMPLETE"
 BT8_S0 = Path(__file__).resolve().parent / "artifacts" / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_s0_training_adequacy_design_20260822_212909+09:00"
 ROOT = Path(__file__).resolve().parent
@@ -196,8 +197,10 @@ def main() -> None:
     s0_gate = json.loads((BT8_S0 / "gate_decision.json").read_text(encoding="utf-8"))
     review_contract = json.loads((BT8_S0 / "bt8s0_posttraining_review_contract.json").read_text(encoding="utf-8"))
     binding = {"bt8_s0_gate": s0_gate.get("gate") == BT8_S0_GATE, "bt8_s0_source": s0_gate.get("source_commit") == BT8_S0_SOURCE,
-               "source_parent_is_bt8_s0": source["source_parent"] == BT8_S0_SOURCE,
-               "source_only_local_commit": source["source_only_local_commit"], "design_authorization_was_not_auto_execution": selection["must_not_execute_automatically"],
+               "a1_executor_v1_is_bt8_s0_child": git(["rev-parse", f"{A1_EXECUTOR_V1_SOURCE}^"]) == BT8_S0_SOURCE,
+               "source_parent_is_a1_executor_v1": source["source_parent"] == A1_EXECUTOR_V1_SOURCE,
+               "source_only_local_commit": source["source_only_local_commit"],
+               "design_authorization_was_not_auto_execution": selection["must_not_execute_automatically_at_design_time"],
                "t1_exact_zero_tolerance": review_contract["selector"].get("tolerance") == 0.0,
                "t1_contract": review_contract["selector"].get("contract_id") == TIE.TIE_BREAK_CONTRACT_ID,
                **envelope_checks}
