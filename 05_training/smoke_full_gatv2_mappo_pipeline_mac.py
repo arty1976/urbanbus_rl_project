@@ -24,6 +24,18 @@ from torch.distributions import Categorical
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATv2Conv
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 @dataclass
 class DeviceDecision:
@@ -379,6 +391,7 @@ def train_gatv2(
     epochs: int,
     grad_clip_norm: Optional[float],
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="smoke_full_gatv2_mappo_pipeline_mac.py::train_gatv2")
     loader = DataLoader(data_list, batch_size=batch_size, shuffle=False, num_workers=0)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     losses: List[float] = []
@@ -542,6 +555,7 @@ def mappo_rollout_update(
     clip_epsilon: float,
     trace_mode: str,
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="smoke_full_gatv2_mappo_pipeline_mac.py::mappo_rollout_update")
     policy = TinyMAPPOPolicy(
         embedding_dim=int(embeddings.size(1)),
         num_agents=num_agents,

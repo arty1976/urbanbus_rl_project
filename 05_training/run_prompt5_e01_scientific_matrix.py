@@ -29,6 +29,18 @@ from run_suseong_route_aware_preflight import (
 )
 from run_suseong_scientific_matrix import FixedDemandSuseongSimulator, condition_agents, make_e0_embeddings
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 OUTPUT_ROOT = "05_training/artifacts/suseong_scientific_matrix_e01_repaired_v1"
 CACHE_ROOT = "05_training/artifacts/suseong_dynamic_embedding_cache_v1"
@@ -205,6 +217,7 @@ def run_one_e01(
     cache_audit: Mapping[str, Any],
     hard_contract: Mapping[str, Any],
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_prompt5_e01_scientific_matrix.py::run_one_e01")
     random.seed(seed)
     torch.manual_seed(seed)
     run_root = output_root / family / condition / f"seed_{seed:03d}"

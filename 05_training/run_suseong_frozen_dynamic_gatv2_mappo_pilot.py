@@ -27,6 +27,18 @@ from run_suseong_route_aware_preflight import (
     torch_load,
 )
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 OUTPUT_ROOT = "05_training/artifacts/mac_suseong_frozen_dynamic_gatv2_mappo_pilot_seed1"
 
@@ -143,6 +155,7 @@ def pretrain_encoder(
     device: torch.device,
     lr: float,
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_suseong_frozen_dynamic_gatv2_mappo_pilot.py::pretrain_encoder")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     losses: List[float] = []
     nan_inf = False
@@ -188,6 +201,7 @@ def run_dynamic_mappo(
     seed: int,
     device: torch.device,
 ) -> Tuple[Dict[str, Any], Dict[str, float], List[Dict[str, Any]]]:
+    _authz.require_capability("training", site="run_suseong_frozen_dynamic_gatv2_mappo_pilot.py::run_dynamic_mappo")
     random.seed(seed)
     torch.manual_seed(seed)
     route_sequences = pd.read_csv(project_root / "05_training/artifacts/suseong_service_graph_v1/service_route_sequences.csv")

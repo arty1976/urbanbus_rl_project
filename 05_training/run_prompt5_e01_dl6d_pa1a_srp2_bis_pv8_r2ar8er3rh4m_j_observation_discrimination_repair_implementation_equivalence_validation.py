@@ -26,6 +26,18 @@ import pandas as pd
 import torch
 from torch.distributions import Categorical
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 STAGE = "PV8-R2A-R8E-R3-R-H4M-J"
 PASS_GATE = "PASS_SUSEONG_DL6D_PA1A_R8E_R3_RH4M_J_OBSERVATION_DISCRIMINATION_REPAIR_IMPLEMENTATION_AND_EQUIVALENCE_VALIDATION_COMPLETE"
@@ -415,6 +427,7 @@ def move_context_to_device(ctx: Mapping[str, Any], device: torch.device) -> None
 
 
 def mps_forward_backward_smoke(h4mg: Any, created_at: str) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_prompt5_e01_dl6d_pa1a_srp2_bis_pv8_r2ar8er3rh4m_j_observation_discrimination_repair_implementation_equivalence_validation.py::mps_forward_backward_smoke")
     if not torch.backends.mps.is_available():
         return {
             "stage": STAGE,

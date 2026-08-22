@@ -25,6 +25,18 @@ from simulator.suseong_service_transition_engine import (
     advance_vehicle_time_budget,
 )
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 ARTIFACT_VERSION = "suseong_route_aware_causal_preflight_prompt2r_v1"
 CANONICAL_12_KPIS = [
@@ -379,6 +391,7 @@ def run_preflight(
     seed: int,
     require_mps: bool,
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_suseong_route_aware_preflight.py::run_preflight")
     random.seed(seed)
     torch.manual_seed(seed)
     output_root.mkdir(parents=True, exist_ok=True)

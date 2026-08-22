@@ -29,6 +29,18 @@ from run_suseong_route_aware_preflight import (
     torch_load,
 )
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 VALIDATION_SCOPE = "suseong_service_graph_fixed_embedding_mappo_scaling"
 SIMULATOR_MODE = "suseong_route_aware_causal_service_graph"
@@ -263,6 +275,7 @@ def run_benchmark(
     seed: int,
     require_mps: bool,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    _authz.require_capability("training", site="run_suseong_service_512_h256_hardware_gate.py::run_benchmark")
     random.seed(seed)
     torch.manual_seed(seed)
     output_root.mkdir(parents=True, exist_ok=True)

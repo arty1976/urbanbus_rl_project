@@ -12,6 +12,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 TRAINING_DIR = Path(__file__).resolve().parent
 if str(TRAINING_DIR) not in sys.path:
@@ -204,6 +216,7 @@ def run_one_epoch(
     Categorical,
     CausalSimulatorAdapter,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    _authz.require_capability("training", site="train_toy_causal_mappo_smoke.py::run_one_epoch")
     adapter = CausalSimulatorAdapter(
         {
             "condition_id": str(args.condition_id).upper(),

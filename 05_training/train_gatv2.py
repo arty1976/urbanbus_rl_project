@@ -7,6 +7,18 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATv2Conv
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 DATASET_DIR = r"C:\Users\ryujo\urbanbus_rl_project\05_training\artifacts\dataset_full_20260422_084243\train"
 DEVICE = "cpu"
@@ -48,6 +60,7 @@ class NodeLevelGATv2(torch.nn.Module):
 
 
 def main():
+    _authz.require_capability("training", site="train_gatv2.py::main")
     dataset_dir = Path(DATASET_DIR)
 
     files = sorted(glob.glob(str(dataset_dir / "*.pt")))

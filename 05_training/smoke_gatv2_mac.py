@@ -12,6 +12,18 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATv2Conv
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 class NodeLevelGATv2(torch.nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int, edge_dim: Optional[int] = None):
@@ -111,6 +123,7 @@ def build_model_from_sample(sample, hidden_channels: int) -> NodeLevelGATv2:
 
 
 def run(args: argparse.Namespace) -> Dict[str, Any]:
+    _authz.require_capability("training", site="smoke_gatv2_mac.py::run")
     dataset_dir = Path(args.dataset_dir).expanduser().resolve()
     files = resolve_pt_files(dataset_dir, args.split, args.max_files)
     data_list = [torch_load(path) for path in files]

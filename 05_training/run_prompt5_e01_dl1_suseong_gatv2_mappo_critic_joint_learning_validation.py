@@ -24,6 +24,18 @@ from torch.distributions import Categorical
 from torch_geometric.data import Data
 from torch_geometric.nn import GATv2Conv
 
+# --- H4M-AE-R9.8 LS3-BT3 fail-closed training authorization -------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 ARTIFACT_PREFIX = "prompt5_e01_dl1_suseong_gatv2_mappo_critic_joint_learning_validation"
 EXPECTED_UPSTREAM_GATE = "PASS_AXIS_SPECIFIC_SYMBOLIC_DOMAIN_KIND_ADJUDICATED_AS_CONVENTION_STILL_LOCKED"
@@ -1144,6 +1156,7 @@ def run_training_case(
     config: Mapping[str, Any],
     device: torch.device,
 ) -> Dict[str, Any]:
+    _authz.require_capability("training", site="run_prompt5_e01_dl1_suseong_gatv2_mappo_critic_joint_learning_validation.py::run_training_case")
     seed = int(config["seed"]) + (0 if run_label == "A" else 1000)
     random.seed(seed)
     torch.manual_seed(seed)
