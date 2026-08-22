@@ -29,6 +29,7 @@ PASS_B = "PASS_WITH_REMAINING_POLICY_DISCRIMINATION_CAUTION"
 PASS_C = "PASS_WITH_NO_MATERIAL_DISCRIMINATION_IMPROVEMENT"
 BLOCK = "BLOCKED_SUSEONG_H4M_AE_R9_8_LS3_BT8_R1_FROZEN_POLICY_INTEGRITY_FAILURE"
 BT8_A1_SOURCE = "43dee0966abd62efec89e7229421341b121e1e81"
+BT8_R1_V1_SOURCE = "7a7da6ad58b9da236d44a5e4afdbff9b0cd0a6fe"
 BT7_RERUN2_SOURCE = "dfa18a837d716dfc180418a239ac661aaf1544a3"
 BT7_RERUN2_GATE = "PASS_WITH_FROZEN_POLICY_DISCRIMINATION_CAUTION"
 T1_TOLERANCE = 0.0
@@ -194,6 +195,11 @@ def score_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "positive_margin_rule": "strictly positive score difference only; no T2 near-tie tolerance"}
 
 
+def multi_candidate_score_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Keep score-margin comparison on the same genuine multi-candidate scope."""
+    return score_summary([row for row in rows if row["support_size"] >= 2])
+
+
 def gini(values: Sequence[int]) -> float | None:
     if not values or not sum(values): return None
     ordered, size = sorted(values), len(values)
@@ -267,7 +273,9 @@ def main() -> None:
     expected_config: dict[str, Any] = {}
     binding = {"a1_gate": a1_gate.get("gate") == "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_A1_ADDITIONAL_BOUNDED_TRAINING_EXECUTION_AND_SNAPSHOT_PRESERVATION_COMPLETE",
                "a1_source": a1_gate.get("source_commit") == BT8_A1_SOURCE, "previous_gate": previous_gate.get("gate") == BT7_RERUN2_GATE,
-               "previous_source": previous_gate.get("source_commit") == BT7_RERUN2_SOURCE, "source_parent_is_a1": source["source_parent"] == BT8_A1_SOURCE,
+               "previous_source": previous_gate.get("source_commit") == BT7_RERUN2_SOURCE,
+               "r1_v1_parent_is_a1": git(["rev-parse", f"{BT8_R1_V1_SOURCE}^"]) == BT8_A1_SOURCE,
+               "source_parent_is_r1_v1": source["source_parent"] == BT8_R1_V1_SOURCE,
                "source_only_local_commit": source["source_only_local_commit"], "checkpoint_exists": A1_CHECKPOINT.is_file(),
                "support_multiset_matches_previous": old_support == a1_support, "support_multiset_intersection_96": sum((old_support & a1_support).values()) == 96}
     if collection:
@@ -373,7 +381,7 @@ def main() -> None:
             "unique_winner_rate": overall["unique_winner_rate"], "physically_equivalent_ties": overall["physically_equivalent_or_near_equivalent_exact_ties"],
             "insufficient_metadata_ties": overall["insufficient_metadata_exact_ties"], "by_time_band": by_band, "by_density": by_density,
             "by_position": by_position, "by_support_size": by_support, "t1_rule": "exact score equality only; every positive margin remains a learned model preference"}
-    scores = score_summary(records)
+    scores = {**score_summary(records), "multi_candidate": multi_candidate_score_summary(records)}
     current_concentration = concentration(records)
     previous_ties = json.loads((PREVIOUS / "bt7rerun2_tie_prevalence_and_discrimination.json").read_text(encoding="utf-8"))["multi_candidate"]
     previous_concentration = json.loads((PREVIOUS / "bt7rerun2_agent_opportunity_concentration.json").read_text(encoding="utf-8"))["t1"]
@@ -394,7 +402,8 @@ def main() -> None:
                       "caveat": "window labels differ but preserved source-group/candidate-identity support multiset is exact" if support_comparable else "support distribution differs; raw rates are not comparable"},
                   "meaningfully_distinct_tie_rate": {"previous": previous_rate, "a1": current_rate, "previous_numerator_denominator": "26/48", "a1_numerator": overall["meaningfully_distinct_exact_ties"], "a1_denominator": overall["meaningfully_distinct_multi_candidate_states"]},
                   "unique_winner_rate": {"previous": previous_ties["unique_winner_fraction"], "a1": overall["unique_winner_rate"]},
-                  "positive_margin_distribution": {"previous": previous_ties["non_tie_margin_distribution"], "a1": scores["unique_winner_states"]["positive_top1_top2_score_margin"], "previous_p95": "not stored in prior artifact; not imputed"},
+                  "positive_margin_distribution": {"scope": "genuine multi-candidate unique-score winners only", "previous": previous_ties["non_tie_margin_distribution"],
+                      "a1": scores["multi_candidate"]["unique_winner_states"]["positive_top1_top2_score_margin"], "previous_p95": "not stored in prior artifact; not imputed"},
                   "mean_entropy_multi_candidate": {"previous": previous_diversity["mean_policy_entropy"], "a1": statistics.mean(row["entropy"] for row in records if row["support_size"] >= 2)},
                   "outcome": discrimination_outcome}
     previous_status = "POTENTIAL_POLICY_CONCENTRATION" if previous_concentration["top1_share"] > max(row["opportunity_pair_share"] or 0.0 for row in previous_concentration["per_agent"]) else "OPPORTUNITY_EXPLAINABLE"
