@@ -7,8 +7,11 @@ Three pieces, all separate from the operational MAPPO stack:
     compute_assignment_gae     GAE over assignment transitions, duration aware
     assignment_ppo_loss        PPO objective over the frozen rollout action support
 
-Nothing here updates a parameter.  Losses are computed and gradients may be
-inspected, but `optimizer.step()` is never called.
+`assignment_ppo_loss` only computes; it never touches a parameter.  The single
+place that steps an optimizer is `apply_assignment_update`, and it is guarded by
+`require_capability("training")` before any gradient is computed.  BT1 stepped the
+optimizers directly and so bypassed that check entirely; routing every update
+through one guarded entrypoint is what closes that hole.
 
 Critic input discipline
 -----------------------
@@ -34,6 +37,7 @@ import torch
 import torch.nn as nn
 
 import joint_assignment_credit_contract as CC
+import simulator_authorization as _authz
 
 CRITIC_ID = "JOINT_ASSIGNMENT_CRITIC_V1"
 PPO_ID = "JOINT_ASSIGNMENT_PPO_INTERFACE_V1"
@@ -69,7 +73,11 @@ PPO_CONTRACT = {
     "forced_rows_in_actor_denominator": False,
     "entropy_over": "safe pairs plus NO_ASSIGN only",
     "optimizer_step_called": False,
+    "optimizer_step_requires_capability": "training",
+    "optimizer_step_entrypoint": "joint_assignment_learning.apply_assignment_update",
 }
+
+TRAINING_GUARD_SITE = "joint_assignment_learning.py::apply_assignment_update"
 
 
 class JointAssignmentCritic(nn.Module):
@@ -231,3 +239,39 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
         "advantage_detached": not adv.requires_grad,
         "optimizer_step_called": False,
     }
+
+
+def apply_assignment_update(*, loss: Dict[str, Any], actor: nn.Module, critic: nn.Module,
+                            actor_optimizer: Any, critic_optimizer: Any,
+                            max_grad_norm: Optional[float] = None) -> Dict[str, Any]:
+    """The only sanctioned way to step the joint-assignment optimizers.
+
+    BT1 revealed that the training capability was granted but never checked on
+    this path: R9.8 wired `require_capability("training")` onto the legacy PPO
+    entrypoints, and this newer optimizer path had no guard at all.  Owning the
+    optimizer step here closes that hole -- the check runs before any gradient is
+    computed, so an unauthorized caller cannot move a single parameter.
+
+    Callers must not step the optimizers themselves; doing so would route around
+    the guard exactly the way BT1 accidentally did.
+    """
+    _authz.require_capability("training", site=TRAINING_GUARD_SITE)
+    actor_optimizer.zero_grad(set_to_none=True)
+    critic_optimizer.zero_grad(set_to_none=True)
+    total = loss["actor_loss"] + loss["critic_loss"]
+    total.backward()
+    actor_grad = float(sum(p.grad.abs().sum() for p in actor.parameters() if p.grad is not None))
+    critic_grad = float(sum(p.grad.abs().sum() for p in critic.parameters() if p.grad is not None))
+    actor_norm = float(torch.sqrt(sum((p.grad ** 2).sum() for p in actor.parameters()
+                                      if p.grad is not None)))
+    critic_norm = float(torch.sqrt(sum((p.grad ** 2).sum() for p in critic.parameters()
+                                       if p.grad is not None)))
+    if max_grad_norm is not None:
+        nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+        nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+    actor_optimizer.step()
+    critic_optimizer.step()
+    return {"capability_checked": "training", "optimizer_step_called": True,
+            "actor_grad_abs_sum": actor_grad, "critic_grad_abs_sum": critic_grad,
+            "actor_grad_norm": actor_norm, "critic_grad_norm": critic_norm,
+            "total_loss": float(total.detach())}

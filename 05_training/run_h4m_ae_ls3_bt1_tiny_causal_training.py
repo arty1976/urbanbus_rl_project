@@ -388,11 +388,11 @@ def main() -> None:
                     forced_action=torch.tensor([t.forced_action for t in txs]))
                 if not torch.isfinite(loss["actor_loss"]).all():
                     invariants["nan_count"] += 1
-                actor_opt.zero_grad(set_to_none=True)
-                critic_opt.zero_grad(set_to_none=True)
-                (loss["actor_loss"] + loss["critic_loss"]).backward()
-                actor_opt.step()
-                critic_opt.step()
+                # Guarded entrypoint: require_capability("training") runs before any
+                # gradient is computed (BT2-A closes the BT1 gap).
+                update = JL.apply_assignment_update(
+                    loss=loss, actor=actor, critic=critic,
+                    actor_optimizer=actor_opt, critic_optimizer=critic_opt)
                 ppo_audit.append({
                     "seed": seed, "update_index": update_i + 1,
                     "rows": len(rows), "actor_loss": float(loss["actor_loss"].detach()),
@@ -403,6 +403,9 @@ def main() -> None:
                     "actor_denominator": loss["actor_denominator"],
                     "forced_rows": loss["forced_rows"],
                     "advantage_detached": loss["advantage_detached"],
+                    "capability_checked": update["capability_checked"],
+                    "actor_grad_norm": update["actor_grad_norm"],
+                    "critic_grad_norm": update["critic_grad_norm"],
                     "advantages": [round(x, 8) for x in gae["assignment_advantage"]],
                     "returns": [round(x, 8) for x in gae["assignment_return"]]})
 
