@@ -681,7 +681,9 @@ def main() -> None:
         checkpoint = {"path": "bt6_r2_joint_assignment_checkpoint.pt", "test_only": True, "bounded": True, "non_promotable": True,
                       "winner": False, "best_model": False, "promotion": False, "performance_claim_allowed": False,
                       "paper_level_claim_allowed": False, "causal_performance_claim_allowed": False}
-        root.mkdir(parents=True)
+        # Snapshot capture creates this artifact directory at the first
+        # decision, so final checkpoint writing must not recreate it.
+        root.mkdir(parents=True, exist_ok=True)
         torch.save({"actor": actor.state_dict(), "critic": critic.state_dict(), "meta": {**checkpoint, "envelope": envelope,
                    "bt6_s0_source": BT6_S0_SOURCE}}, root / checkpoint["path"])
         frozen_snapshot_collection = snapshot_writer.finalize(checkpoint_path=root / checkpoint["path"])
