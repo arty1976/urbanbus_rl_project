@@ -457,7 +457,10 @@ def main() -> None:
     source = provenance()
     preflight = mps_preflight()
     if not preflight["passed"]:
-        root.mkdir(parents=True)
+        # Snapshot capture creates the append-only artifact directory at the
+        # first decision.  Checkpoint finalization must therefore be idempotent
+        # with respect to that already-created directory.
+        root.mkdir(parents=True, exist_ok=True)
         dump(root / "bt6_mps_preflight.json", preflight)
         dump(root / "gate_decision.json", {"gate": MPS_BLOCK, "source_commit": source["source_commit"], "global_locks": LOCKS,
                                               "hard_failures": [MPS_BLOCK], "next_step": "restore MPS and rerun the unchanged R2 envelope"})
