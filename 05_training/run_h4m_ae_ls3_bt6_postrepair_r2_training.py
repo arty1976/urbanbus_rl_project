@@ -44,6 +44,12 @@ ROOT = Path(__file__).resolve().parent
 PROJECT = ROOT.parent
 ARTIFACTS = ROOT / "artifacts"
 SOURCE_REL = Path("05_training") / Path(__file__).name
+SNAPSHOT_REPAIR_SOURCE_FILES = {
+    SOURCE_REL.as_posix(),
+    "05_training/joint_assignment_frozen_policy_snapshot.py",
+    "05_training/test_h4m_ae_ls3_bt7_r0_snapshot_preservation.py",
+    "05_training/run_h4m_ae_ls3_bt7_r0_snapshot_preservation.py",
+}
 BT6_S0 = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt6_s0_postrepair_scale_redesign_20260822_152944+09:00"
 BT5R = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt5r_candidate_support_repair_selection_20260822_151517+09:00"
 R97_ROOT = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_r9_7_null_safe_versioned_binding_20260822_005245"
@@ -120,7 +126,8 @@ def provenance() -> Dict[str, Any]:
     head = git(["rev-parse", "HEAD"]).stdout.strip()
     parent = git(["rev-parse", "HEAD^"]).stdout.strip()
     files = [line for line in git(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).stdout.splitlines() if line]
-    return {"source_commit": head, "source_parent": parent, "source_only_local_commit": files == [SOURCE_REL.as_posix()],
+    return {"source_commit": head, "source_parent": parent,
+            "source_only_local_commit": bool(files) and set(files).issubset(SNAPSHOT_REPAIR_SOURCE_FILES),
             "changed_files": files, "bt6s0_artifact_exists": BT6_S0.is_dir(), "bt5r_artifact_exists": BT5R.is_dir(),
             "github_push_performed": False}
 
@@ -436,6 +443,7 @@ def main() -> None:
     sys.path.insert(0, str(ROOT / "simulator"))
     import joint_assignment_credit_contract as CC
     import joint_assignment_learning as JL
+    import joint_assignment_frozen_policy_snapshot as FPS
     import multi_agent_assignment_contract as MC
     import multi_agent_candidate_assignment_head as H
     import run_h4m_ae_ls3_bt1_tiny_causal_training as BT1
@@ -481,12 +489,34 @@ def main() -> None:
     critic = JL.JointAssignmentCritic(global_dim=8, demand_dim=6, agent_dim=adim, safe_summary_dim=1 + 2 * cdim).to(device)
     actor_opt, critic_opt = torch.optim.Adam(actor.parameters(), lr=1e-4), torch.optim.Adam(critic.parameters(), lr=1e-4)
     actor_before, critic_before = BT1.param_digest(actor), BT1.param_digest(critic)
+    snapshot_actor_config = FPS.actor_config(
+        global_dim=8, demand_dim=6, agent_dim=adim, candidate_dim=cdim,
+        actor_module_sha256=sha256(ROOT / "multi_agent_candidate_assignment_head.py"),
+        actor_head_id=H.HEAD_ID, actor_head_version=H.HEAD_VERSION)
+    snapshot_feature_contract = {
+        "feature_contract_id": FPS.FEATURE_CONTRACT_ID,
+        "global_feature_dim": 8, "demand_feature_dim": 6, "agent_feature_dim": adim,
+        "candidate_feature_dim": cdim,
+        "feature_normalization": "already materialized at the post-Zero-Loss pre-forward boundary; replay forbids recomputation",
+        "candidate_support_contract": "post-Zero-Loss finalized support; source digest is preserved",
+        "actor_input_boundary": "model_ready_pack output, including permanently-masked empty-support storage padding",
+    }
+    snapshot_authorities = {**before, "joint_actor_head": sha256(ROOT / "multi_agent_candidate_assignment_head.py")}
+    snapshot_writer = FPS.SnapshotCollectionWriter(
+        root=root / "bt7_frozen_policy_snapshots",
+        collection_binding={"snapshot_schema_version": FPS.SNAPSHOT_SCHEMA_VERSION,
+                            "source_commit": source["source_commit"], "actor_config": snapshot_actor_config,
+                            "actor_config_sha256": FPS.actor_config_sha256(snapshot_actor_config),
+                            "feature_contract": snapshot_feature_contract,
+                            "frozen_authority_hashes": snapshot_authorities,
+                            "captured_device": str(device)})
     budget = Budget(envelope)
     inv = {name: 0 for name in ("zero_loss_violations", "rejected_candidate_selected", "illegal_or_masked_selection",
            "candidate_identity_mismatch", "candidate_regeneration", "no_assign_violation", "cross_window_contamination",
            "cross_seed_contamination", "legacy_advantage_contamination", "future_leakage", "source_state_mutation",
            "nan_or_inf", "unauthorized_optimizer_step")}
     decisions, rollout, window_rows, updates = [], [], [], []
+    frozen_snapshot_collection: Dict[str, Any] = {}
     selected_by_band = defaultdict(list)
     for row in windows:
         selected_by_band[row["time_band"]].append(row["window_id"])
@@ -514,6 +544,15 @@ def main() -> None:
                     packed = device_pack(H.build_tensors(joint, global_vector=[0.1 * index for index in range(8)],
                                                          demand_vector=[0.05 * index for index in range(6)]), device)
                     model_packed = model_ready_pack(packed, cdim=cdim, device=device)
+                    frozen_actor_snapshot = snapshot_writer.capture(
+                        decision_id=decision_group, window_id=window_id, seed=seed, decision_index=decision_index,
+                        time_band=band, actor_inputs=model_packed,
+                        agent_ids=[agent.agent_id for agent in sorted(joint.agents, key=lambda item: item.agent_id)],
+                        candidate_ids=packed["pair_keys"], selectable_pair_count=len(packed["pair_keys"]),
+                        candidate_support_digest=snapshot.snapshot_digest, no_assign_option=MC.NO_ASSIGN,
+                        actor_config_value=snapshot_actor_config, feature_contract=snapshot_feature_contract,
+                        frozen_authority_hashes=snapshot_authorities, source_commit=source["source_commit"],
+                        captured_device=str(device))
                     pre_state = adapter.state_identity()
                     with torch.no_grad():
                         logits, no_assign = actor(global_feats=model_packed["global_feats"], demand_feats=model_packed["demand_feats"],
@@ -577,6 +616,8 @@ def main() -> None:
                                       "selected_agent": transition.selected_agent_id, "selected_candidate": transition.selected_candidate_id,
                                       "selected_agent_causal_slot": None if output.selected_is_no_assign else agent_slot[output.selected_pair[0]],
                                       "candidate_identity": list(transition.safe_pair_ids), "request_density_stratum": window_meta["prepolicy_density_rank"],
+                                      "frozen_actor_snapshot_digest": frozen_actor_snapshot["snapshot_digest"],
+                                      "frozen_actor_snapshot_path": frozen_actor_snapshot["relative_path"],
                                       "assignment_reward": transition.assignment_discounted_reward, "critic_value": value,
                                       "terminated": terminal, "informative": transition.assignment_discounted_reward != 0.0})
                     rewards_by_decision.append(transition.assignment_discounted_reward)
@@ -639,6 +680,7 @@ def main() -> None:
         root.mkdir(parents=True)
         torch.save({"actor": actor.state_dict(), "critic": critic.state_dict(), "meta": {**checkpoint, "envelope": envelope,
                    "bt6_s0_source": BT6_S0_SOURCE}}, root / checkpoint["path"])
+        frozen_snapshot_collection = snapshot_writer.finalize(checkpoint_path=root / checkpoint["path"])
 
     auth_events = AUTH.audit_log()
     execution_events = [event for event in auth_events if event["capability"] == AUTH.SIMULATOR_EXECUTION and event["outcome"] == "ALLOWED"]
@@ -663,6 +705,8 @@ def main() -> None:
         "selective_total_ge_3": sum(selective.values()) >= 3, "selective_each_band_ge_1": all(value >= 1 for value in selective.values()),
         "all_24_trajectories": len(trajectories) == 24 and all(len(value) == 4 for value in trajectories.values()),
         "gae_recursion": bool(propagated), "finite_gradients": all(math.isfinite(row["actor_grad_norm"]) and math.isfinite(row["critic_grad_norm"]) for row in updates),
+        "frozen_policy_snapshot_count": frozen_snapshot_collection.get("snapshot_count") == budget.decisions,
+        "frozen_policy_snapshot_checkpoint_binding": frozen_snapshot_collection.get("checkpoint_sha256") == sha256(root / checkpoint["path"]),
     }
     if any(locks_after.values()):
         inv["unauthorized_optimizer_step"] += 1
@@ -722,6 +766,16 @@ def main() -> None:
         "bt6_optimizer_audit.json": {"optimizer_steps": budget.updates, "max_allowed": 10, "updates": updates,
                                       "actor_gradients_finite": all(math.isfinite(row["actor_grad_norm"]) for row in updates),
                                       "critic_gradients_finite": all(math.isfinite(row["critic_grad_norm"]) for row in updates)},
+        "bt6_frozen_policy_snapshot_audit.json": {"schema_version": FPS.SNAPSHOT_SCHEMA_VERSION,
+                                                    "capture_boundary": snapshot_feature_contract["actor_input_boundary"],
+                                                    "snapshot_count": frozen_snapshot_collection.get("snapshot_count"),
+                                                    "expected_decision_count": budget.decisions,
+                                                    "collection_digest": frozen_snapshot_collection.get("collection_digest"),
+                                                    "checkpoint_sha256": frozen_snapshot_collection.get("checkpoint_sha256"),
+                                                    "capture_before_training_time_actor_forward": True,
+                                                    "candidate_regeneration_during_replay": 0,
+                                                    "feature_recomputation_during_replay": 0,
+                                                    "mask_reconstruction_during_replay": 0},
         "frozen_hash_before_after.json": {"before": before, "after": after, "all_unchanged": before == after,
                                             "joint_actor": {"before": actor_before, "after": actor_after, "changed": actor_before != actor_after},
                                             "joint_critic": {"before": critic_before, "after": critic_after, "changed": critic_before != critic_after}},
