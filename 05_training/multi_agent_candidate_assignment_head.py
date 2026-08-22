@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""H4M-AE-R9.8 LS3-JA2 multi-agent joint candidate-assignment head.
+"""H4M-AE-R9.8 LS3 multi-agent joint candidate-assignment heads.
 
 A new, separately versioned decision layer.  The promoted 3-action operational
 actor is not touched, not imported, and not re-weighted: this head answers a
@@ -28,6 +28,16 @@ Zero-Loss is a hard mask, not a penalty.  Rejected pairs are never in the tensor
 at all, and any pair masked unsafe receives a -inf logit, so its probability is
 exactly zero under both sampling and argmax.  `NO_ASSIGN` is always present as a
 real option and is the only outcome when nothing is safe.
+
+Versioning
+----------
+``MultiAgentCandidateAssignmentHead`` is the historical LS3-JA2 V1 class. It
+is intentionally retained for preserved BT6/BT8 checkpoint replay. BT8-R3 adds
+the separately versioned ``CandidateSensitiveMultiAgentCandidateAssignmentHead``
+V2 repair. V2 makes the smallest possible data-flow change: the already
+computed, row-aligned candidate context is concatenated into the shared pair
+scorer. Historical V1 checkpoints remain replayable with V1 but are never
+silently reshaped or padded into V2.
 """
 
 from __future__ import annotations
@@ -41,6 +51,8 @@ import torch.nn.functional as F
 
 HEAD_ID = "MULTI_AGENT_JOINT_ASSIGNMENT_HEAD_V1"
 HEAD_VERSION = "LS3_JA2_V1"
+CANDIDATE_SENSITIVE_HEAD_ID = "MULTI_AGENT_JOINT_ASSIGNMENT_HEAD_V2_CANDIDATE_CONTEXT"
+CANDIDATE_SENSITIVE_HEAD_VERSION = "LS3_BT8_R3_V2"
 SELECTION_SEMANTICS = "SHADOW_UNTRAINED_ARCHITECTURE_VALIDATION_ONLY"
 NEG_INF = float("-inf")
 
@@ -65,6 +77,29 @@ HEAD_CONTRACT = {
     "selection_semantics": SELECTION_SEMANTICS,
     "trained": False,
 }
+
+CANDIDATE_SENSITIVE_HEAD_CONTRACT = {
+    **HEAD_CONTRACT,
+    "head_id": CANDIDATE_SENSITIVE_HEAD_ID,
+    "version": CANDIDATE_SENSITIVE_HEAD_VERSION,
+    "historical_v1_preserved": True,
+    "candidate_context_reaches_pair_scorer": True,
+    "pair_scorer_inputs": ["global_ctx", "demand_ctx", "matched_agent_ctx",
+                           "fleet_ctx", "row_aligned_candidate_ctx"],
+    "candidate_list_position_used": False,
+    "candidate_rank_used": False,
+    "legacy_actor_checkpoint_strict_compatible": False,
+    "no_assign_scorer_changed": False,
+    "trained": False,
+}
+
+
+class ActorInputContractError(ValueError):
+    """Fail-closed repaired-Actor input contract violation."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass
@@ -177,6 +212,124 @@ class MultiAgentCandidateAssignmentHead(nn.Module):
             demand_ctx.unsqueeze(1).expand(-1, pairs, -1),
             per_pair_agent,
             fleet_ctx.unsqueeze(1).expand(-1, pairs, -1),
+        ], dim=-1)
+        logits = self.scorer(stacked).squeeze(-1)                          # (B, P)
+        logits = torch.where(safe_mask, logits, torch.full_like(logits, NEG_INF))
+        no_assign = self.no_assign_scorer(torch.cat([global_ctx, fleet_ctx], dim=-1))
+        return logits, no_assign
+
+
+class CandidateSensitiveMultiAgentCandidateAssignmentHead(MultiAgentCandidateAssignmentHead):
+    """BT8-R3 V2: V1 plus row-aligned candidate context in the pair scorer.
+
+    V1 is not edited because its historical checkpoints are authoritative
+    evidence. The sole representation change in V2 is the scorer input width
+    and the fifth concatenated context block. NO_ASSIGN remains a function of
+    global and fleet context only.
+    """
+
+    def __init__(self, *, global_dim: int, agent_dim: int, candidate_dim: int,
+                 demand_dim: int, hidden: int = 128, heads: int = 4) -> None:
+        super().__init__(global_dim=global_dim, agent_dim=agent_dim,
+                         candidate_dim=candidate_dim, demand_dim=demand_dim,
+                         hidden=hidden, heads=heads)
+        self.global_dim = global_dim
+        self.agent_dim = agent_dim
+        self.candidate_dim = candidate_dim
+        self.demand_dim = demand_dim
+        # R1 repair: all contexts already have width H, so no projection layer
+        # is necessary. The V1 4H scorer remains available only on the V1 class.
+        self.scorer = _mlp([hidden * 5, hidden, hidden, 1])
+
+    @staticmethod
+    def _require(condition: bool, code: str) -> None:
+        if not condition:
+            raise ActorInputContractError(code)
+
+    def _validate_inputs(self, *, global_feats: torch.Tensor,
+                         demand_feats: torch.Tensor, agent_feats: torch.Tensor,
+                         agent_mask: torch.Tensor, candidate_feats: torch.Tensor,
+                         pair_agent_index: torch.Tensor,
+                         safe_mask: torch.Tensor) -> None:
+        tensors = (global_feats, demand_feats, agent_feats, agent_mask,
+                   candidate_feats, pair_agent_index, safe_mask)
+        self._require(all(isinstance(value, torch.Tensor) for value in tensors),
+                      "ACTOR_INPUT_NOT_TENSOR")
+        self._require(global_feats.ndim == 2 and demand_feats.ndim == 2,
+                      "ACTOR_GLOBAL_OR_DEMAND_SHAPE_INVALID")
+        self._require(agent_feats.ndim == 3 and agent_mask.ndim == 2,
+                      "ACTOR_AGENT_SHAPE_INVALID")
+        self._require(candidate_feats.ndim == 3 and pair_agent_index.ndim == 2
+                      and safe_mask.ndim == 2, "ACTOR_PAIR_SHAPE_INVALID")
+        batch = global_feats.shape[0]
+        self._require(batch > 0 and demand_feats.shape[0] == batch
+                      and agent_feats.shape[0] == batch
+                      and candidate_feats.shape[0] == batch,
+                      "ACTOR_BATCH_SHAPE_MISMATCH")
+        self._require(agent_feats.shape[:2] == agent_mask.shape,
+                      "ACTOR_AGENT_MASK_SHAPE_MISMATCH")
+        self._require(candidate_feats.shape[:2] == pair_agent_index.shape
+                      and pair_agent_index.shape == safe_mask.shape,
+                      "ACTOR_PAIR_MAPPING_SHAPE_MISMATCH")
+        self._require(global_feats.shape[-1] == self.global_dim
+                      and demand_feats.shape[-1] == self.demand_dim
+                      and agent_feats.shape[-1] == self.agent_dim
+                      and candidate_feats.shape[-1] == self.candidate_dim,
+                      "ACTOR_FEATURE_DIMENSION_MISMATCH")
+        self._require(agent_mask.dtype == torch.bool,
+                      "ACTOR_AGENT_MASK_DTYPE_INVALID")
+        self._require(safe_mask.dtype == torch.bool,
+                      "ACTOR_SAFE_MASK_DTYPE_INVALID")
+        self._require(pair_agent_index.dtype == torch.long,
+                      "ACTOR_PAIR_AGENT_INDEX_DTYPE_INVALID")
+        feature_tensors = (global_feats, demand_feats, agent_feats, candidate_feats)
+        self._require(all(value.dtype.is_floating_point for value in feature_tensors),
+                      "ACTOR_FEATURE_DTYPE_INVALID")
+        self._require(len({value.dtype for value in feature_tensors}) == 1,
+                      "ACTOR_FEATURE_DTYPE_MISMATCH")
+        self._require(len({value.device for value in tensors}) == 1,
+                      "ACTOR_INPUT_DEVICE_MISMATCH")
+        self._require(agent_feats.shape[1] > 0
+                      and bool(agent_mask.any(dim=1).all().item()),
+                      "ACTOR_ACTIVE_AGENT_REQUIRED")
+        self._require(all(bool(torch.isfinite(value).all().item())
+                          for value in feature_tensors),
+                      "ACTOR_NONFINITE_FEATURE_INPUT")
+        if pair_agent_index.numel():
+            self._require(int(pair_agent_index.min().item()) >= 0
+                          and int(pair_agent_index.max().item()) < agent_feats.shape[1],
+                          "ACTOR_PAIR_AGENT_INDEX_OUT_OF_RANGE")
+            mapped_active = torch.gather(agent_mask, 1, pair_agent_index)
+            self._require(bool((mapped_active | ~safe_mask).all().item()),
+                          "ACTOR_SAFE_PAIR_MAPPED_TO_INACTIVE_AGENT")
+
+    def forward(self, *, global_feats: torch.Tensor, demand_feats: torch.Tensor,
+                agent_feats: torch.Tensor, agent_mask: torch.Tensor,
+                candidate_feats: torch.Tensor, pair_agent_index: torch.Tensor,
+                safe_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return candidate-sensitive pair logits and unchanged NO_ASSIGN logit."""
+        self._validate_inputs(global_feats=global_feats, demand_feats=demand_feats,
+                              agent_feats=agent_feats, agent_mask=agent_mask,
+                              candidate_feats=candidate_feats,
+                              pair_agent_index=pair_agent_index,
+                              safe_mask=safe_mask)
+        agent_ctx = self.agent_encoder(agent_feats, agent_mask)           # (B, A, H)
+        global_ctx = self.global_encoder(global_feats)                    # (B, H)
+        demand_ctx = self.demand_encoder(demand_feats)                    # (B, H)
+        cand_ctx = self.candidate_encoder(candidate_feats)                # (B, P, H)
+
+        _, pairs, _ = cand_ctx.shape
+        index = pair_agent_index.unsqueeze(-1).expand(-1, -1, self.hidden)
+        per_pair_agent = torch.gather(agent_ctx, 1, index)                # (B, P, H)
+        mask_f = agent_mask.unsqueeze(-1).to(agent_ctx.dtype)
+        fleet_ctx = (agent_ctx * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
+
+        stacked = torch.cat([
+            global_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            demand_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            per_pair_agent,
+            fleet_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            cand_ctx,
         ], dim=-1)
         logits = self.scorer(stacked).squeeze(-1)                          # (B, P)
         logits = torch.where(safe_mask, logits, torch.full_like(logits, NEG_INF))
