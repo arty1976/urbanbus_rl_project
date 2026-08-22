@@ -372,7 +372,7 @@ def main() -> None:
     integrity = {name: 0 for name in ("optimizer_steps", "causal_simulator_rollouts", "candidate_regeneration", "zero_loss_reevaluation",
                                       "parameter_mutation", "source_mutation", "checkpoint_mutation", "candidate_identity_mismatch",
                                       "illegal_or_masked_selection", "nan_or_inf", "TEST6_access", "github_push", "feature_recomputation",
-                                      "mask_reconstruction")}
+                                      "mask_reconstruction", "candidate_order_dependence", "agent_order_dependence")}
     if not hard:
         device = torch.device("mps")
         actor = H.MultiAgentCandidateAssignmentHead(global_dim=expected_config["global_dim"], demand_dim=expected_config["demand_dim"],
@@ -425,7 +425,11 @@ def main() -> None:
                         "max_logit_delta": max((item["max_logit_delta"] for item in agent_tests), default=None),
                         "max_probability_delta": max((item["max_probability_delta"] for item in agent_tests), default=None),
                         "argmax_identity_mismatches": sum(not item["argmax_identity_equal"] for item in agent_tests)}
-    if candidate_invariance["argmax_identity_mismatches"]: integrity["candidate_identity_mismatch"] += candidate_invariance["argmax_identity_mismatches"]
+    # Stored candidate identities matched their bound snapshot metadata above.
+    # A changed deterministic argmax identity after a *permuted input* is a
+    # separate policy order-dependence finding, not evidence corruption.
+    integrity["candidate_order_dependence"] = candidate_invariance["argmax_identity_mismatches"]
+    integrity["agent_order_dependence"] = agent_invariance["argmax_identity_mismatches"]
     if not candidate_invariance["all_passed"] or not agent_invariance["all_passed"]: hard.append("ORDER_INVARIANCE_FAILURE")
     after = frozen_hashes()
     integrity["source_mutation"] = int(before != after)
