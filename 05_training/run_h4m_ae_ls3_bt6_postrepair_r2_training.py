@@ -498,6 +498,7 @@ def main() -> None:
         "global_feature_dim": 8, "demand_feature_dim": 6, "agent_feature_dim": adim,
         "candidate_feature_dim": cdim,
         "feature_normalization": "already materialized at the post-Zero-Loss pre-forward boundary; replay forbids recomputation",
+        "candidate_support_contract_id": FPS.CANDIDATE_SUPPORT_CONTRACT_ID,
         "candidate_support_contract": "post-Zero-Loss finalized support; source digest is preserved",
         "actor_input_boundary": "model_ready_pack output, including permanently-masked empty-support storage padding",
     }

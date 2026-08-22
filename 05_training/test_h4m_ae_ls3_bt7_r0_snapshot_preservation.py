@@ -50,6 +50,7 @@ def run_fixture_validation() -> Dict[str, Any]:
         "feature_contract_id": FPS.FEATURE_CONTRACT_ID,
         "global_feature_dim": 8, "demand_feature_dim": 6, "agent_feature_dim": 4,
         "candidate_feature_dim": 8, "feature_normalization": "already materialized at pre-forward boundary; replay forbids recomputation",
+        "candidate_support_contract_id": FPS.CANDIDATE_SUPPORT_CONTRACT_ID,
         "candidate_support_contract": "post-Zero-Loss finalized support only",
     }
     authorities = {"reward_v2": "a" * 64, "zero_loss": "b" * 64, "local_search": "c" * 64}

@@ -21,6 +21,7 @@ import torch
 SNAPSHOT_SCHEMA_VERSION = "LS3_BT7_FROZEN_POLICY_SNAPSHOT_V1"
 COLLECTION_SCHEMA_VERSION = "LS3_BT7_FROZEN_POLICY_SNAPSHOT_COLLECTION_V1"
 FEATURE_CONTRACT_ID = "LS3_JOINT_ACTOR_INPUT_FEATURE_CONTRACT_V1"
+CANDIDATE_SUPPORT_CONTRACT_ID = "LS3_JOINT_CANDIDATE_SUPPORT_SNAPSHOT_V1"
 TENSOR_FIELDS: Tuple[str, ...] = (
     "global_feats", "demand_feats", "agent_feats", "agent_mask",
     "candidate_feats", "pair_agent_index", "safe_mask",
@@ -202,6 +203,8 @@ def capture_actor_input(*, decision_id: str, window_id: str, seed: int, decision
     _require(bool(decision_id) and bool(window_id) and bool(time_band), "SNAPSHOT_DECISION_IDENTITY_INVALID")
     _require(bool(candidate_support_digest), "SNAPSHOT_SUPPORT_DIGEST_MISSING")
     _require(no_assign_option == "NO_ASSIGN_KEEP_CURRENT_PLANS", "SNAPSHOT_NO_ASSIGN_MISSING")
+    _require(bool(feature_contract.get("candidate_support_contract_id")),
+             "SNAPSHOT_CANDIDATE_SUPPORT_CONTRACT_ID_MISSING")
     normalized_pairs = _normal_pair_ids(candidate_ids)
     tensors = {name: _cpu_clone(actor_inputs[name]) for name in TENSOR_FIELDS
                if name in actor_inputs}
@@ -221,6 +224,7 @@ def capture_actor_input(*, decision_id: str, window_id: str, seed: int, decision
         "no_assign_option": no_assign_option,
         "no_assign_index": int(selectable_pair_count),
         "candidate_support_digest": str(candidate_support_digest),
+        "candidate_support_contract_id": str(feature_contract["candidate_support_contract_id"]),
         "feature_contract": dict(feature_contract),
         "feature_contract_id": str(feature_contract.get("feature_contract_id", FEATURE_CONTRACT_ID)),
         "actor_config": dict(actor_config_value),
@@ -240,6 +244,8 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
     _require(isinstance(metadata, Mapping) and isinstance(tensors, Mapping), "SNAPSHOT_PAYLOAD_TYPE_INVALID")
     _require(metadata.get("snapshot_schema_version") == SNAPSHOT_SCHEMA_VERSION, "SNAPSHOT_SCHEMA_VERSION_MISMATCH")
     _require(metadata.get("no_assign_option") == "NO_ASSIGN_KEEP_CURRENT_PLANS", "SNAPSHOT_NO_ASSIGN_MISSING")
+    _require(metadata.get("candidate_support_contract_id") == metadata.get("feature_contract", {}).get("candidate_support_contract_id"),
+             "SNAPSHOT_CANDIDATE_SUPPORT_CONTRACT_ID_MISMATCH")
     _require(metadata.get("no_assign_index") == metadata.get("selectable_pair_count"), "SNAPSHOT_NO_ASSIGN_INDEX_INVALID")
     candidate_ids = _normal_pair_ids(metadata.get("candidate_ids", []))
     _require(candidate_ids == metadata.get("candidate_order"), "SNAPSHOT_CANDIDATE_ORDER_METADATA_MISMATCH")

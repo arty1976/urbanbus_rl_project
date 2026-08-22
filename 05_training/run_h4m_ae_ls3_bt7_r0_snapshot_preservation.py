@@ -144,6 +144,7 @@ def main() -> None:
         "actor_tensor_fields": list(FPS.TENSOR_FIELDS),
         "identity_and_support_fields": ["decision_id", "window_id", "seed", "decision_index", "time_band", "agent_ids",
                                         "candidate_ids", "candidate_order", "candidate_support_digest", "no_assign_option",
+                                        "candidate_support_contract_id",
                                         "no_assign_index", "selectable_pair_count", "actor_tensor_pair_count", "storage_padding_pair_count"],
         "binding_fields": ["actor_config", "actor_config_sha256", "checkpoint_sha256", "feature_contract",
                            "feature_contract_id", "frozen_authority_hashes", "source_commit", "captured_device"],
