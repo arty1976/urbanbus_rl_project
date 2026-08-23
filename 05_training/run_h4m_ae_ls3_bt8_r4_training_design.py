@@ -104,7 +104,7 @@ def git(args: Sequence[str]) -> str:
 def provenance() -> dict[str, Any]:
     changed = [item for item in git(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).splitlines() if item]
     return {"source_commit": git(["rev-parse", "HEAD"]), "source_before_work_commit": git(["rev-parse", "HEAD^"]),
-            "changed_files": changed, "source_only_local_commit": set(changed) == SOURCE_FILES,
+            "changed_files": changed, "source_only_local_commit": bool(changed) and set(changed).issubset(SOURCE_FILES),
             "github_push_performed": False}
 
 
