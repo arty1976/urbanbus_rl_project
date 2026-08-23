@@ -93,3 +93,24 @@ def test_tamper_version_regeneration_double_commit_and_no_assign_fail_closed() -
     assert no_assign.no_assign and not no_assign.serve_fallback_used
     assert no_assign.next_state.route_plan_stop_ids == state.route_plan_stop_ids
     assert result.serve_fallback_used is False
+
+
+def test_state_version_mismatch_and_zero_loss_rejection_are_fail_closed() -> None:
+    snapshot, one, _, state = fixture()
+    bridge = CB.CandidatePlanAuthoritativeBridge(initial_state=state, snapshot=snapshot)
+    with pytest.raises(CB.CandidatePlanBridgeError) as caught:
+        commit(bridge, replace(one, source_state_version=state.version + 1))
+    assert caught.value.code == "SOURCE_STATE_VERSION_MISMATCH"
+    assert bridge.state == state
+
+    rejected_snapshot = replace(
+        snapshot,
+        safe=(snapshot.safe[0],),
+        rejected=(replace(snapshot.safe[1], zero_loss_status=SS.REJECT),),
+    )
+    with pytest.raises(CB.CandidatePlanBridgeError) as caught:
+        CB.ImmutableCandidatePlan.from_snapshot(
+            decision_id="D_REJECT", snapshot=rejected_snapshot, agent_id="AGENT_A",
+            candidate_id="C2", source_state_version=0,
+        )
+    assert caught.value.code == "REJECTED_OR_UNKNOWN_CANDIDATE_FORCED_SELECTION"

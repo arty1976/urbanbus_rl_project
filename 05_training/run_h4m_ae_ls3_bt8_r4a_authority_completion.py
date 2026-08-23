@@ -59,9 +59,11 @@ def git(args: Sequence[str]) -> str:
 
 
 def provenance() -> dict[str, Any]:
-    changed = [item for item in git(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).splitlines() if item]
+    changed = [item for item in git(["diff", "--name-only", f"{F1_BLOCK_SOURCE}..HEAD"]).splitlines() if item]
     return {"source_commit": git(["rev-parse", "HEAD"]), "source_parent": git(["rev-parse", "HEAD^"]),
-            "changed_files": changed, "source_only_local_commit": bool(changed) and set(changed).issubset(SOURCE_FILES),
+            "changed_files": changed,
+            "source_lineage_descends_from_f1_block": git(["merge-base", F1_BLOCK_SOURCE, "HEAD"]) == F1_BLOCK_SOURCE,
+            "source_only_local_commit": bool(changed) and set(changed).issubset(SOURCE_FILES),
             "github_push_performed": False}
 
 
@@ -77,7 +79,7 @@ def exact_authority_binding(*, source: Mapping[str, Any], r4_gate: Mapping[str, 
         "r4_source": r4_gate.get("source_commit") == R4_SOURCE,
         "f1_block_source": f1_gate.get("source_commit") == F1_BLOCK_SOURCE,
         "f1_block_reason": f1_gate.get("gate") == "BLOCKED_BT8_R4_EXECUTION_AUTHORITY_INCOMPLETE",
-        "source_parent_is_f1_block": source["source_parent"] == F1_BLOCK_SOURCE,
+        "source_lineage_descends_from_f1_block": bool(source["source_lineage_descends_from_f1_block"]),
         "source_only_local_commit": bool(source["source_only_local_commit"]),
         "selected_f1_counts": selected.get("distinct_windows") == 9 and len(selected.get("train_windows", [])) == expected_train and len(selected.get("review_windows", [])) == expected_review,
         "selected_f1_budget": all(selected.get(name) == value for name, value in {"train_visits": 12, "requests_train": 43, "review_snapshot_visits": 6, "requests_review": 27, "agents": 8, "decisions": 48, "trajectories": 12, "transitions": 96, "optimizer_updates": 6}.items()),
