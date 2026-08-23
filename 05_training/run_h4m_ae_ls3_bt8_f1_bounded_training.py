@@ -214,6 +214,32 @@ def model_pack(*, support: Mapping[str, Any], H: Any, BT6: Any, cdim: int, devic
     return packed, BT6.model_ready_pack(packed, cdim=cdim, device=device)
 
 
+def f1_agent_slot_mapping(*, eligible: Mapping[str, Sequence[tuple[str, int, int]]],
+                          source_groups: Sequence[str], slots: int) -> dict[str, int]:
+    """Color only the six frozen F1 source groups into the eight causal slots.
+
+    BT6's map intentionally covers its own historical source-group selection;
+    it is not an authority for F1's novel groups.  This pure pre-rollout map
+    uses lexical identities and co-eligibility only, never actor outcomes.
+    """
+    neighbors: dict[str, set[str]] = {}
+    for group in source_groups:
+        members = [agent for agent, _, _ in eligible[str(group)]]
+        require(bool(members), "F1_SOURCE_GROUP_HAS_NO_ELIGIBLE_AGENT", str(group))
+        for agent in members:
+            neighbors.setdefault(agent, set()).update(other for other in members if other != agent)
+    mapping: dict[str, int] = {}
+    for agent in sorted(neighbors):
+        used = {mapping[other] for other in neighbors[agent] if other in mapping}
+        slot = next((value for value in range(int(slots)) if value not in used), None)
+        require(slot is not None, "F1_AGENT_SLOT_COLORING_EXCEEDS_EIGHT", agent)
+        mapping[agent] = int(slot)
+    for group in source_groups:
+        group_slots = [mapping[agent] for agent, _, _ in eligible[str(group)]]
+        require(len(group_slots) == len(set(group_slots)), "F1_AGENT_SLOT_COLLISION", str(group))
+    return mapping
+
+
 def snapshot(*, root: Path, store: list[dict[str, Any]], FPS: Any, decision_id: str, window: Mapping[str, Any],
              seed: int, index: int, packed: Mapping[str, Any], model_packed: Mapping[str, Any], support: Mapping[str, Any],
              MC: Any, config: Mapping[str, Any], features: Mapping[str, Any], frozen: Mapping[str, str], source_commit: str, device: torch.device) -> dict[str, Any]:
@@ -372,7 +398,12 @@ def main() -> None:
     AUTH.reset_audit_log()
     with AUTH.granted(AUTH.SIMULATOR_EXECUTION, AUTH.TRAINING, AUTH.SHADOW_COUNTERFACTUAL,
                       reason="BT8-F1 exact R4/R4A approved 2-replicate envelope"):
-        factory = BT6.RepairedSupportFactory(); agent_slots = BT6.frozen_agent_slot_mapping(factory, slots=8)
+        factory = BT6.RepairedSupportFactory()
+        agent_slots = f1_agent_slot_mapping(
+            eligible=factory.eligible,
+            source_groups=[row["source_group"] for row in selected["train_windows"]],
+            slots=8,
+        )
         exposure_rows, exposure_ok = profile_check(selected=selected["selected_windows"], factory=factory, R4MOD=R4MOD, H=H)
         require(exposure_ok, "NOVEL_EXPOSURE_BINDING_MISMATCH"); counters["authoritative_candidate_generation"] += 9
         for rep in replicates:

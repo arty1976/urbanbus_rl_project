@@ -30,3 +30,15 @@ def test_execution_source_scope_is_closed() -> None:
         "05_training/run_h4m_ae_ls3_bt8_f1_bounded_training.py",
         "05_training/test_h4m_ae_ls3_bt8_f1_authority_gate.py",
     }
+
+
+def test_f1_slot_mapping_scopes_to_the_frozen_source_groups() -> None:
+    eligible = {
+        "A": [("AGENT_005", 0, 1), ("AGENT_007", 0, 1)],
+        "B": [("AGENT_001", 0, 1), ("AGENT_011", 0, 1), ("AGENT_019", 0, 1), ("AGENT_023", 0, 1)],
+        "C": [("AGENT_003", 0, 1), ("AGENT_009", 0, 1), ("AGENT_017", 0, 1)],
+    }
+    mapping = F1.f1_agent_slot_mapping(eligible=eligible, source_groups=["A", "B", "C"], slots=8)
+    assert len({mapping[agent] for agent, _, _ in eligible["A"]}) == 2
+    assert len({mapping[agent] for agent, _, _ in eligible["B"]}) == 4
+    assert len({mapping[agent] for agent, _, _ in eligible["C"]}) == 3
