@@ -105,6 +105,11 @@ def test_novelty_and_non_outcome_selection_are_fail_closed() -> None:
     classification, flags = R4.classify_exposure(profile, prior)
     assert classification == "REDUNDANT"
     assert not any(flags.values())
+    partially_new = {**profile, "candidate_feature_signature": "new-candidate",
+                     "meaningfully_distinct_comparison_count": 0}
+    classification, flags = R4.classify_exposure(partially_new, prior)
+    assert classification == "PARTIALLY_NOVEL"
+    assert flags["candidate_feature"]
     with pytest.raises(R4.DesignContractError) as caught:
         R4.validate_selection_inputs(["window_id", "Reward"])
     assert caught.value.code == "OUTCOME_OR_REWARD_BASED_WINDOW_SELECTION"

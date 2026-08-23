@@ -172,7 +172,11 @@ def classify_exposure(profile: Mapping[str, Any], prior: Mapping[str, set[str]])
     has_comparison = int(profile["meaningfully_distinct_comparison_count"]) > 0
     if all(is_new[name] for name in ("candidate_feature", "full_actor_input", "opportunity", "comparison")) and has_comparison:
         return "NOVEL", is_new
-    if any(is_new[name] for name in ("candidate_feature", "full_actor_input", "opportunity")) and has_comparison:
+    # A support can be genuinely new while having no same-agent comparison
+    # pair.  It must not be called fully NOVEL for V2 discrimination purposes,
+    # but neither may its new feature/input/opportunity exposure be erased as
+    # REDUNDANT.  The separate comparison count records that limitation.
+    if any(is_new[name] for name in ("candidate_feature", "full_actor_input", "opportunity")):
         return "PARTIALLY_NOVEL", is_new
     return "REDUNDANT", is_new
 
@@ -326,15 +330,21 @@ def registry_rows() -> list[dict[str, Any]]:
 
 
 def make_ladder(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    novel = [dict(row) for row in rows if row["classification"] == "NOVEL"]
+    usable = [dict(row) for row in rows if row["classification"] in {"NOVEL", "PARTIALLY_NOVEL"}]
+
+    def priority(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (0 if row["classification"] == "NOVEL" else 1,
+                -sum(bool(value) for value in row["new_vs_bt6_a1"].values()),
+                row["candidate_rank_time"], row["window_id"])
+
     base: list[dict[str, Any]] = []
     for band in ("night", "offpeak", "peak"):
         for density in ("low", "medium", "high"):
-            options = [row for row in novel if row["time_band"] == band and row["density"] == density]
-            require(bool(options), "BLOCKED_INSUFFICIENT_GENUINELY_NOVEL_EXPOSURE", f"{band}/{density}")
-            base.append(sorted(options, key=lambda row: (row["candidate_rank_time"], row["window_id"]))[0])
+            options = [row for row in usable if row["time_band"] == band and row["density"] == density]
+            require(bool(options), "BLOCKED_INSUFFICIENT_GENUINELY_NOVEL_EXPOSURE", f"{band}/{density} has no non-redundant pre-policy support")
+            base.append(sorted(options, key=priority)[0])
     used = {row["window_id"] for row in base}
-    extras = [row for row in sorted(novel, key=lambda row: (row["time_band"], row["density_rank_within_band"], row["window_id"]))
+    extras = [row for row in sorted(usable, key=priority)
               if row["window_id"] not in used]
 
     def describe(label: str, selected: list[dict[str, Any]]) -> dict[str, Any]:
@@ -358,15 +368,18 @@ def make_ladder(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "new_full_v2_actor_input_signatures": len({row["full_v2_actor_input_signature"] for row in selected}),
                 "new_opportunity_signatures": len({row["opportunity_signature"] for row in selected}),
                 "meaningfully_distinct_comparisons": sum(row["meaningfully_distinct_comparison_count"] for row in selected),
+                "novel_windows": sum(row["classification"] == "NOVEL" for row in selected),
+                "partially_novel_windows": sum(row["classification"] == "PARTIALLY_NOVEL" for row in selected),
+                "structurally_noncomparative_windows": sum(row["meaningfully_distinct_comparison_count"] == 0 for row in selected),
                 "all_band_density_coverage": {(row["time_band"], row["density"]) for row in selected}
                     == {(band, density) for band in ("night", "offpeak", "peak") for density in ("low", "medium", "high")},
                 "mps_runtime_estimate_seconds": 4.922, "mps_peak_memory_estimate_bytes": 805060608,
                 "estimate_basis": "conservative BT8-A1 observed upper reference: 4.922 seconds / 805060608 bytes; V2 design not executed"}
 
-    return {"F1": describe("F1_MINIMUM_GENUINELY_NOVEL_9_WINDOW_TRAIN_REVIEW", base),
-            "F2": describe("F2_MODERATE_GENUINELY_NOVEL_12_WINDOW_TRAIN_REVIEW", base + extras[:3]),
-            "F3": describe("F3_UPPER_BOUNDED_GENUINELY_NOVEL_18_WINDOW_TRAIN_REVIEW", base + extras[:9]),
-            "selection_rule": "lexical/pre-policy only: one NOVEL window per time-band×density for F1, then canonical extras; no reward/outcome/policy score"}
+    return {"F1": describe("F1_MINIMUM_NOVELTY_PRESERVING_9_WINDOW_TRAIN_REVIEW", base),
+            "F2": describe("F2_MODERATE_NOVELTY_PRESERVING_12_WINDOW_TRAIN_REVIEW", base + extras[:3]),
+            "F3": describe("F3_UPPER_BOUNDED_NOVELTY_PRESERVING_18_WINDOW_TRAIN_REVIEW", base + extras[:9]),
+            "selection_rule": "lexical/pre-policy only: per time-band×density choose NOVEL first, otherwise PARTIALLY_NOVEL with its noncomparison limitation explicit; then canonical extras; no reward/outcome/policy score"}
 
 
 def main() -> None:
