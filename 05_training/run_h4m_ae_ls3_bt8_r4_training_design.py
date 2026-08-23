@@ -386,10 +386,11 @@ def main() -> None:
     r3_gate = json.loads((R3 / "gate_decision.json").read_text(encoding="utf-8"))
     r3_hashes = json.loads((R3 / "frozen_hash_before_after.json").read_text(encoding="utf-8"))
     binding = {
-        "r3_gate": r3_gate.get("gate") == "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R3_ACTOR_CANDIDATE_CONTEXT_REPAIR_DESIGN_COMPLETE",
+        "r3_gate": r3_gate.get("gate") == "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R3_ACTOR_CANDIDATE_CONTEXT_REPRESENTATION_REPAIR_DESIGN_COMPLETE",
         "r3_classification": r3_gate.get("classification") == "A_SUSEONG_LS3_CANDIDATE_SENSITIVE_JOINT_ACTOR_ARCHITECTURE_READY_FOR_SEPARATE_FRESH_TRAINING_DESIGN",
         "r3_source": r3_gate.get("source_commit") == R3_SOURCE,
-        "source_parent_is_r3": source["source_before_work_commit"] == R3_SOURCE,
+        "source_lineage_descends_from_r3": git(["merge-base", R3_SOURCE, "HEAD"]) == R3_SOURCE,
+        "only_r4_sources_changed_since_r3": set(git(["diff", "--name-only", f"{R3_SOURCE}..HEAD"]).splitlines()) == SOURCE_FILES,
         "source_only_local_commit": source["source_only_local_commit"],
         "v2_actor_sha_bound": before["joint_actor_head"] == r3_hashes["after"]["joint_actor_head"],
         "reward_v2_sha_bound": before["reward_v2"] == r3_hashes["after"]["reward_v2"],
