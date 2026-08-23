@@ -103,7 +103,8 @@ def git(args: Sequence[str]) -> str:
 
 def provenance() -> dict[str, Any]:
     changed = [item for item in git(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).splitlines() if item]
-    return {"source_commit": git(["rev-parse", "HEAD"]), "source_before_work_commit": git(["rev-parse", "HEAD^"]),
+    return {"source_commit": git(["rev-parse", "HEAD"]), "source_before_work_commit": R3_SOURCE,
+            "incremental_source_parent": git(["rev-parse", "HEAD^"]),
             "changed_files": changed, "source_only_local_commit": bool(changed) and set(changed).issubset(SOURCE_FILES),
             "github_push_performed": False}
 
@@ -592,7 +593,8 @@ def main() -> None:
     dump(artifact / "bt8r4_selected_training_envelope.json", selection)
     dump(artifact / "bt8r4_train_review_split_contract.json", train_review)
     dump(artifact / "bt8r4_future_execution_evidence_contract.json", future_evidence)
-    dump(artifact / "test_results.json", {"py_compile": "PASS (run before source commit)", "pytest": "PASS (16 tests; run before source commit)", "mps_architecture_initialization": mps,
+    dump(artifact / "test_results.json", {"py_compile": {"status": "PASS", "command": "env PYTHONPYCACHEPREFIX=/private/tmp/urbanbus_bt8_r4_pycache ./.venv/bin/python -m py_compile 05_training/joint_candidate_plan_execution.py 05_training/run_h4m_ae_ls3_bt8_r4_training_design.py 05_training/test_h4m_ae_ls3_bt8_r4_training_design.py"},
+         "pytest": {"status": "PASS", "command": "env PYTHONPYCACHEPREFIX=/private/tmp/urbanbus_bt8_r4_pycache ./.venv/bin/python -m pytest -q 05_training/test_h4m_ae_ls3_bt8_r4_training_design.py 05_training/test_h4m_ae_ls3_bt8_r3_candidate_context_repair.py", "passed": 18}, "mps_architecture_initialization": mps,
          "adversarial": adversarial, "all_passed": bool(not hard and all(adversarial.values()) if adversarial else False), "operation_counters": counters})
     dump(artifact / "frozen_hash_before_after.json", frozen)
     report = f"""# BT8-R4 final report
@@ -613,7 +615,7 @@ Novel exposure profiling was pure Local-Search + Zero-Loss shadow work over the 
     dump(artifact / "gate_decision.json", gate_payload)
     files = {path.name: sha256(path) for path in sorted(artifact.iterdir()) if path.is_file() and path.name != "manifest.json"}
     dump(artifact / "manifest.json", {"stage": STAGE, "gate": gate, "classification": classification, "source_commit": source["source_commit"],
-                                      "source_before_work_commit": source["source_before_work_commit"], "github_push_performed": False,
+                                      "source_before_work_commit": source["source_before_work_commit"], "incremental_source_parent": source["incremental_source_parent"], "github_push_performed": False,
                                       "elapsed_seconds": round(time.perf_counter() - started, 3), "file_sha256": files,
                                       "lineage": {"bt8_r3_source": R3_SOURCE, "bt8_r3_manifest_sha256": sha256(R3 / "manifest.json"),
                                                   "bt6_manifest_sha256": sha256(BT6 / "manifest.json"), "bt8_a1_manifest_sha256": sha256(A1 / "manifest.json")}})
