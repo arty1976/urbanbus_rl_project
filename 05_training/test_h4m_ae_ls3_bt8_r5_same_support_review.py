@@ -23,3 +23,16 @@ def test_no_meaningful_support_is_insufficient() -> None:
 
 def test_quantiles_do_not_invent_empty_margin_values() -> None:
     assert R5.quantiles([]) == {"min": None, "median": None, "mean": None, "max": None}
+
+
+def test_zero_assignment_no_assign_state_is_not_a_monopoly() -> None:
+    class Stub:
+        @staticmethod
+        def concentration(_rows):
+            return {"classification": "STRUCTURAL_DEGENERACY", "assignment_count": 0}
+
+    rows = [{"candidate_ids": [], "selected": "NO_ASSIGN", "support_size": 1,
+             "pair_logits": [0.1], "no_assign_logit": 0.2, "entropy": 0.5}]
+    result = R5.concentration(rows, Stub)
+    assert result["single_agent_monopoly"] is False
+    assert result["universal_feasible_no_assign_exact"] is True

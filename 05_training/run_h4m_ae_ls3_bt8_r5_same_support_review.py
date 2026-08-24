@@ -175,12 +175,13 @@ def concentration(rows: Sequence[Mapping[str, Any]], R1: Any) -> dict[str, Any]:
     all_logits_constant = all(len(set(row["pair_logits"] + [row["no_assign_logit"]])) <= 1 for row in rows)
     entropy_collapse = all(float(row["entropy"]) == 0.0 for row in rows)
     universal_no_assign = bool(feasible) and all(row["selected"] == "NO_ASSIGN" for row in feasible)
+    single_agent_monopoly = audit["assignment_count"] > 0 and audit["classification"] == "STRUCTURAL_DEGENERACY"
     return {"opportunity_adjusted": audit, "feasible_no_assign_rate": rate(sum(row["selected"] == "NO_ASSIGN" for row in feasible), len(feasible)),
             "near_universal_no_assign": "reported_as_rate_only; no invented near-universal threshold",
-            "single_agent_monopoly": audit["classification"] == "STRUCTURAL_DEGENERACY",
+            "single_agent_monopoly": single_agent_monopoly,
             "constant_logits_exact": all_logits_constant, "entropy_collapse_exact": entropy_collapse,
             "universal_feasible_no_assign_exact": universal_no_assign,
-            "structural_collapse": bool(audit["classification"] == "STRUCTURAL_DEGENERACY" or all_logits_constant or entropy_collapse or universal_no_assign)}
+            "structural_collapse": bool(single_agent_monopoly or all_logits_constant or entropy_collapse or universal_no_assign)}
 
 
 def order_audit(*, policies: Mapping[str, Mapping[str, torch.nn.Module]], snapshots: Mapping[str, Sequence[Mapping[str, Any]]],
