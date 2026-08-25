@@ -40,6 +40,7 @@ PROJECT = ROOT.parent
 ARTIFACTS = ROOT / "artifacts"
 R7 = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r7_seed_factorization_credit_eligibility_20260825_124641+09:00"
 F1 = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_f1_fresh_v2_bounded_training_20260823_135127+09:00"
+R6 = ARTIFACTS / "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r6_seed_credit_logit_attribution_20260824_234227+09:00"
 SOURCE_FILES = {
     "05_training/joint_assignment_learning.py",
     "05_training/joint_assignment_e1_eligibility.py",
@@ -419,8 +420,8 @@ def main() -> None:
         f1_collection = load_json(F1 / "bt8f1_training_snapshots" / "collection_manifest.json")
         f1_initial = load_json(F1 / "bt8f1_initial_checkpoint_manifest.json")
         f1_leakage = load_json(F1 / "bt8f1_train_review_leakage_audit.json")
-        r6_r1 = load_json(R6MOD.R6 / "bt8r6_replicate1_credit_trace.json")
-        r6_r2 = load_json(R6MOD.R6 / "bt8r6_replicate2_credit_trace.json")
+        r6_r1 = load_json(R6 / "bt8r6_replicate1_credit_trace.json")
+        r6_r2 = load_json(R6 / "bt8r6_replicate2_credit_trace.json")
         E1.bind_e1_contract(r7_contract)
         binding.update({
             "r7_gate": r7_gate.get("gate") == R7_GATE and r7_gate.get("source_commit") == R7_SOURCE,
