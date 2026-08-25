@@ -298,8 +298,11 @@ def evaluate_replicate(*, replicate_id: str, actor: torch.nn.Module, critic: tor
         "value_target_exact": bool(torch.equal(batch["value_target"], batch["value_target"])),
     }
     require(all(exact.values()), "E1_PPO_OR_CRITIC_TENSOR_CHANGED", replicate_id)
-    require(bool(torch.isfinite(logits).all() and torch.isfinite(no_assign).all() and torch.isfinite(value_pred).all()),
-            "E1_NONFINITE_MODEL_OUTPUT", replicate_id)
+    # Masked/padded pair slots deliberately carry -inf inside the frozen policy
+    # support representation.  Only selectable logits, NO_ASSIGN, and values
+    # must be finite; treating the sentinel as a model NaN would be incorrect.
+    require(bool(torch.isfinite(logits[batch["safe_mask"]]).all() and torch.isfinite(no_assign).all()
+                 and torch.isfinite(value_pred).all()), "E1_NONFINITE_MODEL_OUTPUT", replicate_id)
     require(float(actor_contribution[ineligible].abs().sum().cpu()) == 0.0,
             "E1_INELIGIBLE_POLICY_CONTRIBUTION_NONZERO", replicate_id)
     require(float(entropy_contribution[ineligible].abs().sum().cpu()) == 0.0,
