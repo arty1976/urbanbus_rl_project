@@ -202,6 +202,7 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
                         old_log_prob: torch.Tensor, advantage: torch.Tensor,
                         value_pred: torch.Tensor, value_target: torch.Tensor,
                         forced_action: torch.Tensor,
+                        actor_eligibility_mask: Optional[torch.Tensor] = None,
                         clip_epsilon: float = CC.PPO_CLIP_EPSILON,
                         entropy_coef: float = 0.0) -> Dict[str, Any]:
     """PPO objective over the frozen rollout support.  No parameter is updated.
@@ -210,6 +211,13 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
     the actor and entropy terms and are kept out of the actor denominator, so a
     batch full of them cannot silently shrink the policy gradient. They still
     train the critic.
+
+    ``actor_eligibility_mask`` is an optional, explicit actor-aggregation mask.
+    It is for a separately bound credit-eligibility contract only: it never
+    changes logits, legal support, old log-probabilities, PPO ratios, clipping,
+    advantages, values, targets, or critic loss.  An all-false mask is a valid
+    explicit actor skip (with a finite critic loss), rather than a divide-by-zero
+    or an implicit fallback to all rows.
     """
     log_probs = masked_log_probs(new_pair_logits, new_no_assign_logit, safe_mask)
     new_log_prob = log_probs.gather(-1, action_index.unsqueeze(-1)).squeeze(-1)
@@ -220,8 +228,22 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
     unclipped = ratio * adv
     clipped = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv
     per_row = -torch.min(unclipped, clipped)
-    active = (~forced_action).to(per_row.dtype)
-    denom = active.sum().clamp(min=1.0)
+    if actor_eligibility_mask is None:
+        eligible = torch.ones_like(forced_action, dtype=torch.bool)
+        eligibility_supplied = False
+    else:
+        if actor_eligibility_mask.dtype != torch.bool:
+            raise ValueError("ACTOR_ELIGIBILITY_MASK_MUST_BE_BOOL")
+        if actor_eligibility_mask.shape != forced_action.shape:
+            raise ValueError("ACTOR_ELIGIBILITY_MASK_SHAPE_MISMATCH")
+        if actor_eligibility_mask.device != forced_action.device:
+            raise ValueError("ACTOR_ELIGIBILITY_MASK_DEVICE_MISMATCH")
+        eligible = actor_eligibility_mask
+        eligibility_supplied = True
+    active_bool = (~forced_action) & eligible
+    active = active_bool.to(per_row.dtype)
+    active_count = active.sum()
+    denom = active_count.clamp(min=1.0)
     actor_loss = (per_row * active).sum() / denom
     ent = assignment_entropy(log_probs)
     entropy_term = (ent * active).sum() / denom
@@ -233,9 +255,18 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
         "critic_loss": critic_loss,
         "ratio": ratio,
         "new_log_prob": new_log_prob,
+        "unclipped_objective_per_row": unclipped,
+        "clipped_objective_per_row": clipped,
+        "policy_loss_per_row": per_row,
+        "entropy_per_row": ent,
+        "actor_row_weight": active,
         "actor_denominator": float(denom.item()),
+        "actor_eligible_rows": int(active_count.item()),
+        "actor_ineligible_rows": int((~eligible).sum().item()),
+        "actor_update_skipped": bool(active_count.item() == 0),
+        "actor_eligibility_mask_supplied": eligibility_supplied,
         "forced_rows": int(forced_action.sum().item()),
-        "non_forced_rows": int(active.sum().item()),
+        "non_forced_rows": int((~forced_action).sum().item()),
         "advantage_detached": not adv.requires_grad,
         "optimizer_step_called": False,
     }
