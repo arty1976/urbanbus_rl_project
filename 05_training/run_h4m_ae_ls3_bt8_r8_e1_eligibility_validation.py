@@ -303,9 +303,9 @@ def evaluate_replicate(*, replicate_id: str, actor: torch.nn.Module, critic: tor
     # must be finite; treating the sentinel as a model NaN would be incorrect.
     require(bool(torch.isfinite(logits[batch["safe_mask"]]).all() and torch.isfinite(no_assign).all()
                  and torch.isfinite(value_pred).all()), "E1_NONFINITE_MODEL_OUTPUT", replicate_id)
-    require(float(actor_contribution[ineligible].abs().sum().cpu()) == 0.0,
+    require(float(actor_contribution[ineligible].detach().abs().sum().cpu()) == 0.0,
             "E1_INELIGIBLE_POLICY_CONTRIBUTION_NONZERO", replicate_id)
-    require(float(entropy_contribution[ineligible].abs().sum().cpu()) == 0.0,
+    require(float(entropy_contribution[ineligible].detach().abs().sum().cpu()) == 0.0,
             "E1_INELIGIBLE_ENTROPY_CONTRIBUTION_NONZERO", replicate_id)
     return {
         "replicate_id": replicate_id,
