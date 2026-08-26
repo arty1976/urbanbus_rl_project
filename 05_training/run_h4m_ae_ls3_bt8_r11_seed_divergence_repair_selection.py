@@ -429,7 +429,7 @@ def main() -> None:
     import run_h4m_ae_ls3_bt6_postrepair_r2_training as BT6
     import run_h4m_ae_ls3_bt8_r1_frozen_policy_discrimination_review as R1
     import run_h4m_ae_ls3_bt8_r5_same_support_review as R5
-    import run_h4m_ae_ls3_bt8_r6_seed_credit_logit_attribution as R6
+    import run_h4m_ae_ls3_bt8_r6_seed_credit_logit_attribution as R6MOD
     import run_h4m_ae_ls3_bt8_r7_seed_factorization_credit_eligibility as R7MOD
 
     source = source_provenance(); root = artifact_root()
@@ -476,7 +476,7 @@ def main() -> None:
             require((initial["environment_seed"], initial["actor_init_seed"], initial["critic_init_seed"]) ==
                     (spec["environment_seed"], spec["actor_seed"], spec["critic_seed"]), COMMON_SUPPORT_BLOCK, f"initial_seed={replicate_id}")
             require(checkpoint_before[replicate_id] == initial["sha256"], COMMON_SUPPORT_BLOCK, f"initial_sha={replicate_id}")
-        frozen_before = R6.frozen_hashes(BT6)
+        frozen_before = R6MOD.frozen_hashes(BT6)
         require(frozen_before == e1_frozen.get("after"), COMMON_SUPPORT_BLOCK, "frozen_binding")
         preflight |= {"manifests": audits, "r10_seed_divergence": r10_seed.get("classification"),
                       "review_collection_digest": review_collection["collection_digest"], "training_collection_digest": training_collection["collection_digest"],
@@ -562,7 +562,7 @@ def main() -> None:
         execution["parameter_mutation"] = int(modules_before != modules_after)
         checkpoint_after = {replicate_id: sha256(path) for replicate_id, path in checkpoint_paths.items()}
         execution["checkpoint_mutation"] = sum(checkpoint_before[key] != checkpoint_after[key] for key in checkpoint_before)
-        frozen_after = R6.frozen_hashes(BT6)
+        frozen_after = R6MOD.frozen_hashes(BT6)
         forbidden = ("training", "optimizer_step", "backward", "autograd_grad", "causal_rollout", "simulator_step", "candidate_generation",
                      "candidate_regeneration", "local_search_rerun", "zero_loss_reevaluation", "reward_recomputation", "checkpoint_write",
                      "parameter_mutation", "checkpoint_mutation", "review_optimizer_rows", "future_leakage", "nan_or_inf", "test6_access", "github_push")

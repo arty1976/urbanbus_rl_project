@@ -55,3 +55,10 @@ def test_source_has_no_training_or_transition_execution_path() -> None:
         "05_training/run_h4m_ae_ls3_bt8_r11_seed_divergence_repair_selection.py",
         "05_training/test_h4m_ae_ls3_bt8_r11_seed_divergence_repair_selection.py",
     }
+
+
+def test_r6_artifact_path_is_not_shadowed_by_the_r6_audit_module() -> None:
+    source = (ROOT / "run_h4m_ae_ls3_bt8_r11_seed_divergence_repair_selection.py").read_text(encoding="utf-8")
+    assert "as R6MOD" in source
+    assert "R6MOD.frozen_hashes(BT6)" in source
+    assert "R6 / \"bt8r6_replicate1_credit_trace.json\"" in source
