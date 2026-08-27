@@ -617,6 +617,7 @@ def main() -> None:
             support = int(legacy["support_size"])
             mask = record["payload"]["tensors"]["safe_mask"][:, :support].to(device)
             source_probability = legacy["probabilities"][0]
+            source_probability_view = legacy["probabilities"].to(device)[0]
             source_no_assign_logit = legacy["no_assign_logit"][0, 0]
             candidates = canonical_actions_for(record["payload"], legacy, TIE)
             legal_candidate_count = sum(not action.is_no_assign for action in candidates)
@@ -647,7 +648,11 @@ def main() -> None:
                 no_assign_probability_overwrites += int(float(selected.probabilities[-1].detach().cpu()) != float(source_probability[-1]))
                 no_assign_logit_overwrites += int(float(selected.no_assign_logit[0].detach().cpu()) != float(source_no_assign_logit.detach().cpu()))
                 selected_probability = selected.probabilities[selected.selected_index]
-                source_log = torch.log(source_probability[selected.selected_index])
+                # The source probability view was produced by the frozen
+                # actor-forward path and is passed unchanged to the selector.
+                # Evaluate both log references on that same view/device rather
+                # than confuse the equivalence gate with CPU-vs-MPS log kernels.
+                source_log = torch.log(source_probability_view[selected.selected_index])
                 log_delta = abs(float(selected.log_probability.detach().cpu()) - float(source_log.detach().cpu()))
                 log_deltas.append(log_delta)
                 legal = selected.selected_is_no_assign or bool(mask[0, selected.selected_index].item())
@@ -678,7 +683,8 @@ def main() -> None:
         torch.mps.synchronize()
         require(torch.equal(selector_rng_before, selector_rng_after) and same_seed_mismatches == 0, RNG_BLOCK, "selector_rng")
         require(max(distribution_deltas, default=0.0) <= PROBABILITY_ABS_TOLERANCE and support_mismatches == 0
-                and max(log_deltas, default=0.0) <= LOG_PROBABILITY_ABS_TOLERANCE, DISTRIBUTION_BLOCK, "source_probability_or_logprob")
+                and max(log_deltas, default=0.0) <= LOG_PROBABILITY_ABS_TOLERANCE, DISTRIBUTION_BLOCK,
+                f"source_probability_or_logprob:prob_max={max(distribution_deltas, default=0.0)}:support={support_mismatches}:log_max={max(log_deltas, default=0.0)}")
         require(no_assign_support_mismatches == 0 and no_assign_probability_overwrites == 0 and no_assign_logit_overwrites == 0,
                 NO_ASSIGN_BLOCK, "no_assign")
         require(all(bool(row["r15_identity_match"]) for row in probe_rows), EXPOSURE_BLOCK, "r15_canonical_replay")
