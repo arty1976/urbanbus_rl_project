@@ -252,8 +252,10 @@ def snapshot(*, root: Path, store: list[dict[str, Any]], FPS: Any, decision_id: 
     manifest = FPS.write_snapshot(directory, payload)
     store.append({"decision_id": decision_id, "seed": seed, "decision_index": index, "window_id": window["window_id"],
                   "snapshot_digest": payload["snapshot_digest"], "relative_path": directory.relative_to(root).as_posix(),
+                  "policy_sampling_identity": payload.get("policy_sampling_identity"),
                   "snapshot_manifest_sha256": manifest["manifest_sha256"]})
-    return {"payload": payload, "directory": directory, "digest": payload["snapshot_digest"]}
+    return {"payload": payload, "directory": directory, "digest": payload["snapshot_digest"],
+            "policy_sampling_identity": payload.get("policy_sampling_identity")}
 
 
 def finish_snapshot_store(*, root: Path, kind: str, entries: Sequence[Mapping[str, Any]], FPS: Any, checkpoints: Mapping[str, Any]) -> dict[str, Any]:

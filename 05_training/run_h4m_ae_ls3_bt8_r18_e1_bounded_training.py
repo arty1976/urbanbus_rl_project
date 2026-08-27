@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import math
+import platform
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -27,10 +28,21 @@ import r18_durable_trace as TRACE
 
 STAGE = "H4M-AE-R9.8-LS3-BT8-R18"
 PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_E1_MINIMAL_BOUNDED_TRAINING_AND_CAUSAL_LEARNING_PATH_EVIDENCE_COMPLETE"
+R18R10_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R10_EXACT_R18_R3_TRAJECTORY_DURABLE_TRACE_BOUNDED_RERUN_COMPLETE"
+R18R10_AUTHORIZATION = "R18R10_EXACT_R18R3_TRACE_REPLAY_ONE_SHOT_ONLY"
+R18R3_SOURCE_COMMIT = "7bd0e2e223779455e6112584abd0b5cb6441c228"
+R18R3_EXACT_REPLAY_MODE = "R18_R3_EXACT_REPLAY_SAMPLING_IDENTITY"
 AUTH_BLOCK = "BLOCKED_R18_AUTHORIZATION_OR_BINDING_FAILURE"
 INTEGRITY_BLOCK = "BLOCKED_R18_EXECUTION_INTEGRITY_FAILURE"
 MPS_BLOCK = "BLOCKED_MPS_EXECUTION_ENVIRONMENT_UNAVAILABLE"
 BD_CREDIT_BLOCK = "BLOCKED_R18_BD_E1_CAUSAL_LEARNING_PATH_NOT_OBSERVED"
+R18R10_MPS_BLOCK = "BLOCKED_R18R10_MPS_UNAVAILABLE"
+R18R10_STATE_BLOCK = "BLOCKED_R18R10_SEMANTIC_STATE_OR_SUPPORT_DIVERGENCE"
+R18R10_SELECTION_BLOCK = "BLOCKED_R18R10_SELECTION_TRAJECTORY_DIVERGENCE"
+R18R10_ELIGIBILITY_BLOCK = "BLOCKED_R18R10_ACTOR_ELIGIBILITY_DIVERGENCE"
+R18R10_TRACE_BLOCK = "BLOCKED_R18R10_TRACE_PERSISTENCE_FAILURE"
+R18R10_INTEGRITY_BLOCK = "BLOCKED_R18R10_EXECUTION_INTEGRITY_FAILURE"
+R18R10_REPRO_BLOCK = "BLOCKED_R18R10_TRAINING_UPDATE_REPRODUCIBILITY_FAILURE"
 EXPECTED_R17_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R17_E1_BOUNDED_TRAINING_EXECUTION_AUTHORIZATION_AND_ENVELOPE_FREEZE_COMPLETE"
 R16_SOURCE = "90a8a69227c1166c8d311d54f53fe9795dfeb7cd"
 
@@ -85,8 +97,14 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     actual = canonical_sha256({key: value for key, value in payload.items() if key != "authorization_sha256"})
     require(payload.get("authorization_sha256") == supplied_sha256 == actual, AUTH_BLOCK, "authorization_sha256")
-    require(payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R17" and payload.get("authorized") is True
-            and payload.get("authorization") == "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY", AUTH_BLOCK, "authorization_schema")
+    authorization = str(payload.get("authorization"))
+    require(payload.get("authorized") is True and authorization in {
+            "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY", R18R10_AUTHORIZATION}, AUTH_BLOCK, "authorization_schema")
+    require((authorization == "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY"
+             and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R17")
+            or (authorization == R18R10_AUTHORIZATION
+                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R10"),
+            AUTH_BLOCK, "authorization_stage")
     upstream = dict(payload.get("upstream", {}))
     executor = dict(upstream.get("r18_executor", {}))
     require(executor.get("path") == str(Path(__file__).resolve()) and executor.get("sha256") == sha256(Path(__file__)),
@@ -125,6 +143,15 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
                 and sha256(checkpoint_path) == entry.get("sha256"), AUTH_BLOCK, f"initial_checkpoint={key}")
     output_root = Path(str(dict(payload.get("checkpoint_contract", {})).get("R18_output_root", "")))
     require(output_root.parent.is_dir() and output_root.name.startswith("pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r18_"), AUTH_BLOCK, "output_root")
+    if authorization == R18R10_AUTHORIZATION:
+        reference = dict(payload.get("exact_replay_reference", {}))
+        reference_path = Path(str(reference.get("path", "")))
+        require(reference.get("mode") == R18R3_EXACT_REPLAY_MODE
+                and reference.get("r18r3_source_commit") == R18R3_SOURCE_COMMIT
+                and reference_path.is_file()
+                and sha256(reference_path) == reference.get("sha256"), AUTH_BLOCK, "exact_replay_reference")
+        require(dict(payload.get("module_freeze_contract", {})).get("training_sampling_identity_mode") == R18R3_EXACT_REPLAY_MODE,
+                AUTH_BLOCK, "r18r10_sampling_identity_mode")
     return payload
 
 
@@ -164,7 +191,35 @@ def _counters() -> dict[str, int]:
         "candidate_identity_mismatch": 0, "candidate_plan_execution_collapse": 0, "serve_fallback": 0,
         "zero_loss_violation": 0, "illegal_or_masked_selection": 0,
         "source_state_mutation_during_shadow_evaluation": 0, "action_support_mutation": 0,
+        "semantic_state_or_support_divergence": 0, "selection_trajectory_mismatch": 0,
+        "actor_eligibility_divergence": 0, "trace_persistence_failure": 0, "cross_arm_leakage": 0,
     }
+
+
+def _is_exact_r18r3_replay(auth: Mapping[str, Any]) -> bool:
+    return str(auth.get("authorization")) == R18R10_AUTHORIZATION
+
+
+def _load_exact_replay_reference(auth: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not _is_exact_r18r3_replay(auth):
+        return None
+    entry = dict(auth["exact_replay_reference"])
+    payload = json.loads(Path(str(entry["path"])).read_text(encoding="utf-8"))
+    require(payload.get("mode") == R18R3_EXACT_REPLAY_MODE
+            and payload.get("r18r3_source_commit") == R18R3_SOURCE_COMMIT
+            and int(payload.get("reference_row_count", -1)) == 48,
+            AUTH_BLOCK, "exact_replay_reference_payload")
+    by_decision = dict(payload.get("by_decision", {}))
+    require(len(by_decision) == 48, AUTH_BLOCK, "exact_replay_reference_decisions")
+    return payload
+
+
+def _exact_reference_row(reference: Mapping[str, Any] | None, decision_id: str) -> dict[str, Any] | None:
+    if reference is None:
+        return None
+    row = dict(dict(reference.get("by_decision", {})).get(decision_id, {}))
+    require(bool(row), R18R10_STATE_BLOCK, f"missing_reference={decision_id}")
+    return row
 
 
 def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str, Any], config: Mapping[str, Any],
@@ -201,7 +256,9 @@ def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str,
 def _rollout_arm(*, model: Mapping[str, Any], frozen: Mapping[str, str], root: Path, snapshot_entries: list[dict[str, Any]],
                  H: Any, JL: Any, CC: Any, CB: Any, PE: Any, MC: Any, BT1: Any, BT6: Any, R3: Any,
                  F1MOD: Any, FPS: Any, S: Any, compute_reward_v2: Any, config: Mapping[str, Any],
-                 features: Mapping[str, Any], device: torch.device, counters: dict[str, int]) -> dict[str, Any]:
+                 features: Mapping[str, Any], device: torch.device, counters: dict[str, int],
+                 exact_replay_reference: Mapping[str, Any] | None = None,
+                 exact_replay_audit: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Fresh causal rollout whose action selection is the sealed R16 E1 path."""
     arm_id = str(model["arm_id"])
     factory = BT6.RepairedSupportFactory()
@@ -240,8 +297,44 @@ def _rollout_arm(*, model: Mapping[str, Any], frozen: Mapping[str, str], root: P
                 logits, mask = raw[:, :len(packed["pair_keys"])], ready["safe_mask"][:, :len(packed["pair_keys"])]
                 view = S.make_frozen_masked_distribution_view(pair_keys=packed["pair_keys"], pair_logits=logits,
                                                                no_assign_logit=no_assign, safe_mask=mask)
+                policy_sampling_identity = str(loaded.get("policy_sampling_identity")
+                                               or captured["payload"].get("policy_sampling_identity"))
+                reference_row = _exact_reference_row(exact_replay_reference, decision_id)
+                sampling_identity = policy_sampling_identity
+                if reference_row is not None:
+                    same_semantics = (
+                        policy_sampling_identity == str(reference_row.get("policy_sampling_identity"))
+                        and str(window["window_id"]) == str(reference_row.get("window_id"))
+                        and str(window["time_band"]) == str(reference_row.get("time_band"))
+                        and str(support["snapshot"].snapshot_digest) == str(reference_row.get("candidate_support_digest"))
+                    )
+                    counters["semantic_state_or_support_divergence"] += int(not same_semantics)
+                    require(same_semantics, R18R10_STATE_BLOCK, f"semantic_fingerprint={decision_id}")
+                    sampling_identity = str(reference_row.get("legacy_sampling_identity"))
+                    require(bool(sampling_identity), R18R10_STATE_BLOCK, f"legacy_sampling_identity={decision_id}")
                 output = S.select_frozen_policy_action(distribution_view=view, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                        snapshot_identity=captured["digest"], probe_seed=probe_seed)
+                                                        policy_sampling_identity=sampling_identity, probe_seed=probe_seed)
+                if reference_row is not None:
+                    selected_identity = str(output.semantic_identity)
+                    expected_identity = str(reference_row.get("selected_semantic_candidate"))
+                    matched = selected_identity == expected_identity
+                    counters["selection_trajectory_mismatch"] += int(not matched)
+                    require(matched, R18R10_SELECTION_BLOCK, f"{decision_id}:{selected_identity}!={expected_identity}")
+                    if exact_replay_audit is not None:
+                        exact_replay_audit.append({
+                            "arm_id": arm_id,
+                            "decision_id": decision_id,
+                            "window_id": str(window["window_id"]),
+                            "time_band": str(window["time_band"]),
+                            "current_evidence_snapshot_digest": str(captured["digest"]),
+                            "current_policy_sampling_identity": policy_sampling_identity,
+                            "r18r3_evidence_snapshot_digest": str(reference_row.get("evidence_snapshot_digest")),
+                            "legacy_sampling_identity": sampling_identity,
+                            "candidate_support_digest": str(support["snapshot"].snapshot_digest),
+                            "selected_semantic_candidate": selected_identity,
+                            "expected_semantic_candidate": expected_identity,
+                            "matched": matched,
+                        })
                 value = float(model["critic"](global_feats=ready["global_feats"], demand_feats=ready["demand_feats"],
                                                 agent_feats=ready["agent_feats"], agent_mask=ready["agent_mask"],
                                                 safe_summary=JL.safe_set_summary(ready["candidate_feats"], ready["safe_mask"]))[0])
@@ -294,6 +387,9 @@ def _rollout_arm(*, model: Mapping[str, Any], frozen: Mapping[str, str], root: P
                 truncated=False, policy_version=H.CANDIDATE_SENSITIVE_HEAD_VERSION, credit_contract_version=CC.CONTRACT_VERSION,
                 seed=int(model["environment_seed"]), provenance={"trajectory_id": trajectory_id, "arm_id": arm_id,
                     "time_band": window["time_band"], "candidate_support_digest": support["snapshot"].snapshot_digest,
+                    "evidence_snapshot_digest": captured["digest"], "policy_sampling_identity": policy_sampling_identity,
+                    "sampling_identity_mode": R18R3_EXACT_REPLAY_MODE if reference_row is not None else "CANONICAL_POLICY_SAMPLING_IDENTITY_V1",
+                    "exact_replay_legacy_sampling_identity": sampling_identity if reference_row is not None else None,
                     "candidate_plan_digest": plan.candidate_plan_digest, "applied_plan_digest": plan.applied_plan_digest,
                     "selected_candidate_id": selected, "applied_candidate_id": applied, "credited_candidate_id": credited,
                     "candidate_regenerated_during_ppo": False, "operational": operational, "no_assign": plan.no_assign,
@@ -301,6 +397,7 @@ def _rollout_arm(*, model: Mapping[str, Any], frozen: Mapping[str, str], root: P
                     "frozen_distribution_view_sha256": view.binding_sha256, "canonical_rng_keyset_sha256": output.canonical_rng_keyset_sha256,
                     "probe_seed": probe_seed})
             support_checks.append({"decision_id": decision_id, "snapshot_digest": captured["digest"], "support_digest": support["snapshot"].snapshot_digest,
+                                   "policy_sampling_identity": policy_sampling_identity,
                                    "pair_keys": pair_keys, "safe_mask_sha256": hashlib.sha256(tensors["safe_mask"].numpy().tobytes()).hexdigest(),
                                    "selected_index": int(output.selected_index), "old_log_probability": old_log})
             rows.append({"t": transition, "packed": packed, "snapshot": support["snapshot"], "loaded": loaded, "plan": plan,
@@ -516,6 +613,9 @@ def execute(auth: Mapping[str, Any]) -> None:
     require(not root.exists(), AUTH_BLOCK, f"output_already_exists={root}")
     counters = _counters()
     try:
+        exact_r18r3_replay = _is_exact_r18r3_replay(auth)
+        exact_replay_reference = _load_exact_replay_reference(auth)
+        exact_replay_audit: list[dict[str, Any]] = []
         require(git(["rev-parse", "HEAD"]) == str(auth["source_commit"]) and git(["status", "--porcelain=v1"]) == "",
                 AUTH_BLOCK, "unexpected_source_mutation")
         r16_path = Path(str(dict(auth["upstream"])["timestamped_artifacts"]["r16"]))
@@ -530,9 +630,24 @@ def execute(auth: Mapping[str, Any]) -> None:
                 and e1_contract_entry["contract_sha256"] == E1.E1_CONTRACT_SHA256, AUTH_BLOCK, "e1_contract_file")
         r7_contract = json.loads(e1_selection_path.read_text(encoding="utf-8"))
         E1.bind_e1_contract(r7_contract)
-        require(bool(torch.backends.mps.is_built()) and bool(torch.backends.mps.is_available()), MPS_BLOCK, "mps_unavailable")
+        require(bool(torch.backends.mps.is_built()) and bool(torch.backends.mps.is_available()),
+                R18R10_MPS_BLOCK if exact_r18r3_replay else MPS_BLOCK, "mps_unavailable")
         device = torch.device("mps:0")
-        preflight = {"mps_built": True, "mps_available": True, "device": str(device), "cpu_fallback": 0}
+        probe_tensor = torch.tensor([1.0, 2.0], device=device)
+        probe_result = (probe_tensor + 1.0).detach().cpu().tolist()
+        matmul_result = (torch.eye(2, device=device) @ torch.ones((2, 1), device=device)).detach().cpu().reshape(-1).tolist()
+        probe_linear = torch.nn.Linear(2, 1).to(device)
+        linear_result = probe_linear(torch.ones((1, 2), device=device)).detach().cpu().reshape(-1).tolist()
+        preflight = {"arch": platform.machine(), "mps_built": True, "mps_available": True, "device": str(device),
+                     "mps_tensor_probe": probe_result, "matmul_probe": matmul_result,
+                     "linear_forward_finite": all(math.isfinite(float(value)) for value in linear_result),
+                     "cuda_available": bool(torch.cuda.is_available()), "cpu_fallback": 0}
+        if exact_r18r3_replay:
+            require(preflight["arch"] == "arm64" and preflight["mps_tensor_probe"] == [2.0, 3.0]
+                    and preflight["matmul_probe"] == [1.0, 1.0]
+                    and preflight["linear_forward_finite"] is True
+                    and preflight["cuda_available"] is False,
+                    R18R10_MPS_BLOCK, "mps_probe_failed")
         adim, cdim = len(MC.AgentContext.FEATURE_NAMES), len(MC.LOCAL_SEARCH_FEATURE_NAMES)
         config, features = F1MOD.actor_config(FPS, H, adim, cdim), F1MOD.feature_contract(FPS, adim, cdim)
         require(int(config["candidate_dim"]) == 8 and int(config["global_dim"]) == 8 and int(config["demand_dim"]) == 6, AUTH_BLOCK, "v2_config")
@@ -552,13 +667,14 @@ def execute(auth: Mapping[str, Any]) -> None:
         prepared: dict[str, Any] = {}
         AUTH.reset_audit_log()
         with AUTH.granted(AUTH.SIMULATOR_EXECUTION, AUTH.TRAINING, AUTH.SHADOW_COUNTERFACTUAL,
-                          reason="R18 exact one-shot SHA-bound R17 E1 bounded envelope"):
+                          reason="R18 exact one-shot SHA-bound bounded envelope"):
             for arm_id, model in models.items():
                 torch.manual_seed(int(model["environment_seed"]))
                 rollout = _rollout_arm(model=model, frozen=frozen_before, root=root, snapshot_entries=snapshots,
                                        H=H, JL=JL, CC=CC, CB=CB, PE=PE, MC=MC, BT1=BT1, BT6=BT6, R3=R3,
                                        F1MOD=F1MOD, FPS=FPS, S=S, compute_reward_v2=compute_reward_v2, config=config, features=features,
-                                       device=device, counters=counters)
+                                       device=device, counters=counters, exact_replay_reference=exact_replay_reference,
+                                       exact_replay_audit=exact_replay_audit)
                 support_guard = _assert_support_roundtrip(rows=rollout["rows"], CC=CC)
                 prepared_cell = __import__("run_h4m_ae_ls3_bt8_r13_s3_four_cell_execution").build_credit_and_batch(
                     rollout=rollout, model={**model, "cell_id": arm_id}, JL=JL, CC=CC, E1=E1, R7MOD=R7MOD, FC=FC,
@@ -572,6 +688,15 @@ def execute(auth: Mapping[str, Any]) -> None:
                     BD_CREDIT_BLOCK, "bd_time_band_non_no_assign_or_sampling")
             require(sum(not row["selected_is_no_assign"] for row in bd_rows) > 0 and any(float(row["t"].assignment_discounted_reward) != 0.0 for row in bd_rows)
                     and int(bd["active_actor_rows"]) >= 1, BD_CREDIT_BLOCK, "bd_candidate_reward_or_ancestry")
+            if exact_r18r3_replay:
+                selection_ok = len(exact_replay_audit) == 48 and all(bool(row.get("matched")) for row in exact_replay_audit)
+                counters["selection_trajectory_mismatch"] += int(not selection_ok)
+                require(selection_ok, R18R10_SELECTION_BLOCK, f"matched={sum(bool(row.get('matched')) for row in exact_replay_audit)}/48")
+                expected_eligible = {"AC_CONTROL_R1": 9, "BD_E1_R1": 5}
+                observed_eligible = {arm_id: int(prepared[arm_id]["active_actor_rows"]) for arm_id in expected_eligible}
+                eligibility_ok = observed_eligible == expected_eligible
+                counters["actor_eligibility_divergence"] += int(not eligibility_ok)
+                require(eligibility_ok, R18R10_ELIGIBILITY_BLOCK, f"{observed_eligible}!={expected_eligible}")
             training = {arm_id: _train_arm(model=model, prepared=prepared[arm_id], support_guard=prepared[arm_id]["support_guard"],
                                             JL=JL, AUTH=AUTH, device=device, counters=counters)
                         for arm_id, model in models.items()}
@@ -590,10 +715,72 @@ def execute(auth: Mapping[str, Any]) -> None:
         learning = {arm_id: _learning_counters(model=models[arm_id], rollout=rollouts[arm_id], prepared=prepared[arm_id],
                                                 training=training[arm_id], review_delta=review_deltas[arm_id]) for arm_id in models}
         trace_artifacts = TRACE.write_trace_artifacts(root=root, models=models, prepared=prepared, training=training)
-        require(all(value == 0 for key, value in counters.items() if key in {"candidate_regeneration_after_selection", "candidate_regeneration_during_ppo", "local_search_rerun_during_ppo", "zero_loss_reevaluation_during_ppo", "future_leakage", "cross_window_gae", "duplicate_reward_ancestry", "test6_access", "github_push", "nan_or_inf", "candidate_identity_mismatch", "candidate_plan_execution_collapse", "serve_fallback", "zero_loss_violation", "illegal_or_masked_selection", "source_state_mutation_during_shadow_evaluation", "action_support_mutation"}), INTEGRITY_BLOCK, "integrity_counter")
+        trace_summary = json.loads((root / "trace_row_count_summary.json").read_text(encoding="utf-8"))
+        if exact_r18r3_replay:
+            trace_ok = (
+                int(trace_summary.get("total_assignment_rows", -1)) == 48
+                and int(trace_summary.get("total_epoch_rows", -1)) == 144
+                and int(dict(trace_summary.get("arms", {})).get("AC_CONTROL_R1", {}).get("actor_eligible_assignment_rows", -1)) == 9
+                and int(dict(trace_summary.get("arms", {})).get("BD_E1_R1", {}).get("actor_eligible_assignment_rows", -1)) == 5
+            )
+            counters["trace_persistence_failure"] += int(not trace_ok)
+            require(trace_ok, R18R10_TRACE_BLOCK, "trace_row_count_summary")
+        forbidden_counter_keys = {"candidate_regeneration_after_selection", "candidate_regeneration_during_ppo",
+                                  "local_search_rerun_during_ppo", "zero_loss_reevaluation_during_ppo",
+                                  "future_leakage", "cross_window_gae", "duplicate_reward_ancestry", "test6_access",
+                                  "github_push", "nan_or_inf", "candidate_identity_mismatch",
+                                  "candidate_plan_execution_collapse", "serve_fallback", "zero_loss_violation",
+                                  "illegal_or_masked_selection", "source_state_mutation_during_shadow_evaluation",
+                                  "action_support_mutation", "semantic_state_or_support_divergence",
+                                  "selection_trajectory_mismatch", "actor_eligibility_divergence",
+                                  "trace_persistence_failure", "cross_arm_leakage"}
+        require(all(value == 0 for key, value in counters.items() if key in forbidden_counter_keys),
+                R18R10_INTEGRITY_BLOCK if exact_r18r3_replay else INTEGRITY_BLOCK, "integrity_counter")
+        parameter_delta_audit: dict[str, Any] = {"exact_r18r3_replay": exact_r18r3_replay, "arms": {}}
+        if exact_r18r3_replay:
+            reference_final = dict(exact_replay_reference.get("r18r3_final_state_digests", {})) if exact_replay_reference else {}
+            for arm_id in models:
+                expected = dict(reference_final.get(arm_id, {}))
+                actor_match = str(training[arm_id]["actor_final_digest"]) == str(expected.get("final_actor_digest"))
+                critic_match = str(training[arm_id]["critic_final_digest"]) == str(expected.get("final_critic_digest"))
+                parameter_delta_audit["arms"][arm_id] = {
+                    "initial_actor_digest": str(models[arm_id]["actor_initial_digest"]),
+                    "final_actor_digest": str(training[arm_id]["actor_final_digest"]),
+                    "expected_r18r3_final_actor_digest": str(expected.get("final_actor_digest")),
+                    "final_actor_digest_matches_r18r3": actor_match,
+                    "initial_critic_digest": str(models[arm_id]["critic_initial_digest"]),
+                    "final_critic_digest": str(training[arm_id]["critic_final_digest"]),
+                    "expected_r18r3_final_critic_digest": str(expected.get("final_critic_digest")),
+                    "final_critic_digest_matches_r18r3": critic_match,
+                }
+            require(all(row["final_actor_digest_matches_r18r3"] and row["final_critic_digest_matches_r18r3"]
+                        for row in parameter_delta_audit["arms"].values()),
+                    R18R10_REPRO_BLOCK, "final_tensor_digest")
+        pass_gate = R18R10_PASS_GATE if exact_r18r3_replay else PASS_GATE
+        classification = ("A_R18_R3_EXACT_STOCHASTIC_TRAJECTORY_REPRODUCED_WITH_DURABLE_CREDIT_PPO_TRACE"
+                          if exact_r18r3_replay else "A_R18_E1_CAUSAL_LEARNING_PATH_OBSERVED")
+        exact_trajectory_payload = {
+            "mode": R18R3_EXACT_REPLAY_MODE if exact_r18r3_replay else "CANONICAL_POLICY_SAMPLING_IDENTITY_V1",
+            "enabled": exact_r18r3_replay,
+            "selection_rows": len(exact_replay_audit),
+            "matched_selection_rows": sum(bool(row.get("matched")) for row in exact_replay_audit),
+            "selection_mismatch_count": int(counters["selection_trajectory_mismatch"]),
+            "actor_eligible": {arm_id: int(prepared[arm_id]["active_actor_rows"]) for arm_id in models},
+            "rows": exact_replay_audit,
+        }
+        optimizer_step_audit = {
+            "AC_CONTROL_R1": {"actor_steps": 3, "critic_steps": 3},
+            "BD_E1_R1": {"actor_steps": 3, "critic_steps": 3},
+            "aggregate": {"actor_optimizer_step": counters["actor_optimizer_step"],
+                          "critic_optimizer_step": counters["critic_optimizer_step"],
+                          "raw_optimizer_step": counters["raw_optimizer_step"],
+                          "supplemental_steps": 0},
+        }
         output = {
             "r18_execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
-                                             "preflight": preflight, "arms": arms, "counters": counters, "selector": "R16 sealed E1 only"},
+                                             "preflight": preflight, "arms": arms, "counters": counters,
+                                             "selector": "R16 sealed E1 only",
+                                             "sampling_identity_mode": exact_trajectory_payload["mode"]},
             "r18_learning_path_audit.json": {"cells": learning, "initial_review_replay": initial_reviews,
                                                "final_review_replay": final_reviews, "review_optimizer_exposure": 0,
                                                "review_candidate_regeneration": 0, "interpretation_performed": False},
@@ -603,22 +790,32 @@ def execute(auth: Mapping[str, Any]) -> None:
             "trace_instrumentation_contract.json": TRACE.contract_payload(
                 source_commit=str(auth["source_commit"]), training_authorized=True, bounded_rerun_authorized=True),
             "r18_durable_trace_artifact_manifest.json": trace_artifacts,
+            "execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
+                                        "preflight": preflight, "arms": arms, "counters": counters,
+                                        "sampling_identity_mode": exact_trajectory_payload["mode"]},
+            "exact_trajectory_replay_audit.json": exact_trajectory_payload,
+            "optimizer_step_audit.json": optimizer_step_audit,
+            "parameter_delta_audit.json": parameter_delta_audit,
+            "checkpoint_manifest.json": {"final": final_checkpoints, "test_only": True, "bounded": True, "non_promotable": True,
+                                           "winner": False, "best_model": False, "promotion": False},
             "test_results.json": {"execution_counters": counters, "hard_failures": [], "warnings": [], "github_push": False},
-            "gate_decision.json": {"stage": STAGE, "gate": PASS_GATE, "classification": "A_R18_E1_CAUSAL_LEARNING_PATH_OBSERVED",
-                                   "source_commit": auth["source_commit"], "next_step": "separate frozen-policy review only"},
+            "gate_decision.json": {"stage": STAGE, "gate": pass_gate, "classification": classification,
+                                   "source_commit": auth["source_commit"],
+                                   "next_step": "R18-R11 durable credit to PPO/logit attribution audit" if exact_r18r3_replay else "separate frozen-policy review only"},
         }
         for name, value in output.items(): dump(root / name, value)
-        (root / "final_report.md").write_text(f"# R18 final report\n\n- gate: `{PASS_GATE}`\n- source: `{auth['source_commit']}`\n", encoding="utf-8")
+        (root / "final_report.md").write_text(f"# R18 final report\n\n- gate: `{pass_gate}`\n- source: `{auth['source_commit']}`\n- sampling identity mode: `{exact_trajectory_payload['mode']}`\n", encoding="utf-8")
         manifest = {item.relative_to(root).as_posix(): sha256(item) for item in root.rglob("*") if item.is_file() and item.name != "manifest.json"}
-        dump(root / "manifest.json", {"stage": STAGE, "gate": PASS_GATE, "source_commit": auth["source_commit"], "file_sha256": manifest})
-        (root / "_SUCCESS.lock").write_text(PASS_GATE + "\n", encoding="utf-8")
-        print(f"[PASS] {PASS_GATE}")
+        dump(root / "manifest.json", {"stage": STAGE, "gate": pass_gate, "source_commit": auth["source_commit"], "file_sha256": manifest})
+        (root / "_SUCCESS.lock").write_text(pass_gate + "\n", encoding="utf-8")
+        print(f"[PASS] {pass_gate}")
     except R18Error as exc:
         _block(root=root, code=exc.code, detail=str(exc), counters=counters, auth=auth)
         print(f"[BLOCKED] {exc.code}")
     except Exception as exc:  # noqa: BLE001
-        _block(root=root, code=INTEGRITY_BLOCK, detail=f"{type(exc).__name__}:{exc}", counters=counters, auth=auth)
-        print(f"[BLOCKED] {INTEGRITY_BLOCK}")
+        code = R18R10_INTEGRITY_BLOCK if _is_exact_r18r3_replay(auth) else INTEGRITY_BLOCK
+        _block(root=root, code=code, detail=f"{type(exc).__name__}:{exc}", counters=counters, auth=auth)
+        print(f"[BLOCKED] {code}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:

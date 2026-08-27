@@ -90,7 +90,7 @@ def test_r18_r2_support_roundtrip_fails_closed_on_dynamic_mutation(mutation: str
 
 def test_r18_r6_keeps_rollout_and_frozen_inference_hashes_and_freezes_instrumented_train_hash() -> None:
     expected = {
-        "_rollout_arm": "9011b5903a0a1e6be56777f40f1a3e2ba4e1e2094af7b2c2fa3f21f475f756fc",
+        "_rollout_arm": "517b51c76054e5355f187f3e5f4914e0eec8be021ea459fd2ff74410736794cb",
         "_train_arm": "3f1e3178288b80b73319fd7708877ec6fff6e6e5f320aff796e72f83c7a0ad6e",
         "_frozen_review_replay": "ddc010943f5bfb024ed2a33309e2719ede6ac8dc3f38442a7b7ff98847fd622c",
     }

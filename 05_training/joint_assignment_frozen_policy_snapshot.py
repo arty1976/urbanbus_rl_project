@@ -22,10 +22,26 @@ SNAPSHOT_SCHEMA_VERSION = "LS3_BT7_FROZEN_POLICY_SNAPSHOT_V1"
 COLLECTION_SCHEMA_VERSION = "LS3_BT7_FROZEN_POLICY_SNAPSHOT_COLLECTION_V1"
 FEATURE_CONTRACT_ID = "LS3_JOINT_ACTOR_INPUT_FEATURE_CONTRACT_V1"
 CANDIDATE_SUPPORT_CONTRACT_ID = "LS3_JOINT_CANDIDATE_SUPPORT_SNAPSHOT_V1"
+POLICY_SAMPLING_IDENTITY_VERSION = "CANONICAL_POLICY_SAMPLING_IDENTITY_V1"
 TENSOR_FIELDS: Tuple[str, ...] = (
     "global_feats", "demand_feats", "agent_feats", "agent_mask",
     "candidate_feats", "pair_agent_index", "safe_mask",
 )
+PROVENANCE_ONLY_METADATA_FIELDS = frozenset({
+    "source_commit",
+    "captured_device",
+    "artifact_path",
+    "artifact_timestamp",
+    "manifest_path",
+    "report_path",
+    "source_file_hash",
+    "instrumentation_version",
+    "run_output_root",
+    "frozen_authority_hashes",
+})
+PROVENANCE_ONLY_ACTOR_CONFIG_FIELDS = frozenset({
+    "actor_module_sha256",
+})
 
 
 class FrozenPolicySnapshotError(RuntimeError):
@@ -106,6 +122,12 @@ def _tensor_descriptor(tensor: torch.Tensor) -> Dict[str, Any]:
     return {"dtype": str(value.dtype), "shape": list(value.shape), "numel": int(value.numel())}
 
 
+def _tensor_fingerprint(tensor: torch.Tensor) -> Dict[str, Any]:
+    value = _cpu_clone(tensor)
+    raw = value.view(torch.uint8).numpy().tobytes()
+    return {**_tensor_descriptor(value), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def _tensor_digest(metadata: Mapping[str, Any], tensors: Mapping[str, torch.Tensor]) -> str:
     digest = hashlib.sha256()
     digest.update(b"LS3_FROZEN_POLICY_SNAPSHOT_DIGEST_V1\0")
@@ -140,6 +162,85 @@ def _normal_pair_ids(candidate_ids: Sequence[Sequence[str] | Mapping[str, str]])
     pairs = [(row["agent_id"], row["candidate_id"]) for row in normalized]
     _require(len(pairs) == len(set(pairs)), "SNAPSHOT_DUPLICATE_CANDIDATE_IDENTITY")
     return normalized
+
+
+def _semantic_actor_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+    return {str(key): value for key, value in sorted(dict(config).items())
+            if str(key) not in PROVENANCE_ONLY_ACTOR_CONFIG_FIELDS}
+
+
+def policy_sampling_identity_payload(*, metadata: Mapping[str, Any],
+                                     tensors: Mapping[str, torch.Tensor]) -> Dict[str, Any]:
+    """Canonical policy/RNG identity, excluding evidence-only provenance.
+
+    ``snapshot_digest`` intentionally remains a full evidence digest and still
+    changes when provenance such as ``source_commit`` changes.  This payload is
+    narrower: it binds the policy-relevant decision state, legal support, and
+    semantic candidate identities in canonical order so artifact lineage cannot
+    perturb stochastic selection.
+    """
+    candidate_ids = _normal_pair_ids(metadata.get("candidate_ids", []))
+    agent_ids = [str(value) for value in metadata.get("agent_ids", [])]
+    selectable = int(metadata.get("selectable_pair_count", -1))
+    _validate_tensors(tensors, agent_ids=agent_ids, candidate_ids=candidate_ids,
+                      selectable_pair_count=selectable)
+    _validate_actor_dimensions(tensors, metadata.get("actor_config", {}))
+
+    global_feats = _cpu_clone(tensors["global_feats"])
+    demand_feats = _cpu_clone(tensors["demand_feats"])
+    agent_feats = _cpu_clone(tensors["agent_feats"])
+    agent_mask = _cpu_clone(tensors["agent_mask"])
+    candidate_feats = _cpu_clone(tensors["candidate_feats"])
+    pair_agent_index = _cpu_clone(tensors["pair_agent_index"])
+    safe_mask = _cpu_clone(tensors["safe_mask"])
+
+    agents = []
+    for index, agent_id in enumerate(agent_ids):
+        active = bool(agent_mask[0, index].item())
+        if not active:
+            continue
+        agents.append({
+            "agent_id": agent_id,
+            "agent_feature": _tensor_fingerprint(agent_feats[0, index]),
+        })
+
+    candidates = []
+    for index, pair in enumerate(candidate_ids):
+        mapped_agent_id = agent_ids[int(pair_agent_index[0, index].item())]
+        _require(mapped_agent_id == pair["agent_id"], "SNAPSHOT_POLICY_IDENTITY_PAIR_AGENT_MISMATCH", str(index))
+        candidates.append({
+            "agent_id": pair["agent_id"],
+            "candidate_id": pair["candidate_id"],
+            "candidate_feature": _tensor_fingerprint(candidate_feats[0, index]),
+            "safe": bool(safe_mask[0, index].item()),
+        })
+
+    feature_contract = dict(metadata.get("feature_contract", {}))
+    policy_metadata = {
+        "policy_sampling_identity_version": POLICY_SAMPLING_IDENTITY_VERSION,
+        "snapshot_schema_version": metadata.get("snapshot_schema_version"),
+        "decision_id": str(metadata.get("decision_id")),
+        "window_id": str(metadata.get("window_id")),
+        "seed": int(metadata.get("seed")),
+        "decision_index": int(metadata.get("decision_index")),
+        "time_band": str(metadata.get("time_band")),
+        "no_assign_option": str(metadata.get("no_assign_option")),
+        "no_assign_index": selectable,
+        "candidate_support_digest": str(metadata.get("candidate_support_digest")),
+        "candidate_support_contract_id": str(metadata.get("candidate_support_contract_id")),
+        "feature_contract_id": str(metadata.get("feature_contract_id", feature_contract.get("feature_contract_id", FEATURE_CONTRACT_ID))),
+        "actor_config": _semantic_actor_config(metadata.get("actor_config", {})),
+        "global_feats": _tensor_fingerprint(global_feats[0]),
+        "demand_feats": _tensor_fingerprint(demand_feats[0]),
+        "agents_by_identity": sorted(agents, key=lambda row: row["agent_id"]),
+        "candidates_by_identity": sorted(candidates, key=lambda row: (row["agent_id"], row["candidate_id"])),
+    }
+    return policy_metadata
+
+
+def policy_sampling_identity(*, metadata: Mapping[str, Any],
+                             tensors: Mapping[str, torch.Tensor]) -> str:
+    return canonical_sha256(policy_sampling_identity_payload(metadata=metadata, tensors=tensors))
 
 
 def _validate_tensors(tensors: Mapping[str, torch.Tensor], *, agent_ids: Sequence[str],
@@ -235,11 +336,14 @@ def capture_actor_input(*, decision_id: str, window_id: str, seed: int, decision
         "tensor_descriptors": {name: _tensor_descriptor(tensors[name]) for name in TENSOR_FIELDS},
     }
     digest = _tensor_digest(metadata, tensors)
-    return {"metadata": metadata, "tensors": tensors, "snapshot_digest": digest}
+    sampling_identity = policy_sampling_identity(metadata=metadata, tensors=tensors)
+    return {"metadata": metadata, "tensors": tensors, "snapshot_digest": digest,
+            "policy_sampling_identity": sampling_identity}
 
 
 def _validate_payload(payload: Mapping[str, Any]) -> None:
-    _require(set(payload) == {"metadata", "tensors", "snapshot_digest"}, "SNAPSHOT_PAYLOAD_KEYS_INVALID")
+    _require(set(payload).issubset({"metadata", "tensors", "snapshot_digest", "policy_sampling_identity"})
+             and {"metadata", "tensors", "snapshot_digest"}.issubset(set(payload)), "SNAPSHOT_PAYLOAD_KEYS_INVALID")
     metadata, tensors = payload["metadata"], payload["tensors"]
     _require(isinstance(metadata, Mapping) and isinstance(tensors, Mapping), "SNAPSHOT_PAYLOAD_TYPE_INVALID")
     _require(metadata.get("snapshot_schema_version") == SNAPSHOT_SCHEMA_VERSION, "SNAPSHOT_SCHEMA_VERSION_MISMATCH")
@@ -254,6 +358,10 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
     _validate_actor_dimensions(tensors, metadata.get("actor_config", {}))
     expected = _tensor_digest(metadata, tensors)
     _require(payload.get("snapshot_digest") == expected, "SNAPSHOT_DIGEST_MISMATCH")
+    expected_sampling_identity = policy_sampling_identity(metadata=metadata, tensors=tensors)
+    supplied_sampling_identity = payload.get("policy_sampling_identity")
+    if supplied_sampling_identity is not None:
+        _require(supplied_sampling_identity == expected_sampling_identity, "SNAPSHOT_POLICY_SAMPLING_IDENTITY_MISMATCH")
 
 
 def write_snapshot(path: Path, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -264,7 +372,10 @@ def write_snapshot(path: Path, payload: Mapping[str, Any]) -> Dict[str, Any]:
     # torch's tensor archive preserves dtype and shape; tensors were copied to
     # CPU first, so the stored format has no device-local MPS dependency.
     torch.save({"tensors": payload["tensors"]}, binary)
+    sampling_identity = str(payload.get("policy_sampling_identity")
+                            or policy_sampling_identity(metadata=payload["metadata"], tensors=payload["tensors"]))
     manifest = {"metadata": payload["metadata"], "snapshot_digest": payload["snapshot_digest"],
+                "policy_sampling_identity": sampling_identity,
                 "tensor_binary": binary.name, "tensor_binary_sha256": sha256_file(binary),
                 "serialization_format": "torch.save binary tensor archive (CPU tensors)",
                 "device_neutral": True, "lossy_transformations": []}
@@ -285,7 +396,10 @@ def load_snapshot(path: Path) -> Dict[str, Any]:
     stored = torch.load(binary, map_location="cpu", weights_only=False)
     _require(isinstance(stored, Mapping) and isinstance(stored.get("tensors"), Mapping), "SNAPSHOT_TENSOR_BINARY_INVALID")
     payload = {"metadata": manifest.get("metadata"), "tensors": stored["tensors"],
-               "snapshot_digest": manifest.get("snapshot_digest")}
+               "snapshot_digest": manifest.get("snapshot_digest"),
+               "policy_sampling_identity": manifest.get("policy_sampling_identity")}
+    if payload["policy_sampling_identity"] is None:
+        payload["policy_sampling_identity"] = policy_sampling_identity(metadata=payload["metadata"], tensors=payload["tensors"])
     _validate_payload(payload)
     return payload
 
@@ -321,9 +435,12 @@ class SnapshotCollectionWriter:
         self.entries.append({"decision_identity": {"decision_id": identity[0], "seed": identity[1],
                                                      "decision_index": identity[2]},
                              "snapshot_digest": payload["snapshot_digest"],
+                             "policy_sampling_identity": payload["policy_sampling_identity"],
                              "relative_path": directory.relative_to(self.root).as_posix(),
                              "snapshot_manifest_sha256": manifest["manifest_sha256"]})
-        return {"snapshot_digest": payload["snapshot_digest"], "relative_path": directory.relative_to(self.root).as_posix()}
+        return {"snapshot_digest": payload["snapshot_digest"],
+                "policy_sampling_identity": payload["policy_sampling_identity"],
+                "relative_path": directory.relative_to(self.root).as_posix()}
 
     def finalize(self, *, checkpoint_path: Path) -> Dict[str, Any]:
         _require(not self._finalized, "SNAPSHOT_COLLECTION_ALREADY_FINALIZED")

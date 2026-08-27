@@ -295,15 +295,16 @@ def _categorical_exponential_race(*, actions: Sequence[TIE.CanonicalAction], pro
     return min(contenders, key=lambda row: (row[0], row[1]))[2]
 
 
-def _bound_training_rng(*, snapshot_identity: str | None, probe_seed: int | None) -> tuple[str, int]:
-    _require(isinstance(snapshot_identity, str) and bool(snapshot_identity), "TRAINING_SNAPSHOT_IDENTITY_REQUIRED")
+def _bound_training_rng(*, policy_sampling_identity: str | None, probe_seed: int | None) -> tuple[str, int]:
+    _require(isinstance(policy_sampling_identity, str) and bool(policy_sampling_identity), "TRAINING_POLICY_SAMPLING_IDENTITY_REQUIRED")
     _require(isinstance(probe_seed, int) and not isinstance(probe_seed, bool), "TRAINING_PROBE_SEED_REQUIRED")
-    return snapshot_identity, int(probe_seed)
+    return policy_sampling_identity, int(probe_seed)
 
 
 def select_frozen_policy_action(*, distribution_view: FrozenMaskedDistributionView,
                                 mode: str = FROZEN_INFERENCE_T1,
                                 snapshot_identity: str | None = None,
+                                policy_sampling_identity: str | None = None,
                                 probe_seed: int | None = None) -> FrozenPolicySelection:
     """Select exactly one semantic action from the pre-existing frozen policy.
 
@@ -342,7 +343,8 @@ def select_frozen_policy_action(*, distribution_view: FrozenMaskedDistributionVi
     trigger_reason = "INFERENCE_T1"
     keyset_sha: str | None = None
     if mode == FROZEN_MASKED_CATEGORICAL_TRAINING:
-        snapshot_value, seed_value = _bound_training_rng(snapshot_identity=snapshot_identity, probe_seed=probe_seed)
+        sampling_identity = policy_sampling_identity if policy_sampling_identity is not None else snapshot_identity
+        snapshot_value, seed_value = _bound_training_rng(policy_sampling_identity=sampling_identity, probe_seed=probe_seed)
         legal_candidate_count = sum(not action.is_no_assign for action in actions)
         if deterministic.selected.is_no_assign and legal_candidate_count > 0:
             selected = _categorical_exponential_race(actions=actions, probabilities=probabilities,
