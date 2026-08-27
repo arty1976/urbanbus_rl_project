@@ -96,6 +96,14 @@ def _single_no_assign(value: torch.Tensor) -> torch.Tensor:
     return value
 
 
+def _single_probability_row(value: torch.Tensor) -> torch.Tensor:
+    _require(isinstance(value, torch.Tensor), "MASKED_PROBABILITIES_NOT_TENSOR")
+    if value.ndim == 1:
+        return value.unsqueeze(0)
+    _require(value.ndim == 2 and value.shape[0] == 1, "MASKED_PROBABILITIES_SINGLE_DECISION_SHAPE_REQUIRED")
+    return value
+
+
 def _candidate_rows(pair_keys: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for index, pair in enumerate(pair_keys):
@@ -162,14 +170,19 @@ def select_frozen_policy_action(*, pair_keys: Sequence[tuple[str, str]], pair_lo
                                 no_assign_logit: torch.Tensor, safe_mask: torch.Tensor,
                                 mode: str = FROZEN_INFERENCE_T1,
                                 snapshot_identity: str | None = None,
-                                probe_seed: int | None = None) -> FrozenPolicySelection:
+                                probe_seed: int | None = None,
+                                masked_probabilities: torch.Tensor | None = None) -> FrozenPolicySelection:
     """Select exactly one semantic action from the pre-existing frozen policy.
 
     The training mode is deliberately not an unconditional sampler.  It is the
     R15 E1 deadlock branch: categorical sampling happens only when the same
     T1 deterministic selection is ``NO_ASSIGN`` *and* a legal candidate exists.
     No action receives added mass; ``NO_ASSIGN`` remains in the full sampling
-    distribution and can still be selected.
+    distribution and can still be selected.  A caller that has already obtained
+    the frozen masked distribution from the actor-forward selection path may
+    pass it through ``masked_probabilities``.  That view is validated and used
+    unchanged; it is never re-normalized or reweighted.  This avoids a second
+    device kernel becoming a needless source of numerical variation.
     """
     _require(mode in {FROZEN_INFERENCE_T1, FROZEN_MASKED_CATEGORICAL_TRAINING}, "UNKNOWN_SELECTION_MODE")
     pairs = _single_pair_row(pair_logits, "PAIR_LOGITS")
@@ -185,8 +198,15 @@ def select_frozen_policy_action(*, pair_keys: Sequence[tuple[str, str]], pair_lo
     safe_logits = pairs[mask]
     _require(bool(torch.isfinite(safe_logits).all().item()) and bool(torch.isfinite(no_assign).all().item()),
              "NONFINITE_LEGAL_LOGIT")
-    probabilities = H.masked_distribution(pairs, no_assign, mask)[0]
+    if masked_probabilities is None:
+        probabilities = H.masked_distribution(pairs, no_assign, mask)[0]
+    else:
+        provided = _single_probability_row(masked_probabilities)
+        _require(provided.shape == (1, pairs.shape[1] + 1), "MASKED_PROBABILITIES_SHAPE_MISMATCH")
+        _require(provided.device == pairs.device and provided.dtype == pairs.dtype, "MASKED_PROBABILITIES_DEVICE_OR_DTYPE_MISMATCH")
+        probabilities = provided[0]
     _require(bool(torch.isfinite(probabilities).all().item()), "NONFINITE_MASKED_PROBABILITY")
+    _require(bool((probabilities >= 0).all().item()), "NEGATIVE_MASKED_PROBABILITY")
     _require(bool((probabilities[:-1][~mask[0]] == 0).all().item()), "UNSAFE_ACTION_HAS_POLICY_MASS")
 
     try:

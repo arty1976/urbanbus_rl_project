@@ -552,7 +552,8 @@ def main() -> None:
                 mask = payload["tensors"]["safe_mask"][:, :support].to(device)
                 post = S.select_frozen_policy_action(pair_keys=pair_keys(payload), pair_logits=legacy["pair_logits"].to(device),
                                                       no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
-                                                      mode=S.FROZEN_INFERENCE_T1)
+                                                      mode=S.FROZEN_INFERENCE_T1,
+                                                      masked_probabilities=legacy["probabilities"].to(device))
                 pre_masked = torch.where(mask[0].detach().cpu(), legacy["pair_logits"][0], torch.full_like(legacy["pair_logits"][0], float("-inf")))
                 post_masked = torch.where(post.safe_mask.detach().cpu(), post.pair_logits.detach().cpu(), torch.full_like(post.pair_logits.detach().cpu(), float("-inf")))
                 exact = (torch.equal(post.pair_logits.detach().cpu(), legacy["pair_logits"][0])
@@ -583,7 +584,8 @@ def main() -> None:
                     ppost = S.select_frozen_policy_action(pair_keys=pair_keys(permuted), pair_logits=result["pair_logits"].to(device),
                                                            no_assign_logit=result["no_assign_logit"].to(device),
                                                            safe_mask=permuted["tensors"]["safe_mask"][:, :psupport].to(device),
-                                                           mode=S.FROZEN_INFERENCE_T1)
+                                                           mode=S.FROZEN_INFERENCE_T1,
+                                                           masked_probabilities=result["probabilities"].to(device))
                     inference_order[permutation_name] += int(identity_from_tie(ppost.selected) != base_identity)
             actor_after_review[state_key] = module_digest(actor)
             require(actor_after_review[state_key] == actor_before[state_key], SOURCE_BLOCK, f"review_actor_mutation={state_key}")
@@ -622,11 +624,13 @@ def main() -> None:
                 selected = S.select_frozen_policy_action(pair_keys=pair_keys(record["payload"]), pair_logits=legacy["pair_logits"].to(device),
                                                           no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
                                                           mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                          snapshot_identity=record["snapshot_digest"], probe_seed=seed)
+                                                          snapshot_identity=record["snapshot_digest"], probe_seed=seed,
+                                                          masked_probabilities=legacy["probabilities"].to(device))
                 replay = S.select_frozen_policy_action(pair_keys=pair_keys(record["payload"]), pair_logits=legacy["pair_logits"].to(device),
                                                         no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
                                                         mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                        snapshot_identity=record["snapshot_digest"], probe_seed=seed)
+                                                        snapshot_identity=record["snapshot_digest"], probe_seed=seed,
+                                                        masked_probabilities=legacy["probabilities"].to(device))
                 execution["selector_calls"] += 2
                 selected_identity = identity_from_tie(selected.selected)
                 deterministic_identity = identity_from_tie(selected.deterministic_selection.selected)
@@ -697,7 +701,8 @@ def main() -> None:
                     selected = S.select_frozen_policy_action(pair_keys=pair_keys(permuted), pair_logits=legacy["pair_logits"].to(device),
                                                               no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=pmask,
                                                               mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                              snapshot_identity=record["snapshot_digest"], probe_seed=seed)
+                                                              snapshot_identity=record["snapshot_digest"], probe_seed=seed,
+                                                              masked_probabilities=legacy["probabilities"].to(device))
                     execution["selector_calls"] += 1
                     training_order[permutation_name] += int(identity_from_tie(selected.selected) != base_selection[(record["snapshot_digest"], seed)])
         torch.mps.synchronize()

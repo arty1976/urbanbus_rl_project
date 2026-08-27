@@ -143,6 +143,29 @@ def test_training_request_without_deadlock_remains_deterministic_t1() -> None:
                             float(torch.log(source_probability[result.selected_index])), abs_tol=0.0)
 
 
+def test_frozen_forward_probability_view_is_consumed_without_renormalization() -> None:
+    values = _inputs(pair_logits=[-1.0, -1.5, -2.0], no_assign_logit=2.0)
+    source_probability = _distribution(values)
+    result = S.select_frozen_policy_action(
+        pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
+        safe_mask=values["safe_mask"], mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+        snapshot_identity="snapshot-source-probability-view", probe_seed=7,
+        masked_probabilities=source_probability,
+    )
+    assert torch.equal(result.probabilities, source_probability)
+    assert math.isclose(float(result.log_probability),
+                        float(torch.log(source_probability[result.selected_index])), abs_tol=0.0)
+    invalid = source_probability.clone()
+    invalid[0] = -0.1
+    with pytest.raises(S.SelectionModeError):
+        S.select_frozen_policy_action(
+            pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
+            safe_mask=values["safe_mask"], mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            snapshot_identity="snapshot-source-probability-view", probe_seed=7,
+            masked_probabilities=invalid,
+        )
+
+
 def test_identity_keyed_deadlock_sampling_is_permutation_invariant_and_does_not_touch_global_rng() -> None:
     values = _inputs(pair_logits=[-1.0, -1.5, -2.0], no_assign_logit=2.0)
     # Different input orders represent the same semantic action support.
