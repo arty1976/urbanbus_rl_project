@@ -397,6 +397,67 @@ def _write_final_checkpoint(path: Path, model: Mapping[str, Any], training: Mapp
     return {"path": str(path), "sha256": sha256(path), **meta}
 
 
+def _frozen_review_replay(*, actor: torch.nn.Module, entries: Sequence[Mapping[str, Any]], FPS: Any, F1MOD: Any,
+                          H: Any, TIE: Any, device: torch.device) -> list[dict[str, Any]]:
+    """Pure T1-only inference on already-bound snapshots; no simulator-facing call."""
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        payload = FPS.load_snapshot(Path(str(entry["snapshot_root"])))
+        replay = F1MOD.replay(actor, payload, H, TIE, device)
+        require(replay["finite"] and replay["snapshot_digest"] == entry["snapshot_digest"]
+                and replay["selector"] == TIE.TIE_BREAK_CONTRACT_ID and float(replay["tolerance"]) == 0.0,
+                INTEGRITY_BLOCK, f"review_replay={entry['decision_id']}")
+        rows.append({"decision_id": entry["decision_id"], "window_id": entry["window_id"],
+                     "snapshot_digest": entry["snapshot_digest"], **replay})
+    require(len(rows) == 3 and len({row["snapshot_digest"] for row in rows}) == 3, INTEGRITY_BLOCK, "review_row_count")
+    return rows
+
+
+def _review_delta(initial: Sequence[Mapping[str, Any]], final: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    require([row["snapshot_digest"] for row in initial] == [row["snapshot_digest"] for row in final],
+            INTEGRITY_BLOCK, "review_snapshot_binding")
+    logit_deltas, probability_deltas = [], []
+    selected_mismatch = 0
+    for before, after in zip(initial, final):
+        require(len(before["pair_logits"]) == len(after["pair_logits"]) and len(before["probabilities"]) == len(after["probabilities"]),
+                INTEGRITY_BLOCK, "review_support_shape")
+        logit_deltas.extend(abs(float(left) - float(right)) for left, right in zip(before["pair_logits"], after["pair_logits"]))
+        logit_deltas.append(abs(float(before["no_assign_logit"]) - float(after["no_assign_logit"])))
+        probability_deltas.extend(abs(float(left) - float(right)) for left, right in zip(before["probabilities"], after["probabilities"]))
+        selected_mismatch += int(before["selected_identity"] != after["selected_identity"])
+    return {"review_rows": len(initial), "max_abs_logit_delta": max(logit_deltas, default=0.0),
+            "max_abs_probability_delta": max(probability_deltas, default=0.0), "selection_mismatch_count": selected_mismatch,
+            "interpretation_performed": False}
+
+
+def _learning_counters(*, model: Mapping[str, Any], rollout: Mapping[str, Any], prepared: Mapping[str, Any],
+                       training: Mapping[str, Any], review_delta: Mapping[str, Any]) -> dict[str, Any]:
+    eligible_by_id = {str(row["decision_id"]): row for row in prepared["e1_rows"]}
+    result: dict[str, Any] = {}
+    reward_ancestry_ids = []
+    for band in ("night", "offpeak", "peak"):
+        rows = [row for row in rollout["rows"] if str(row["time_band"]) == band]
+        eligible = [eligible_by_id[str(row["t"].assignment_step_id)] for row in rows]
+        ancestry = [row for row in eligible if float(row["reward_gae_component"]) != 0.0]
+        reward_ancestry_ids.extend(str(row["decision_id"]) for row in ancestry)
+        result[band] = {
+            "feasible_support_count": sum(len(row["t"].safe_pair_ids) > 0 for row in rows),
+            "categorical_sample_count": sum(bool(row["categorical_triggered"]) for row in rows),
+            "NO_ASSIGN_count": sum(bool(row["selected_is_no_assign"]) for row in rows),
+            "non_NO_ASSIGN_count": sum(not bool(row["selected_is_no_assign"]) for row in rows),
+            "candidate_execution_count": sum(row["action_type"] == "CANDIDATE" for row in rows),
+            "reward_bearing_transition_count": sum(float(row["t"].assignment_discounted_reward) != 0.0 for row in rows),
+            "reward_ancestry_count": len(ancestry), "actor_eligible_count": sum(bool(row["actor_eligible_e1"]) for row in eligible),
+        }
+    require(len(reward_ancestry_ids) == len(set(reward_ancestry_ids)), INTEGRITY_BLOCK, "duplicate_reward_ancestry")
+    return {"arm_id": model["arm_id"], "environment_seed": model["environment_seed"], "time_bands": result,
+            "actor_eligible_count": int(prepared["active_actor_rows"]), "assignment_actor_optimizer_steps": len(training["updates"]),
+            "assignment_critic_optimizer_steps": len(training["updates"]), "policy_tensor_delta": training["actor_changed"],
+            "critic_tensor_delta": training["critic_changed"], "logit_probability_shift_after_authorized_update": dict(review_delta),
+            "illegal_selection_count": 0, "Zero_Loss_violation_count": 0, "NaN_count": 0, "Inf_count": 0,
+            "duplicate_reward_ancestry_count": 0}
+
+
 def _block(root: Path, code: str, detail: str, counters: Mapping[str, Any], auth: Mapping[str, Any] | None) -> None:
     root.mkdir(parents=True, exist_ok=True)
     outputs = {"r18_execution_manifest.json": {"authorized": False, "failure": detail},
@@ -419,6 +480,7 @@ def execute(auth: Mapping[str, Any]) -> None:
     import joint_assignment_f1_execution_contract as FC
     import joint_assignment_frozen_policy_selector as S
     import joint_assignment_frozen_policy_snapshot as FPS
+    import joint_assignment_frozen_tie_break as TIE
     import joint_assignment_learning as JL
     import joint_candidate_plan_causal_bridge as CB
     import joint_candidate_plan_execution as PE
@@ -461,6 +523,12 @@ def execute(auth: Mapping[str, Any]) -> None:
         arms = list(dict(auth["envelope"])["selected_arms"])
         checkpoints = dict(checkpoint_contract["initial_inputs"])
         models = _load_models(arms=arms, checkpoints=checkpoints, config=config, H=H, JL=JL, device=device)
+        review_binding = dict(dict(auth["upstream"])["review_snapshot_binding"])
+        review_entries = [dict(row) for row in review_binding["entries"] if int(row["seed"]) == 20260822]
+        require(review_binding.get("verified") is True and review_binding.get("collection_digest") == "6c811022a5df4b3966ac14fce750f8bdd840a65a50e48285fe0c97ce157b889e"
+                and len(review_entries) == 3, AUTH_BLOCK, "review_binding")
+        initial_reviews = {arm_id: _frozen_review_replay(actor=model["actor"], entries=review_entries, FPS=FPS, F1MOD=F1MOD,
+                                                          H=H, TIE=TIE, device=device) for arm_id, model in models.items()}
         frozen_before = dict(dict(auth["module_freeze_contract"])["frozen_source_hashes"]["actual"])
         root.mkdir(parents=True)
         snapshots: list[dict[str, Any]] = []
@@ -499,14 +567,19 @@ def execute(auth: Mapping[str, Any]) -> None:
                              for arm_id, model in models.items()}
         counters["checkpoint_write"] += len(final_checkpoints)
         require(counters["checkpoint_write"] == 2, INTEGRITY_BLOCK, "checkpoint_count")
+        final_reviews = {arm_id: _frozen_review_replay(actor=F1MOD.strict_load(Path(final_checkpoints[arm_id]["path"]), H, JL, MC, device),
+                                                        entries=review_entries, FPS=FPS, F1MOD=F1MOD, H=H, TIE=TIE, device=device)
+                         for arm_id in models}
+        review_deltas = {arm_id: _review_delta(initial_reviews[arm_id], final_reviews[arm_id]) for arm_id in models}
+        learning = {arm_id: _learning_counters(model=models[arm_id], rollout=rollouts[arm_id], prepared=prepared[arm_id],
+                                                training=training[arm_id], review_delta=review_deltas[arm_id]) for arm_id in models}
         require(all(value == 0 for key, value in counters.items() if key in {"candidate_regeneration_after_selection", "candidate_regeneration_during_ppo", "local_search_rerun_during_ppo", "zero_loss_reevaluation_during_ppo", "future_leakage", "cross_window_gae", "duplicate_reward_ancestry", "test6_access", "github_push", "nan_or_inf", "candidate_identity_mismatch", "candidate_plan_execution_collapse", "serve_fallback", "zero_loss_violation", "illegal_or_masked_selection", "source_state_mutation_during_shadow_evaluation", "action_support_mutation"}), INTEGRITY_BLOCK, "integrity_counter")
         output = {
             "r18_execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
                                              "preflight": preflight, "arms": arms, "counters": counters, "selector": "R16 sealed E1 only"},
-            "r18_learning_path_audit.json": {arm_id: {"actor_eligible": prepared[arm_id]["active_actor_rows"],
-                                                        "reward_ancestry": sum(bool(row["actor_eligible_e1"]) for row in prepared[arm_id]["e1_rows"]),
-                                                        "updates": training[arm_id]["updates"], "actor_changed": training[arm_id]["actor_changed"],
-                                                        "critic_changed": training[arm_id]["critic_changed"]} for arm_id in models},
+            "r18_learning_path_audit.json": {"cells": learning, "initial_review_replay": initial_reviews,
+                                               "final_review_replay": final_reviews, "review_optimizer_exposure": 0,
+                                               "review_candidate_regeneration": 0, "interpretation_performed": False},
             "r18_candidate_support_audit.json": {arm_id: prepared[arm_id]["support_guard"] for arm_id in models},
             "r18_checkpoint_manifest.json": {"final": final_checkpoints, "test_only": True, "bounded": True, "non_promotable": True,
                                                "winner": False, "best_model": False, "promotion": False},

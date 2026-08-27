@@ -245,6 +245,41 @@ def _checkpoint_binding(r13: Path, r16: Path) -> dict[str, Any]:
     return {"all_eight_bound": True, "checkpoints": observed}
 
 
+def _review_snapshot_binding(r13: Path) -> dict[str, Any]:
+    """Revalidate each lossless review snapshot, not merely its collection digest."""
+    r13_binding = load_json(r13 / "bt8r13_review_binding.json")
+    collection_path = Path(str(r13_binding.get("historical_review_collection_path", "")))
+    collection = load_json(collection_path)
+    without_digest = dict(collection)
+    digest = without_digest.pop("collection_digest", None)
+    require(digest == REVIEW_COLLECTION_DIGEST and canonical_sha256(without_digest) == digest,
+            BINDING_BLOCK, "review_collection_digest")
+    entries = list(collection.get("entries", []))
+    require(len(entries) == 6 and len({str(row.get("snapshot_digest")) for row in entries}) == 6,
+            BINDING_BLOCK, "review_snapshot_count_or_unique")
+    checked: list[dict[str, Any]] = []
+    for entry in entries:
+        snapshot_root = collection_path.parent / str(entry.get("relative_path", ""))
+        manifest_path = snapshot_root / "snapshot_manifest.json"
+        manifest = load_json(manifest_path)
+        declared_manifest = manifest.get("manifest_sha256")
+        body = dict(manifest); body.pop("manifest_sha256", None)
+        tensor_path = snapshot_root / str(manifest.get("tensor_binary", ""))
+        require(declared_manifest == str(entry.get("snapshot_manifest_sha256"))
+                and canonical_sha256(body) == declared_manifest and tensor_path.is_file()
+                and manifest.get("tensor_binary_sha256") == sha256(tensor_path)
+                and manifest.get("snapshot_digest") == entry.get("snapshot_digest"),
+                BINDING_BLOCK, f"review_snapshot={entry.get('decision_id')}")
+        checked.append({"decision_id": str(entry["decision_id"]), "seed": int(entry["seed"]),
+                        "window_id": str(entry["window_id"]), "snapshot_digest": str(entry["snapshot_digest"]),
+                        "snapshot_root": str(snapshot_root.resolve()), "snapshot_manifest_sha256": str(declared_manifest)})
+    require(r13_binding.get("review_collection_digest") == REVIEW_COLLECTION_DIGEST
+            and int(r13_binding.get("unique_snapshot_count", -1)) == 6, BINDING_BLOCK, "r13_review_binding")
+    return {"collection_path": str(collection_path.resolve()), "collection_digest": digest,
+            "snapshot_count": 6, "unique_snapshot_count": 6, "entries": checked,
+            "optimizer_exposure": 0, "candidate_regeneration": 0, "verified": True}
+
+
 def _source_hash_binding(r16: Path) -> dict[str, Any]:
     r16_hashes = _file_hashes_from_r16(r16)
     required = {
@@ -561,6 +596,7 @@ def main() -> None:
                 and int(r16_evidence.get("training_snapshot_count", -1)) == 96,
                 BINDING_BLOCK, "snapshot_collection")
         checkpoint_binding = _checkpoint_binding(r13, r16)
+        review_snapshot_binding = _review_snapshot_binding(r13)
         source_binding = _source_hash_binding(r16)
         r18_path = PROJECT / R18_RUNNER_REL
         r18_test_path = PROJECT / R18_TEST_REL
@@ -589,7 +625,7 @@ def main() -> None:
                 "runtime_file_sha256": sha256(r8 / "bt8r8_e1_runtime_contract.json"),
                 "selection_path": str((r7 / "bt8r7_selected_minimal_contract.json").resolve()),
                 "selection_file_sha256": sha256(r7 / "bt8r7_selected_minimal_contract.json"), "contract_sha256": E1_CONTRACT_SHA256},
-            "review_collection_digest": REVIEW_COLLECTION_DIGEST,
+            "review_collection_digest": REVIEW_COLLECTION_DIGEST, "review_snapshot_binding": review_snapshot_binding,
             "training_collection_digest": TRAINING_COLLECTION_DIGEST, "checkpoint_binding": checkpoint_binding,
             "r16_modified_and_frozen_source_hashes": source_binding, "r18_executor": {"path": str(r18_path.resolve()), "sha256": r18_source_hash},
         }

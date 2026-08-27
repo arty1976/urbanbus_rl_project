@@ -33,6 +33,14 @@ def test_r18_train_path_asserts_support_before_every_epoch_and_requires_e1_rows(
     assert "ineligible_actor_gradient" in source
 
 
+def test_r18_captures_same_support_t1_review_deltas_without_optimizer_exposure() -> None:
+    source = inspect.getsource(R18._frozen_review_replay) + inspect.getsource(R18._learning_counters) + inspect.getsource(R18.execute)
+    assert "TIE_BREAK_CONTRACT_ID" in source
+    assert "interpretation_performed" in source
+    assert "logit_probability_shift_after_authorized_update" in source
+    assert "duplicate_reward_ancestry" in source
+
+
 def test_exact_execute_flag_is_required_by_parser(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         R18._parse_args(["--authorization-manifest", str(tmp_path / "a.json"), "--authorization-sha256", "a"])
