@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import weakref
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -36,6 +37,40 @@ R15_E1_REPAIR_LEVEL = "E1"
 
 class SelectionModeError(RuntimeError):
     """Fail-closed selector input or mode violation."""
+
+
+@dataclass(frozen=True, eq=False)
+class FrozenMaskedDistributionView:
+    """Factory-issued, byte-bound frozen masked policy distribution.
+
+    A caller cannot pass a bare probability tensor to the selector.  The
+    factory below creates this view directly from the frozen actor logits,
+    legal mask, and semantic action identities, then seals their CPU-byte
+    binding together with the one masked-distribution calculation.  The
+    selector verifies that binding again without launching a second softmax.
+    """
+
+    _pair_keys: tuple[tuple[str, str], ...]
+    _pair_logits: torch.Tensor
+    _no_assign_logit: torch.Tensor
+    _safe_mask: torch.Tensor
+    _probabilities: torch.Tensor
+    _binding_sha256: str
+
+    @property
+    def probabilities(self) -> torch.Tensor:
+        """A reporting copy; callers cannot mutate the sealed tensor in place."""
+        return self._probabilities.detach().clone()
+
+    @property
+    def binding_sha256(self) -> str:
+        return self._binding_sha256
+
+
+# A view must be issued by ``make_frozen_masked_distribution_view`` in this
+# process.  The registry blocks hand-constructed lookalikes; the independent
+# byte binding below catches any later tensor or metadata mutation.
+_ISSUED_DISTRIBUTION_VIEWS: weakref.WeakKeyDictionary[FrozenMaskedDistributionView, str] = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -104,6 +139,18 @@ def _single_probability_row(value: torch.Tensor) -> torch.Tensor:
     return value
 
 
+def _binding_tensor_bytes(value: torch.Tensor, label: str) -> bytes:
+    """Canonical CPU bytes used only for provenance binding, never softmax."""
+    _require(isinstance(value, torch.Tensor), f"{label}_NOT_TENSOR")
+    cpu = value.detach().cpu().contiguous()
+    return b"|".join((
+        label.encode("utf-8"),
+        str(cpu.dtype).encode("utf-8"),
+        repr(tuple(int(item) for item in cpu.shape)).encode("utf-8"),
+        cpu.numpy().tobytes(),
+    ))
+
+
 def _candidate_rows(pair_keys: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for index, pair in enumerate(pair_keys):
@@ -111,7 +158,95 @@ def _candidate_rows(pair_keys: Sequence[tuple[str, str]]) -> list[dict[str, str]
         agent_id, candidate_id = str(pair[0]), str(pair[1])
         _require(bool(agent_id) and bool(candidate_id), f"PAIR_KEY_IDENTITY_MISSING:{index}")
         rows.append({"agent_id": agent_id, "candidate_id": candidate_id})
+    identities = [(row["agent_id"], row["candidate_id"]) for row in rows]
+    _require(len(set(identities)) == len(identities), "PAIR_KEY_IDENTITY_DUPLICATED")
     return rows
+
+
+def _distribution_binding_sha256(*, pair_keys: Sequence[tuple[str, str]], pairs: torch.Tensor,
+                                 no_assign: torch.Tensor, mask: torch.Tensor,
+                                 probabilities: torch.Tensor) -> str:
+    """Bind one frozen masked probability view to its exact semantic input."""
+    candidate_ids = _candidate_rows(pair_keys)
+    digest = hashlib.sha256()
+    digest.update(R15_E1_CONTRACT_ID.encode("utf-8"))
+    digest.update(b"|FROZEN_MASKED_DISTRIBUTION_VIEW_V1|")
+    for index, row in enumerate(candidate_ids):
+        digest.update(f"{index}|{row['agent_id']}|{row['candidate_id']}|".encode("utf-8"))
+    digest.update(_binding_tensor_bytes(pairs, "pair_logits"))
+    digest.update(_binding_tensor_bytes(no_assign, "no_assign_logit"))
+    digest.update(_binding_tensor_bytes(mask, "safe_mask"))
+    digest.update(_binding_tensor_bytes(probabilities, "masked_probabilities"))
+    return digest.hexdigest()
+
+
+def _validate_decision_inputs(*, pair_keys: Sequence[tuple[str, str]], pair_logits: torch.Tensor,
+                              no_assign_logit: torch.Tensor, safe_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pairs = _single_pair_row(pair_logits, "PAIR_LOGITS")
+    mask = _single_pair_row(safe_mask, "SAFE_MASK")
+    no_assign = _single_no_assign(no_assign_logit)
+    _require(pairs.shape == mask.shape, "PAIR_LOGIT_MASK_SHAPE_MISMATCH")
+    _require(mask.dtype == torch.bool, "SAFE_MASK_DTYPE_INVALID")
+    _require(pairs.dtype.is_floating_point and no_assign.dtype.is_floating_point, "LOGIT_DTYPE_INVALID")
+    _require(pairs.device == mask.device == no_assign.device and pairs.dtype == no_assign.dtype, "LOGIT_DEVICE_OR_DTYPE_MISMATCH")
+    _require(len(pair_keys) == int(pairs.shape[1]), "PAIR_KEY_LOGIT_SHAPE_MISMATCH")
+    _candidate_rows(pair_keys)
+    safe_logits = pairs[mask]
+    _require(bool(torch.isfinite(safe_logits).all().item()) and bool(torch.isfinite(no_assign).all().item()),
+             "NONFINITE_LEGAL_LOGIT")
+    return pairs, mask, no_assign
+
+
+def make_frozen_masked_distribution_view(*, pair_keys: Sequence[tuple[str, str]], pair_logits: torch.Tensor,
+                                         no_assign_logit: torch.Tensor, safe_mask: torch.Tensor) -> FrozenMaskedDistributionView:
+    """Calculate and seal the sole masked distribution for one frozen forward.
+
+    This is the only public route to a categorical distribution view.  It
+    intentionally accepts logits and a legal mask, not an externally supplied
+    probability tensor, so the R16 selector cannot become a reweighting API.
+    """
+    pairs, mask, no_assign = _validate_decision_inputs(
+        pair_keys=pair_keys, pair_logits=pair_logits, no_assign_logit=no_assign_logit, safe_mask=safe_mask)
+    canonical_pair_keys = tuple((str(pair[0]), str(pair[1])) for pair in pair_keys)
+    probabilities = H.masked_distribution(pairs, no_assign, mask)
+    _require(tuple(probabilities.shape) == (1, int(pairs.shape[1]) + 1), "MASKED_DISTRIBUTION_SHAPE_MISMATCH")
+    _require(bool(torch.isfinite(probabilities).all().item()), "NONFINITE_MASKED_PROBABILITY")
+    _require(bool((probabilities >= 0).all().item()), "NEGATIVE_MASKED_PROBABILITY")
+    _require(bool((probabilities[0, :-1][~mask[0]] == 0).all().item()), "UNSAFE_ACTION_HAS_POLICY_MASS")
+    sealed_pairs = pairs.detach().clone()
+    sealed_no_assign = no_assign.detach().clone()
+    sealed_mask = mask.detach().clone()
+    sealed_probabilities = probabilities.detach().clone()
+    binding = _distribution_binding_sha256(pair_keys=canonical_pair_keys, pairs=sealed_pairs,
+                                           no_assign=sealed_no_assign, mask=sealed_mask,
+                                           probabilities=sealed_probabilities)
+    view = FrozenMaskedDistributionView(_pair_keys=canonical_pair_keys, _pair_logits=sealed_pairs,
+                                        _no_assign_logit=sealed_no_assign, _safe_mask=sealed_mask,
+                                        _probabilities=sealed_probabilities, _binding_sha256=binding)
+    _ISSUED_DISTRIBUTION_VIEWS[view] = binding
+    return view
+
+
+def _bound_distribution_view(*, view: FrozenMaskedDistributionView) -> tuple[tuple[tuple[str, str], ...], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fail closed unless a factory-issued view still binds to this decision."""
+    _require(isinstance(view, FrozenMaskedDistributionView), "FROZEN_MASKED_DISTRIBUTION_VIEW_REQUIRED")
+    issued = _ISSUED_DISTRIBUTION_VIEWS.get(view)
+    _require(isinstance(issued, str), "FROZEN_MASKED_DISTRIBUTION_VIEW_NOT_ISSUED")
+    pair_keys = tuple((str(pair[0]), str(pair[1])) for pair in view._pair_keys)
+    pairs, mask, no_assign = _validate_decision_inputs(
+        pair_keys=pair_keys, pair_logits=view._pair_logits, no_assign_logit=view._no_assign_logit,
+        safe_mask=view._safe_mask)
+    probabilities = _single_probability_row(view._probabilities)
+    _require(probabilities.shape == (1, pairs.shape[1] + 1), "MASKED_PROBABILITIES_SHAPE_MISMATCH")
+    _require(probabilities.device == pairs.device and probabilities.dtype == pairs.dtype,
+             "MASKED_PROBABILITIES_DEVICE_OR_DTYPE_MISMATCH")
+    _require(bool(torch.isfinite(probabilities).all().item()), "NONFINITE_MASKED_PROBABILITY")
+    _require(bool((probabilities >= 0).all().item()), "NEGATIVE_MASKED_PROBABILITY")
+    _require(bool((probabilities[0, :-1][~mask[0]] == 0).all().item()), "UNSAFE_ACTION_HAS_POLICY_MASS")
+    observed = _distribution_binding_sha256(pair_keys=pair_keys, pairs=pairs, no_assign=no_assign, mask=mask,
+                                            probabilities=probabilities)
+    _require(observed == issued == view._binding_sha256, "FROZEN_MASKED_DISTRIBUTION_VIEW_BINDING_MISMATCH")
+    return pair_keys, pairs, mask, no_assign, probabilities[0]
 
 
 def _stable_uniform(*, snapshot_identity: str, action: TIE.CanonicalAction, probe_seed: int) -> float:
@@ -166,48 +301,25 @@ def _bound_training_rng(*, snapshot_identity: str | None, probe_seed: int | None
     return snapshot_identity, int(probe_seed)
 
 
-def select_frozen_policy_action(*, pair_keys: Sequence[tuple[str, str]], pair_logits: torch.Tensor,
-                                no_assign_logit: torch.Tensor, safe_mask: torch.Tensor,
+def select_frozen_policy_action(*, distribution_view: FrozenMaskedDistributionView,
                                 mode: str = FROZEN_INFERENCE_T1,
                                 snapshot_identity: str | None = None,
-                                probe_seed: int | None = None,
-                                masked_probabilities: torch.Tensor | None = None) -> FrozenPolicySelection:
+                                probe_seed: int | None = None) -> FrozenPolicySelection:
     """Select exactly one semantic action from the pre-existing frozen policy.
 
     The training mode is deliberately not an unconditional sampler.  It is the
     R15 E1 deadlock branch: categorical sampling happens only when the same
     T1 deterministic selection is ``NO_ASSIGN`` *and* a legal candidate exists.
     No action receives added mass; ``NO_ASSIGN`` remains in the full sampling
-    distribution and can still be selected.  A caller that has already obtained
-    the frozen masked distribution from the actor-forward selection path may
-    pass it through ``masked_probabilities``.  That view is validated and used
-    unchanged; it is never re-normalized or reweighted.  This avoids a second
-    device kernel becoming a needless source of numerical variation.
+    distribution and can still be selected.  The selector consumes only a
+    factory-issued ``FrozenMaskedDistributionView``—never raw logits, masks,
+    or probability tensors.  The view is byte-bound to one exact frozen
+    forward input, avoiding both a probability-modification escape hatch and a
+    second device softmax kernel.
     """
     _require(mode in {FROZEN_INFERENCE_T1, FROZEN_MASKED_CATEGORICAL_TRAINING}, "UNKNOWN_SELECTION_MODE")
-    pairs = _single_pair_row(pair_logits, "PAIR_LOGITS")
-    mask = _single_pair_row(safe_mask, "SAFE_MASK")
-    no_assign = _single_no_assign(no_assign_logit)
-    _require(pairs.shape == mask.shape, "PAIR_LOGIT_MASK_SHAPE_MISMATCH")
-    _require(mask.dtype == torch.bool, "SAFE_MASK_DTYPE_INVALID")
-    _require(pairs.dtype.is_floating_point and no_assign.dtype.is_floating_point, "LOGIT_DTYPE_INVALID")
-    _require(pairs.device == mask.device == no_assign.device and pairs.dtype == no_assign.dtype, "LOGIT_DEVICE_OR_DTYPE_MISMATCH")
-    _require(len(pair_keys) == int(pairs.shape[1]), "PAIR_KEY_LOGIT_SHAPE_MISMATCH")
-
+    pair_keys, pairs, mask, no_assign, probabilities = _bound_distribution_view(view=distribution_view)
     candidate_ids = _candidate_rows(pair_keys)
-    safe_logits = pairs[mask]
-    _require(bool(torch.isfinite(safe_logits).all().item()) and bool(torch.isfinite(no_assign).all().item()),
-             "NONFINITE_LEGAL_LOGIT")
-    if masked_probabilities is None:
-        probabilities = H.masked_distribution(pairs, no_assign, mask)[0]
-    else:
-        provided = _single_probability_row(masked_probabilities)
-        _require(provided.shape == (1, pairs.shape[1] + 1), "MASKED_PROBABILITIES_SHAPE_MISMATCH")
-        _require(provided.device == pairs.device and provided.dtype == pairs.dtype, "MASKED_PROBABILITIES_DEVICE_OR_DTYPE_MISMATCH")
-        probabilities = provided[0]
-    _require(bool(torch.isfinite(probabilities).all().item()), "NONFINITE_MASKED_PROBABILITY")
-    _require(bool((probabilities >= 0).all().item()), "NEGATIVE_MASKED_PROBABILITY")
-    _require(bool((probabilities[:-1][~mask[0]] == 0).all().item()), "UNSAFE_ACTION_HAS_POLICY_MASS")
 
     try:
         actions = TIE.canonical_actions(
@@ -253,7 +365,7 @@ def select_frozen_policy_action(*, pair_keys: Sequence[tuple[str, str]], pair_lo
         trigger_reason=trigger_reason,
         selected=selected,
         deterministic_selection=deterministic,
-        probabilities=probabilities,
+        probabilities=probabilities.detach().clone(),
         log_probability=log_probability,
         canonical_rng_keyset_sha256=keyset_sha,
         pair_logits=pairs[0],

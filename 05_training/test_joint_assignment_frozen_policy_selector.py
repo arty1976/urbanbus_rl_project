@@ -7,6 +7,7 @@ load checkpoints, create candidates, run a rollout, or create an optimizer.
 from __future__ import annotations
 
 import math
+import inspect
 import sys
 from pathlib import Path
 
@@ -44,13 +45,17 @@ def _inputs(*, pair_keys: list[tuple[str, str]] | None = None,
 def _select(values: dict[str, object], *, mode: str = S.FROZEN_INFERENCE_T1,
             snapshot_identity: str | None = None, probe_seed: int | None = None):
     return S.select_frozen_policy_action(
-        pair_keys=values["pair_keys"],
-        pair_logits=values["pair_logits"],
-        no_assign_logit=values["no_assign_logit"],
-        safe_mask=values["safe_mask"],
+        distribution_view=_view(values),
         mode=mode,
         snapshot_identity=snapshot_identity,
         probe_seed=probe_seed,
+    )
+
+
+def _view(values: dict[str, object]):
+    return S.make_frozen_masked_distribution_view(
+        pair_keys=values["pair_keys"], pair_logits=values["pair_logits"],
+        no_assign_logit=values["no_assign_logit"], safe_mask=values["safe_mask"],
     )
 
 
@@ -143,27 +148,81 @@ def test_training_request_without_deadlock_remains_deterministic_t1() -> None:
                             float(torch.log(source_probability[result.selected_index])), abs_tol=0.0)
 
 
-def test_frozen_forward_probability_view_is_consumed_without_renormalization() -> None:
+def test_frozen_forward_probability_view_is_sealed_and_consumed_without_renormalization() -> None:
     values = _inputs(pair_logits=[-1.0, -1.5, -2.0], no_assign_logit=2.0)
     source_probability = _distribution(values)
-    result = S.select_frozen_policy_action(
+    view = S.make_frozen_masked_distribution_view(
         pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
-        safe_mask=values["safe_mask"], mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+        safe_mask=values["safe_mask"],
+    )
+    result = S.select_frozen_policy_action(
+        distribution_view=view, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
         snapshot_identity="snapshot-source-probability-view", probe_seed=7,
-        masked_probabilities=source_probability,
     )
     assert torch.equal(result.probabilities, source_probability)
     assert math.isclose(float(result.log_probability),
                         float(torch.log(source_probability[result.selected_index])), abs_tol=0.0)
-    invalid = source_probability.clone()
-    invalid[0] = -0.1
-    with pytest.raises(S.SelectionModeError):
+    assert "masked_probabilities" not in inspect.signature(S.select_frozen_policy_action).parameters
+
+    # The public selector no longer accepts a raw, even normalized, tensor.
+    foreign = torch.tensor([0.2, 0.2, 0.2, 0.4], dtype=torch.float32)
+    with pytest.raises(S.SelectionModeError, match="FROZEN_MASKED_DISTRIBUTION_VIEW_REQUIRED"):
         S.select_frozen_policy_action(
-            pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
-            safe_mask=values["safe_mask"], mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            distribution_view=foreign, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
             snapshot_identity="snapshot-source-probability-view", probe_seed=7,
-            masked_probabilities=invalid,
         )
+
+
+def test_sealed_probability_view_rejects_post_seal_mutation_and_input_mismatch() -> None:
+    values = _inputs(pair_logits=[-1.0, -1.5, -2.0], no_assign_logit=2.0)
+    view = S.make_frozen_masked_distribution_view(
+        pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
+        safe_mask=values["safe_mask"],
+    )
+    mutated = torch.tensor([[0.2, 0.2, 0.2, 0.4]], dtype=torch.float32)
+    object.__setattr__(view, "_probabilities", mutated)
+    with pytest.raises(S.SelectionModeError, match="FROZEN_MASKED_DISTRIBUTION_VIEW_BINDING_MISMATCH"):
+        S.select_frozen_policy_action(
+            distribution_view=view, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            snapshot_identity="snapshot-seal", probe_seed=1,
+        )
+
+    intact = S.make_frozen_masked_distribution_view(
+        pair_keys=values["pair_keys"], pair_logits=values["pair_logits"], no_assign_logit=values["no_assign_logit"],
+        safe_mask=values["safe_mask"],
+    )
+    altered_logits = intact._pair_logits.clone()
+    altered_logits[0, 0] += 0.25
+    object.__setattr__(intact, "_pair_logits", altered_logits)
+    with pytest.raises(S.SelectionModeError, match="FROZEN_MASKED_DISTRIBUTION_VIEW_BINDING_MISMATCH"):
+        S.select_frozen_policy_action(
+            distribution_view=intact, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            snapshot_identity="snapshot-seal", probe_seed=1,
+        )
+    identity_mutation = _view(values)
+    object.__setattr__(identity_mutation, "_pair_keys", tuple(reversed(identity_mutation._pair_keys)))
+    with pytest.raises(S.SelectionModeError, match="FROZEN_MASKED_DISTRIBUTION_VIEW_BINDING_MISMATCH"):
+        S.select_frozen_policy_action(
+            distribution_view=identity_mutation, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            snapshot_identity="snapshot-seal", probe_seed=1,
+        )
+
+    fresh = _view(values)
+    forged = S.FrozenMaskedDistributionView(
+        _pair_keys=fresh._pair_keys, _pair_logits=fresh._pair_logits, _no_assign_logit=fresh._no_assign_logit,
+        _safe_mask=fresh._safe_mask, _probabilities=fresh._probabilities, _binding_sha256=fresh.binding_sha256,
+    )
+    with pytest.raises(S.SelectionModeError, match="FROZEN_MASKED_DISTRIBUTION_VIEW_NOT_ISSUED"):
+        S.select_frozen_policy_action(
+            distribution_view=forged, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+            snapshot_identity="snapshot-seal", probe_seed=1,
+        )
+    reporting_copy = fresh.probabilities
+    reporting_copy[0, 0] = 0.0
+    assert S.select_frozen_policy_action(
+        distribution_view=fresh, mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
+        snapshot_identity="snapshot-seal", probe_seed=1,
+    ).probabilities[0] > 0.0
 
 
 def test_identity_keyed_deadlock_sampling_is_permutation_invariant_and_does_not_touch_global_rng() -> None:

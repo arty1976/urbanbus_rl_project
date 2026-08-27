@@ -122,7 +122,7 @@ PROBE_COLUMNS = [
     "source_log_probability", "returned_log_probability", "log_probability_abs_delta", "support_size",
     "legal_candidate_count", "no_assign_in_support", "no_assign_probability", "no_assign_source_index",
     "no_assign_removed", "finite", "legal", "zero_loss_feasible", "r15_identity_match", "same_seed_identity_match",
-    "canonical_rng_keyset_sha256", "actor_state_sha256",
+    "canonical_rng_keyset_sha256", "frozen_distribution_view_sha256", "actor_state_sha256",
 ]
 
 
@@ -214,6 +214,7 @@ def counters() -> dict[str, int]:
         "local_search_rerun": 0, "zero_loss_reevaluation": 0, "reward_settlement": 0, "parameter_mutation": 0,
         "checkpoint_write": 0, "checkpoint_mutation": 0, "test6_access": 0, "github_push": 0,
         "inference_frozen_forwards": 0, "training_probe_frozen_forwards": 0, "order_probe_frozen_forwards": 0,
+        "frozen_distribution_factory_calls": 0,
         "selector_calls": 0, "illegal_selection": 0, "zero_loss_violation": 0, "nan_or_inf": 0,
         "invalid_candidate_identity": 0, "empty_support_crash": 0,
     }
@@ -292,6 +293,38 @@ def make_actor(*, H: Any, config: Mapping[str, Any], state: Mapping[str, torch.T
     return actor
 
 
+def frozen_forward_with_distribution_view(*, actor: torch.nn.Module, payload: Mapping[str, Any], device: torch.device,
+                                          selector: Any, tie: Any) -> dict[str, Any]:
+    """One frozen forward plus the sole, sealed masked-distribution calculation.
+
+    R16 uses this new boundary only for post-implementation selection.  It
+    leaves the immutable R1 forward source intact for the explicit pre/post
+    inference comparison, while preventing a raw probability tensor from
+    crossing into the selector.
+    """
+    meta, cpu = payload["metadata"], payload["tensors"]
+    tensors = {name: value.to(device) for name, value in cpu.items()}
+    support = int(meta["selectable_pair_count"])
+    with torch.no_grad():
+        raw, no_assign = actor(global_feats=tensors["global_feats"], demand_feats=tensors["demand_feats"],
+                               agent_feats=tensors["agent_feats"], agent_mask=tensors["agent_mask"],
+                               candidate_feats=tensors["candidate_feats"], pair_agent_index=tensors["pair_agent_index"],
+                               safe_mask=tensors["safe_mask"])
+        logits, mask = raw[:, :support], tensors["safe_mask"][:, :support]
+        view = selector.make_frozen_masked_distribution_view(
+            pair_keys=pair_keys(payload), pair_logits=logits, no_assign_logit=no_assign, safe_mask=mask)
+    pair_scores = logits[0].detach().cpu().tolist()
+    selection = tie.select_exact_tie(candidate_ids=meta["candidate_ids"], pair_scores=pair_scores,
+                                     safe_mask=mask[0].detach().cpu().tolist(),
+                                     no_assign_score=float(no_assign[0, 0].detach().cpu()))
+    probabilities = view.probabilities.detach().cpu()
+    return {"pair_logits": logits.detach().cpu(), "no_assign_logit": no_assign.detach().cpu(),
+            "probabilities": probabilities, "distribution_view": view, "selection": selection,
+            "support_size": support,
+            "finite": bool(torch.isfinite(logits).all().item() and torch.isfinite(no_assign).all().item()
+                           and torch.isfinite(probabilities).all().item())}
+
+
 def max_delta(left: torch.Tensor, right: torch.Tensor) -> float:
     require(tuple(left.shape) == tuple(right.shape), INFERENCE_BLOCK, "tensor_shape")
     if torch.equal(left.detach().cpu(), right.detach().cpu()):
@@ -322,9 +355,10 @@ def build_source_path_audit(*, source: Mapping[str, Any]) -> dict[str, Any]:
             "path": existing["historical_s3_training"], "call_site": "H.select at preserved R13 line 596",
             "function": "multi_agent_candidate_assignment_head.select", "semantics": "historical positional masked argmax; untouched"},
         "new_r16_boundary": {
-            "path": SELECTOR_REL, "function": "select_frozen_policy_action", "modes": [
+            "path": SELECTOR_REL, "functions": ["make_frozen_masked_distribution_view", "select_frozen_policy_action"], "modes": [
                 "FROZEN_INFERENCE_T1", "FROZEN_MASKED_CATEGORICAL_TRAINING"],
             "training_trigger": "generic R15 E1 predicate: deterministic T1 NO_ASSIGN and legal candidate support > 0",
+            "distribution_boundary": "one H.masked_distribution calculation sealed with logits/mask/semantic identity byte binding; raw probability tensors are not accepted",
             "unknown_mode": "fail closed", "r16_validation_explicit_call_site": RUNNER_REL,
             "historical_executor_retrofit": "forbidden: R13/F1 execution sources are frozen evidence",
             "future_call_site": "separately authorized R17 executor only"},
@@ -547,13 +581,13 @@ def main() -> None:
             for record in review_records:
                 payload = record["payload"]
                 legacy = R1.frozen_forward(actor, payload, device=device, head=H, tie=TIE)
-                execution["inference_frozen_forwards"] += 1
+                post_forward = frozen_forward_with_distribution_view(actor=actor, payload=payload, device=device, selector=S, tie=TIE)
+                execution["inference_frozen_forwards"] += 2
+                execution["frozen_distribution_factory_calls"] += 1
                 support = int(legacy["support_size"])
                 mask = payload["tensors"]["safe_mask"][:, :support].to(device)
-                post = S.select_frozen_policy_action(pair_keys=pair_keys(payload), pair_logits=legacy["pair_logits"].to(device),
-                                                      no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
-                                                      mode=S.FROZEN_INFERENCE_T1,
-                                                      masked_probabilities=legacy["probabilities"].to(device))
+                post = S.select_frozen_policy_action(distribution_view=post_forward["distribution_view"],
+                                                      mode=S.FROZEN_INFERENCE_T1)
                 pre_masked = torch.where(mask[0].detach().cpu(), legacy["pair_logits"][0], torch.full_like(legacy["pair_logits"][0], float("-inf")))
                 post_masked = torch.where(post.safe_mask.detach().cpu(), post.pair_logits.detach().cpu(), torch.full_like(post.pair_logits.detach().cpu(), float("-inf")))
                 exact = (torch.equal(post.pair_logits.detach().cpu(), legacy["pair_logits"][0])
@@ -578,14 +612,12 @@ def main() -> None:
                     "agent": R1.agent_permutation(payload),
                     "combined": R1.candidate_permutation(R1.agent_permutation(payload)),
                 }.items():
-                    result = R1.frozen_forward(actor, permuted, device=device, head=H, tie=TIE)
+                    result = frozen_forward_with_distribution_view(actor=actor, payload=permuted, device=device, selector=S, tie=TIE)
                     execution["order_probe_frozen_forwards"] += 1
+                    execution["frozen_distribution_factory_calls"] += 1
                     psupport = int(result["support_size"])
-                    ppost = S.select_frozen_policy_action(pair_keys=pair_keys(permuted), pair_logits=result["pair_logits"].to(device),
-                                                           no_assign_logit=result["no_assign_logit"].to(device),
-                                                           safe_mask=permuted["tensors"]["safe_mask"][:, :psupport].to(device),
-                                                           mode=S.FROZEN_INFERENCE_T1,
-                                                           masked_probabilities=result["probabilities"].to(device))
+                    ppost = S.select_frozen_policy_action(distribution_view=result["distribution_view"],
+                                                           mode=S.FROZEN_INFERENCE_T1)
                     inference_order[permutation_name] += int(identity_from_tie(ppost.selected) != base_identity)
             actor_after_review[state_key] = module_digest(actor)
             require(actor_after_review[state_key] == actor_before[state_key], SOURCE_BLOCK, f"review_actor_mutation={state_key}")
@@ -612,26 +644,23 @@ def main() -> None:
         identities_by_snapshot: dict[str, set[str]] = defaultdict(set)
         for record in training_records:
             actor = training_actors[record["policy_family"]]
-            legacy = R1.frozen_forward(actor, record["payload"], device=device, head=H, tie=TIE)
+            legacy = frozen_forward_with_distribution_view(actor=actor, payload=record["payload"], device=device, selector=S, tie=TIE)
             execution["training_probe_frozen_forwards"] += 1
+            execution["frozen_distribution_factory_calls"] += 1
             support = int(legacy["support_size"])
             mask = record["payload"]["tensors"]["safe_mask"][:, :support].to(device)
             source_probability = legacy["probabilities"][0]
-            source_probability_view = legacy["probabilities"].to(device)[0]
+            source_probability_view = legacy["distribution_view"].probabilities[0]
             source_no_assign_logit = legacy["no_assign_logit"][0, 0]
             candidates = canonical_actions_for(record["payload"], legacy, TIE)
             legal_candidate_count = sum(not action.is_no_assign for action in candidates)
             for seed in PROBE_SEEDS:
-                selected = S.select_frozen_policy_action(pair_keys=pair_keys(record["payload"]), pair_logits=legacy["pair_logits"].to(device),
-                                                          no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
+                selected = S.select_frozen_policy_action(distribution_view=legacy["distribution_view"],
                                                           mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                          snapshot_identity=record["snapshot_digest"], probe_seed=seed,
-                                                          masked_probabilities=legacy["probabilities"].to(device))
-                replay = S.select_frozen_policy_action(pair_keys=pair_keys(record["payload"]), pair_logits=legacy["pair_logits"].to(device),
-                                                        no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=mask,
+                                                          snapshot_identity=record["snapshot_digest"], probe_seed=seed)
+                replay = S.select_frozen_policy_action(distribution_view=legacy["distribution_view"],
                                                         mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                        snapshot_identity=record["snapshot_digest"], probe_seed=seed,
-                                                        masked_probabilities=legacy["probabilities"].to(device))
+                                                        snapshot_identity=record["snapshot_digest"], probe_seed=seed)
                 execution["selector_calls"] += 2
                 selected_identity = identity_from_tie(selected.selected)
                 deterministic_identity = identity_from_tie(selected.deterministic_selection.selected)
@@ -677,7 +706,9 @@ def main() -> None:
                     "no_assign_probability": float(selected.probabilities[-1].detach().cpu()), "no_assign_source_index": no_assign_source_index(selected),
                     "no_assign_removed": False, "finite": finite, "legal": legal, "zero_loss_feasible": legal,
                     "r15_identity_match": selected_identity == expected_identity, "same_seed_identity_match": same_seed,
-                    "canonical_rng_keyset_sha256": selected.canonical_rng_keyset_sha256 or "", "actor_state_sha256": training_actor_digest[record["policy_family"]],
+                    "canonical_rng_keyset_sha256": selected.canonical_rng_keyset_sha256 or "",
+                    "frozen_distribution_view_sha256": legacy["distribution_view"].binding_sha256,
+                    "actor_state_sha256": training_actor_digest[record["policy_family"]],
                 })
         selector_rng_after = torch.random.get_rng_state().clone()
         torch.mps.synchronize()
@@ -699,16 +730,14 @@ def main() -> None:
                 "agent": R1.agent_permutation(payload),
                 "combined": R1.candidate_permutation(R1.agent_permutation(payload)),
             }.items():
-                legacy = R1.frozen_forward(actor, permuted, device=device, head=H, tie=TIE)
+                legacy = frozen_forward_with_distribution_view(actor=actor, payload=permuted, device=device, selector=S, tie=TIE)
                 execution["order_probe_frozen_forwards"] += 1
+                execution["frozen_distribution_factory_calls"] += 1
                 psupport = int(legacy["support_size"])
-                pmask = permuted["tensors"]["safe_mask"][:, :psupport].to(device)
                 for seed in PROBE_SEEDS:
-                    selected = S.select_frozen_policy_action(pair_keys=pair_keys(permuted), pair_logits=legacy["pair_logits"].to(device),
-                                                              no_assign_logit=legacy["no_assign_logit"].to(device), safe_mask=pmask,
+                    selected = S.select_frozen_policy_action(distribution_view=legacy["distribution_view"],
                                                               mode=S.FROZEN_MASKED_CATEGORICAL_TRAINING,
-                                                              snapshot_identity=record["snapshot_digest"], probe_seed=seed,
-                                                              masked_probabilities=legacy["probabilities"].to(device))
+                                                              snapshot_identity=record["snapshot_digest"], probe_seed=seed)
                     execution["selector_calls"] += 1
                     training_order[permutation_name] += int(identity_from_tie(selected.selected) != base_selection[(record["snapshot_digest"], seed)])
         torch.mps.synchronize()
@@ -748,6 +777,9 @@ def main() -> None:
             "selector_contract_id": S.R15_E1_CONTRACT_ID, "E2_enabled": False, "E3_enabled": False,
             "inference_mode": S.FROZEN_INFERENCE_T1, "training_selection_mode": S.FROZEN_MASKED_CATEGORICAL_TRAINING,
             "training_trigger": "generic R15 E1 predicate only; no BD/cell label special case",
+            "raw_probability_tensor_input_accepted": False,
+            "sealed_distribution_view_required": True,
+            "sealed_distribution_view_rule": "factory computes H.masked_distribution once from frozen logits/mask and byte-binds semantic identities, logits, mask, no-assign logit, and probabilities; selector rehashes without another softmax",
             "policy_probabilities_modified": False, "policy_parameters_modified": False,
             "training_authorized": False, "optimizer_authorized": False, "actual_execution_authorized": False,
             "separate_bounded_training_authorization_required": True, "automatic_training_authorization": False,
@@ -783,13 +815,16 @@ def main() -> None:
                                                     "logit_delta_max": max((float(row["logit_delta"]) for row in inference_rows), default=0.0),
                                                     "masked_logit_delta_max": max((float(row["masked_logit_delta"]) for row in inference_rows), default=0.0),
                                                     "probability_delta_max": max((float(row["probability_delta"]) for row in inference_rows), default=0.0),
-                                                    "selection_mismatches": 0, "t1_tie_semantics_mismatches": 0, "passed": True},
+                                                    "selection_mismatches": 0, "t1_tie_semantics_mismatches": 0,
+                                                    "sealed_distribution_factory_calls": execution["frozen_distribution_factory_calls"], "passed": True},
             "categorical_distribution_equivalence.json": {"reviewed_training_snapshot_count": len(training_records), "probe_row_count": len(probe_rows),
                                                             "probability_abs_tolerance": PROBABILITY_ABS_TOLERANCE,
                                                             "max_abs_probability_delta": max(distribution_deltas, default=0.0), "support_mismatch": support_mismatches,
                                                             "no_assign_support_mismatch": no_assign_support_mismatches,
                                                             "log_probability_abs_tolerance": LOG_PROBABILITY_ABS_TOLERANCE,
-                                                            "max_abs_log_probability_delta": max(log_deltas, default=0.0), "passed": True},
+                                                            "max_abs_log_probability_delta": max(log_deltas, default=0.0),
+                                                            "raw_probability_tensor_override_accepted": False,
+                                                            "sealed_distribution_view_binding_verified": True, "passed": True},
             "training_selection_probe_summary.json": {"parquet": parquet, "r15_exact_identity_replay": True, "time_band_exposure": exposure,
                                                         "bd_expected_exposure": {f"{cell}:{band}": count for (cell, band), count in EXPECTED_BD_EXPOSURE.items()},
                                                         "ac_categorical_trigger_count": ac_trigger_count, "no_reward_or_kpi_interpretation": True},
@@ -814,11 +849,11 @@ def main() -> None:
             f"# BT8-R16 final report\n\n- gate: `{PASS_GATE}`\n- classification: `{CLASSIFICATION}`\n- source commit: `{source['source_commit']}`\n\n"
             "R16 implemented only the generic R15 E1 selection boundary. No training, optimizer, causal rollout, reward settlement, checkpoint mutation, or authorization was performed.\n\n"
             "## Required answers\n\n"
-            "1. **Q1 — E1 implementation:** Yes. It adds no Actor logit, weight, or probability modification.\n"
+            "1. **Q1 — E1 implementation:** Yes. It adds no Actor logit, weight, or probability modification; the selector accepts no raw probability tensor.\n"
             "2. **Q2 — frozen inference/T1:** Yes. The pre/post tensor, logit, masked-logit, probability, support, selected identity, and T1 tie checks are exact.\n"
             "3. **Q3 — NO_ASSIGN:** Yes. It remains a legal terminal action with its original logit and probability.\n"
-            "4. **Q4 — training distribution:** Yes. The generic R15 deadlock branch samples the original full masked categorical distribution, including NO_ASSIGN.\n"
-            "5. **Q5 — log probability:** Yes. The returned value is `log(source masked probability[selected source index])`.\n"
+            "4. **Q4 — training distribution:** Yes. The generic R15 deadlock branch samples the original full masked categorical distribution, including NO_ASSIGN, through a sealed single-forward view.\n"
+            "5. **Q5 — log probability:** Yes. The returned value is `log(source masked probability[selected source index])` from that same byte-bound view.\n"
             "6. **Q6 — same seed:** Yes. Canonical identity-keyed replay is exact and does not advance global Torch RNG.\n"
             "7. **Q7 — order invariance:** Yes. Candidate, agent, and combined semantic-identity failures are zero.\n"
             "8. **Q8 — BD exposure:** Yes. Every BD-R1/BD-R2 time band reproduces the positive R15 candidate exposure.\n"
