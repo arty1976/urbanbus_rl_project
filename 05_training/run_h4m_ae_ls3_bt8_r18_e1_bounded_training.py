@@ -316,15 +316,23 @@ def _assert_support_roundtrip(*, rows: Sequence[Mapping[str, Any]], CC: Any) -> 
         transition, loaded = row["t"], row["loaded"]
         metadata = loaded["metadata"]
         pairs = [(str(item["agent_id"]), str(item["candidate_id"])) for item in metadata["candidate_ids"]]
-        require(pairs == list(transition.safe_pair_ids) and metadata["candidate_support_digest"] == transition.action_support_digest,
+        snapshot_support_digest = str(metadata["candidate_support_digest"])
+        action_support_digest = CC.action_support_digest(
+            pairs, no_assign_index=int(metadata["no_assign_index"]))
+        require(pairs == list(transition.safe_pair_ids)
+                and int(metadata["selectable_pair_count"]) == len(pairs)
+                and int(metadata["no_assign_index"]) == int(transition.no_assign_index)
+                and snapshot_support_digest == str(transition.provenance["candidate_support_digest"])
+                and action_support_digest == transition.action_support_digest,
                 INTEGRITY_BLOCK, f"ACTION_SUPPORT_MUTATED_BETWEEN_ROLLOUT_AND_UPDATE:{transition.assignment_step_id}")
         buffer.add(transition)
-        update_supports.append(str(metadata["candidate_support_digest"]))
+        update_supports.append(action_support_digest)
     try:
         result = buffer.assert_action_support_unchanged(update_supports)
     except Exception as exc:  # noqa: BLE001
         raise R18Error(INTEGRITY_BLOCK, f"ACTION_SUPPORT_MUTATED_BETWEEN_ROLLOUT_AND_UPDATE:{exc}") from exc
-    return dict(result)
+    return {**dict(result), "snapshot_support_digest_domain_checked": len(rows),
+            "action_support_digest_domain_checked": len(rows)}
 
 
 def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support_guard: Mapping[str, Any],
