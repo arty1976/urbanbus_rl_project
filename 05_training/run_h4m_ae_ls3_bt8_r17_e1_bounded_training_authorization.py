@@ -241,22 +241,31 @@ def _checkpoint_binding(r13: Path, r16: Path) -> dict[str, Any]:
 def _source_hash_binding(r16: Path) -> dict[str, Any]:
     r16_hashes = _file_hashes_from_r16(r16)
     required = {
-        "selector": ROOT / "joint_assignment_frozen_policy_selector.py",
-        "joint_actor_head": ROOT / "multi_agent_candidate_assignment_head.py",
-        "t1_selector": ROOT / "joint_assignment_frozen_tie_break.py",
-        "reward_v2": ROOT / "rewards" / "mappo_reward_v1.py",
-        "zero_loss": ROOT / "run_h4m_ae_ls3_bt6_postrepair_r2_training.py",
-        "candidate_plan_bridge": ROOT / "joint_candidate_plan_causal_bridge.py",
-        "e1_eligibility": ROOT / "joint_assignment_e1_eligibility.py",
+        "implementation:selector": ROOT / "joint_assignment_frozen_policy_selector.py",
+        "implementation:r16_runner": ROOT / "run_h4m_ae_ls3_bt8_r16_frozen_policy_masked_categorical_exploration_validation.py",
+        "implementation:selector_test": ROOT / "test_joint_assignment_frozen_policy_selector.py",
+        "frozen:gatv2_operational_actor_critic": ROOT / "run_prompt5_e01_dl1_suseong_gatv2_mappo_critic_joint_learning_validation.py",
+        "frozen:reward_v2": ROOT / "rewards" / "mappo_reward_v1.py",
+        "frozen:zero_loss": ROOT / "simulator" / "zero_loss_admission_adapter.py",
+        "frozen:local_search_authority": ROOT / "local_search_contract.py",
+        "frozen:candidate_support_deconfounding": ROOT / "joint_candidate_support_snapshot.py",
+        "frozen:causal_bridge": ROOT / "causal_kpi_bridge.py",
+        "frozen:r9_8_authorization": ROOT / "simulator_authorization.py",
+        "frozen:credit_contract": ROOT / "joint_assignment_credit_contract.py",
+        "frozen:joint_assignment_learning": ROOT / "joint_assignment_learning.py",
+        "frozen:r9_7_gate": ROOT / "run_h4m_ae_r9_7_gate.py",
+        "frozen:r9_8_gate": ROOT / "run_h4m_ae_r9_8_gate.py",
+        "frozen:joint_actor_head": ROOT / "multi_agent_candidate_assignment_head.py",
+        "frozen:t1_selector": ROOT / "joint_assignment_frozen_tie_break.py",
+        "extra:candidate_plan_bridge": ROOT / "joint_candidate_plan_causal_bridge.py",
+        "extra:e1_eligibility": ROOT / "joint_assignment_e1_eligibility.py",
+        "extra:t1_selector": ROOT / "joint_assignment_frozen_tie_break.py",
     }
     expected = {
-        "selector": "72ebffd78db3d193ab4643c040090cecbacd23d9478d9b2a6fb54f124da65fc6",
-        "joint_actor_head": r16_hashes["frozen:joint_actor_head"],
-        "t1_selector": r16_hashes["frozen:t1_selector"],
-        "reward_v2": r16_hashes["frozen:reward_v2"],
-        "zero_loss": r16_hashes["frozen:zero_loss"],
-        "candidate_plan_bridge": r16_hashes["extra:candidate_plan_bridge"],
-        "e1_eligibility": r16_hashes["extra:e1_eligibility"],
+        "implementation:selector": str(r16_hashes["05_training/joint_assignment_frozen_policy_selector.py"]["after_sha256"]),
+        "implementation:r16_runner": str(r16_hashes["05_training/run_h4m_ae_ls3_bt8_r16_frozen_policy_masked_categorical_exploration_validation.py"]["after_sha256"]),
+        "implementation:selector_test": str(r16_hashes["05_training/test_joint_assignment_frozen_policy_selector.py"]["after_sha256"]),
+        **{key: str(value) for key, value in r16_hashes.items() if key.startswith(("frozen:", "extra:"))},
     }
     actual = {key: sha256(path) for key, path in required.items()}
     require(actual == expected, BINDING_BLOCK, "r16_frozen_source_hash")
