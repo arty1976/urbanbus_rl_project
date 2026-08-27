@@ -88,15 +88,18 @@ def test_r18_r2_support_roundtrip_fails_closed_on_dynamic_mutation(mutation: str
         R18._assert_support_roundtrip(rows=[row], CC=CC)
 
 
-def test_r18_r2_repair_does_not_change_rollout_training_or_frozen_inference_functions() -> None:
+def test_r18_r6_keeps_rollout_and_frozen_inference_hashes_and_freezes_instrumented_train_hash() -> None:
     expected = {
         "_rollout_arm": "9011b5903a0a1e6be56777f40f1a3e2ba4e1e2094af7b2c2fa3f21f475f756fc",
-        "_train_arm": "b8a181014557a4f549c57a48f6e67af1f097070fff3eee087317202472dfddef",
+        "_train_arm": "3f1e3178288b80b73319fd7708877ec6fff6e6e5f320aff796e72f83c7a0ad6e",
         "_frozen_review_replay": "ddc010943f5bfb024ed2a33309e2719ede6ac8dc3f38442a7b7ff98847fd622c",
     }
     actual = {name: hashlib.sha256(inspect.getsource(getattr(R18, name)).encode()).hexdigest()
               for name in expected}
     assert actual == expected
+    train_source = inspect.getsource(R18._train_arm)
+    assert "TRACE.build_epoch_trace_rows" in train_source
+    assert "TRACE.actor_batch_forward_no_grad" in train_source
 
 
 def test_r18_captures_same_support_t1_review_deltas_without_optimizer_exposure() -> None:

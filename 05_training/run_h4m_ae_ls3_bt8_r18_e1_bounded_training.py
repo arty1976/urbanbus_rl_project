@@ -22,6 +22,8 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+import r18_durable_trace as TRACE
+
 
 STAGE = "H4M-AE-R9.8-LS3-BT8-R18"
 PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_E1_MINIMAL_BOUNDED_TRAINING_AND_CAUSAL_LEARNING_PATH_EVIDENCE_COMPLETE"
@@ -346,6 +348,7 @@ def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support
     actor, critic, actor_opt, critic_opt = model["actor"], model["critic"], model["actor_opt"], model["critic_opt"]
     updates: list[dict[str, Any]] = []
     ratios: list[list[float]] = [[] for _ in rows]
+    epoch_trace_rows: list[dict[str, Any]] = []
     for epoch in range(3):
         require(support_guard.get("behavior_equals_update_support") is True and int(support_guard.get("checked", 0)) == 24,
                 INTEGRITY_BLOCK, "ACTION_SUPPORT_MUTATED_BETWEEN_ROLLOUT_AND_UPDATE")
@@ -374,6 +377,10 @@ def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support
         require(inactive_grad == 0.0 and eligible_grad > 0.0, INTEGRITY_BLOCK, f"ineligible_actor_gradient={model['arm_id']}")
         actor_norm = float(torch.sqrt(sum((parameter.grad.detach() ** 2).sum() for parameter in actor.parameters() if parameter.grad is not None)).detach().cpu())
         actor_opt.step(); counters["actor_optimizer_step"] += 1; counters["raw_optimizer_step"] += 1
+        post_logits, post_no_assign = TRACE.actor_batch_forward_no_grad(actor, batch)
+        epoch_trace_rows.extend(TRACE.build_epoch_trace_rows(
+            model=model, prepared=prepared, epoch_index=epoch + 1, loss=loss,
+            logits_pre=logits, no_assign_pre=no_assign, logits_post=post_logits, no_assign_post=post_no_assign, JL=JL))
         AUTH.require_capability(AUTH.TRAINING, site=f"{STAGE}:{model['arm_id']}:critic:{epoch + 1}")
         critic_opt.zero_grad(set_to_none=True); loss["critic_loss"].backward()
         critic_norm = float(torch.sqrt(sum((parameter.grad.detach() ** 2).sum() for parameter in critic.parameters() if parameter.grad is not None)).detach().cpu())
@@ -389,7 +396,8 @@ def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support
                         "critic_gradient_norm": critic_norm, "ineligible_logit_gradient_max_abs": inactive_grad,
                         "ratio_min": min(float(x) for x in loss["ratio"].detach().cpu()), "ratio_max": max(float(x) for x in loss["ratio"].detach().cpu())})
     require(max(row["ineligible_logit_gradient_max_abs"] for row in updates) == 0.0, INTEGRITY_BLOCK, "ineligible_gradient_leakage")
-    return {"updates": updates, "ratios": ratios, "actor_final_digest": _module_digest(actor), "critic_final_digest": _module_digest(critic),
+    return {"updates": updates, "ratios": ratios, "epoch_trace_rows": epoch_trace_rows,
+            "actor_final_digest": _module_digest(actor), "critic_final_digest": _module_digest(critic),
             "actor_changed": _module_digest(actor) != str(model["actor_initial_digest"]), "critic_changed": _module_digest(critic) != str(model["critic_initial_digest"])}
 
 
@@ -581,6 +589,7 @@ def execute(auth: Mapping[str, Any]) -> None:
         review_deltas = {arm_id: _review_delta(initial_reviews[arm_id], final_reviews[arm_id]) for arm_id in models}
         learning = {arm_id: _learning_counters(model=models[arm_id], rollout=rollouts[arm_id], prepared=prepared[arm_id],
                                                 training=training[arm_id], review_delta=review_deltas[arm_id]) for arm_id in models}
+        trace_artifacts = TRACE.write_trace_artifacts(root=root, models=models, prepared=prepared, training=training)
         require(all(value == 0 for key, value in counters.items() if key in {"candidate_regeneration_after_selection", "candidate_regeneration_during_ppo", "local_search_rerun_during_ppo", "zero_loss_reevaluation_during_ppo", "future_leakage", "cross_window_gae", "duplicate_reward_ancestry", "test6_access", "github_push", "nan_or_inf", "candidate_identity_mismatch", "candidate_plan_execution_collapse", "serve_fallback", "zero_loss_violation", "illegal_or_masked_selection", "source_state_mutation_during_shadow_evaluation", "action_support_mutation"}), INTEGRITY_BLOCK, "integrity_counter")
         output = {
             "r18_execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
@@ -591,6 +600,9 @@ def execute(auth: Mapping[str, Any]) -> None:
             "r18_candidate_support_audit.json": {arm_id: prepared[arm_id]["support_guard"] for arm_id in models},
             "r18_checkpoint_manifest.json": {"final": final_checkpoints, "test_only": True, "bounded": True, "non_promotable": True,
                                                "winner": False, "best_model": False, "promotion": False},
+            "trace_instrumentation_contract.json": TRACE.contract_payload(
+                source_commit=str(auth["source_commit"]), training_authorized=True, bounded_rerun_authorized=True),
+            "r18_durable_trace_artifact_manifest.json": trace_artifacts,
             "test_results.json": {"execution_counters": counters, "hard_failures": [], "warnings": [], "github_push": False},
             "gate_decision.json": {"stage": STAGE, "gate": PASS_GATE, "classification": "A_R18_E1_CAUSAL_LEARNING_PATH_OBSERVED",
                                    "source_commit": auth["source_commit"], "next_step": "separate frozen-policy review only"},
