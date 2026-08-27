@@ -547,7 +547,9 @@ def main() -> None:
         config: Mapping[str, Any] | None = None
         for entry in entries:
             snapshot_root = Path(str(entry["snapshot_root"]))
-            require(snapshot_root.is_dir() and sha256(snapshot_root / "snapshot_manifest.json") == entry["snapshot_manifest_sha256"],
+            snapshot_manifest = load_json(snapshot_root / "snapshot_manifest.json")
+            require(snapshot_root.is_dir() and snapshot_manifest.get("manifest_sha256") == entry["snapshot_manifest_sha256"]
+                    and snapshot_manifest.get("snapshot_digest") == entry["snapshot_digest"],
                     BINDING_BLOCK, f"snapshot_manifest={entry['decision_id']}")
             payload = FPS.load_snapshot(snapshot_root)
             metadata, tensors = payload["metadata"], payload["tensors"]
