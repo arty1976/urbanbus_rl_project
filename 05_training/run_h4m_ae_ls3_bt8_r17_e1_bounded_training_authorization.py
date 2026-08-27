@@ -37,9 +37,12 @@ R14_SOURCE = "36ccbaa84e06af3202560802fd3371066839a7c5"
 R15_SOURCE = "8e24652fa0523e751077ca0c4500b20d626fc517"
 R16_SOURCE = "90a8a69227c1166c8d311d54f53fe9795dfeb7cd"
 R4_SOURCE = "32fbf2b3043166188bde891a5c450702e7db3607"
+R8_SOURCE = "a3cc98280e434c41520245f3fa13e3a76dd5d438"
+R7_SOURCE = "caf91442a2a837c0ea132bbaead26b55d13c4b8f"
 S3_CONTRACT_SHA256 = "66e2fb35de3aa767780d9f0f001d774919e059e580f4410fe1d01bd96b185393"
 R15_CONTRACT_SHA256 = "cd864dcbba5ec42b26c6399aa92480596455aa104e752627676b3e6ac2de0c84"
 R16_IMPLEMENTATION_CONTRACT_SHA256 = "485691360307318b4e05bd4f42d65c2d31a43b43196272e94432629e3f91435a"
+E1_CONTRACT_SHA256 = "eb84543a9fc06dcf730e49aa3895d9fe26d2244a05ce340986b7449418205ad9"
 REVIEW_COLLECTION_DIGEST = "6c811022a5df4b3966ac14fce750f8bdd840a65a50e48285fe0c97ce157b889e"
 TRAINING_COLLECTION_DIGEST = "954d50f384ebe4318dbe9565c4c30c5e6a0b6249dd06ca441ff5abc2af08fb63"
 
@@ -50,6 +53,8 @@ R14_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R14_S3_SAME_INPUT_FROZEN_POLICY_FAC
 R15_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R15_MINIMAL_EXPLORATION_DEADLOCK_REPAIR_SELECTION_AUDIT_COMPLETE"
 R16_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R16_FROZEN_POLICY_MASKED_CATEGORICAL_EXPLORATION_IMPLEMENTATION_AND_EQUIVALENCE_VALIDATION_COMPLETE"
 R4_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R4_FRESH_V2_ACTOR_TRAINING_AND_NOVEL_EXPOSURE_DESIGN_COMPLETE"
+R8_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R8_E1_REWARD_ANCESTRY_ACTOR_ELIGIBILITY_IMPLEMENTATION_AND_EQUIVALENCE_VALIDATION_COMPLETE"
+R7_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R7_MINIMAL_ACTOR_CRITIC_SEED_FACTORIZATION_AND_CREDIT_ELIGIBILITY_SELECTION_COMPLETE"
 
 ROOT = Path(__file__).resolve().parent
 PROJECT = ROOT.parent
@@ -61,6 +66,8 @@ R14_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r14_s3_frozen_factor_review_20260827
 R15_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r15_minimal_exploration_deadlock_repair_selection_audit_20260827_194419+09:00"
 R16_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r16_frozen_policy_masked_categorical_exploration_validation_20260827_205833+09:00"
 R4_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r4_v2_actor_fresh_training_design_20260823_122459+0900"
+R8_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r8_e1_eligibility_validation_20260825_190658+09:00"
+R7_NAME = "pv8_r2a_r8e_r3_r_h4m_ae_ls3_bt8_r7_seed_factorization_credit_eligibility_20260825_124641+09:00"
 
 R17_RUNNER_REL = "05_training/run_h4m_ae_ls3_bt8_r17_e1_bounded_training_authorization.py"
 R17_TEST_REL = "05_training/test_h4m_ae_ls3_bt8_r17_e1_bounded_training_authorization.py"
@@ -376,6 +383,7 @@ def module_freeze_contract(*, source_hashes: Mapping[str, Any]) -> dict[str, Any
         "training_selection_mode": "FROZEN_MASKED_CATEGORICAL_TRAINING",
         "inference_evaluation_mode": "FROZEN_INFERENCE_T1",
         "sealed_distribution_view_required": True,
+        "e1_contract_sha256": E1_CONTRACT_SHA256,
     }
 
 
@@ -505,6 +513,8 @@ def main() -> None:
                 and source["git_status_porcelain"] == "", SOURCE_BLOCK, "source_scope_or_dirty_tree")
         upstream_paths = {
             "r4": locate_timestamped_artifact(name=R4_NAME, gate=R4_GATE, source=R4_SOURCE),
+            "r7": locate_timestamped_artifact(name=R7_NAME, gate=R7_GATE, source=R7_SOURCE),
+            "r8": locate_timestamped_artifact(name=R8_NAME, gate=R8_GATE, source=R8_SOURCE),
             "r11": locate_timestamped_artifact(name=R11_NAME, gate=R11_GATE, source=R11_SOURCE),
             "r12": locate_timestamped_artifact(name=R12_NAME, gate=R12_GATE, source=R12_SOURCE),
             "r13": locate_timestamped_artifact(name=R13_NAME, gate=R13_GATE, source=R13_SOURCE),
@@ -514,11 +524,11 @@ def main() -> None:
         }
         manifest_audits = {key: manifest_audit(value) for key, value in upstream_paths.items()}
         require(all(item["all_match"] for item in manifest_audits.values()), BINDING_BLOCK, "upstream_manifest_hash")
-        for key, expected_gate, expected_source in (("r4", R4_GATE, R4_SOURCE), ("r11", R11_GATE, R11_SOURCE), ("r12", R12_GATE, R12_SOURCE),
+        for key, expected_gate, expected_source in (("r4", R4_GATE, R4_SOURCE), ("r7", R7_GATE, R7_SOURCE), ("r8", R8_GATE, R8_SOURCE), ("r11", R11_GATE, R11_SOURCE), ("r12", R12_GATE, R12_SOURCE),
                                                      ("r13", R13_GATE, R13_SOURCE), ("r14", R14_GATE, R14_SOURCE),
                                                      ("r15", R15_GATE, R15_SOURCE), ("r16", R16_GATE, R16_SOURCE)):
             _require_gate(upstream_paths[key], expected_gate, expected_source, key)
-        r4, r11, r12, r13, r14, r15, r16 = (upstream_paths[key] for key in ("r4", "r11", "r12", "r13", "r14", "r15", "r16"))
+        r4, r7, r8, r11, r12, r13, r14, r15, r16 = (upstream_paths[key] for key in ("r4", "r7", "r8", "r11", "r12", "r13", "r14", "r15", "r16"))
         r15_contract = load_json(r15 / "selected_minimal_exploration_repair_contract.json")
         require(r15_contract.get("contract_sha256") == R15_CONTRACT_SHA256 and r15_contract.get("contract_id") == "LS3_BT8_R15_E1_FROZEN_POLICY_MASKED_CATEGORICAL_SAMPLING_V1"
                 and r15_contract.get("repair_level") == "E1" and r15_contract.get("training_authorized") is False,
@@ -534,6 +544,15 @@ def main() -> None:
         s3 = load_json(r11 / "bt8r11_selected_seed_repair_contract.json")
         require(s3.get("sha256") == S3_CONTRACT_SHA256 and canonical_sha256({key: value for key, value in s3.items() if key != "sha256"}) == S3_CONTRACT_SHA256,
                 BINDING_BLOCK, "s3_contract")
+        e1_runtime = load_json(r8 / "bt8r8_e1_runtime_contract.json")
+        e1_selection = load_json(r7 / "bt8r7_selected_minimal_contract.json")
+        require(e1_runtime.get("contract_sha256") == E1_CONTRACT_SHA256
+                and e1_runtime.get("contract_id") == "LS3_BT8_R7_E1_REWARD_ANCESTRY_ACTOR_ELIGIBILITY_V1"
+                and e1_runtime.get("sequence") == ["frozen trajectory GAE", "frozen seed-local N0 full-batch normalization", "E1 Actor eligibility mask"],
+                BINDING_BLOCK, "e1_runtime_contract")
+        require(e1_selection.get("sha256") == E1_CONTRACT_SHA256 and e1_selection.get("selected_option") == "E1"
+                and canonical_sha256({key: value for key, value in e1_selection.items() if key != "sha256"}) == E1_CONTRACT_SHA256,
+                BINDING_BLOCK, "e1_selection_contract")
         r12_cells_contract = load_json(r12 / "bt8r12_s3_cell_contract.json")
         r16_evidence = load_json(r16 / "evidence_binding_audit.json")
         require(r16_evidence.get("review_collection_digest") == REVIEW_COLLECTION_DIGEST
@@ -566,7 +585,11 @@ def main() -> None:
             "timestamped_artifacts": {key: str(path.resolve()) for key, path in upstream_paths.items()},
             "manifest_audits": manifest_audits, "r15_contract_sha256": R15_CONTRACT_SHA256,
             "r16_implementation_contract_sha256": R16_IMPLEMENTATION_CONTRACT_SHA256,
-            "s3_contract_sha256": S3_CONTRACT_SHA256, "review_collection_digest": REVIEW_COLLECTION_DIGEST,
+            "s3_contract_sha256": S3_CONTRACT_SHA256, "e1_contract": {"runtime_path": str((r8 / "bt8r8_e1_runtime_contract.json").resolve()),
+                "runtime_file_sha256": sha256(r8 / "bt8r8_e1_runtime_contract.json"),
+                "selection_path": str((r7 / "bt8r7_selected_minimal_contract.json").resolve()),
+                "selection_file_sha256": sha256(r7 / "bt8r7_selected_minimal_contract.json"), "contract_sha256": E1_CONTRACT_SHA256},
+            "review_collection_digest": REVIEW_COLLECTION_DIGEST,
             "training_collection_digest": TRAINING_COLLECTION_DIGEST, "checkpoint_binding": checkpoint_binding,
             "r16_modified_and_frozen_source_hashes": source_binding, "r18_executor": {"path": str(r18_path.resolve()), "sha256": r18_source_hash},
         }

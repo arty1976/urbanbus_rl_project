@@ -111,7 +111,8 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
     require(module.get("training_selection_mode") == "FROZEN_MASKED_CATEGORICAL_TRAINING"
             and module.get("inference_evaluation_mode") == "FROZEN_INFERENCE_T1"
             and module.get("E1_only") is True and module.get("E2_rescue") is False and module.get("E3_temperature_or_floor") is False
-            and module.get("sealed_distribution_view_required") is True, AUTH_BLOCK, "selector_freeze")
+            and module.get("sealed_distribution_view_required") is True
+            and module.get("e1_contract_sha256") == "eb84543a9fc06dcf730e49aa3895d9fe26d2244a05ce340986b7449418205ad9", AUTH_BLOCK, "selector_freeze")
     checkpoints = dict(dict(payload.get("checkpoint_contract", {})).get("initial_inputs", {}))
     require(set(checkpoints) == {"initial:AC-R1", "initial:AC-R2", "initial:BD-R1", "initial:BD-R2"}, AUTH_BLOCK, "checkpoint_set")
     for arm in arms:
@@ -443,6 +444,14 @@ def execute(auth: Mapping[str, Any]) -> None:
         current_frozen = R17._source_hash_binding(r16_path)
         bound_frozen = dict(dict(auth["module_freeze_contract"])["frozen_source_hashes"])
         require(current_frozen == bound_frozen, AUTH_BLOCK, "frozen_source_mutation")
+        e1_contract_entry = dict(dict(auth["upstream"])["e1_contract"])
+        e1_runtime_path = Path(str(e1_contract_entry["runtime_path"]))
+        e1_selection_path = Path(str(e1_contract_entry["selection_path"]))
+        require(e1_runtime_path.is_file() and sha256(e1_runtime_path) == e1_contract_entry["runtime_file_sha256"]
+                and e1_selection_path.is_file() and sha256(e1_selection_path) == e1_contract_entry["selection_file_sha256"]
+                and e1_contract_entry["contract_sha256"] == E1.E1_CONTRACT_SHA256, AUTH_BLOCK, "e1_contract_file")
+        r7_contract = json.loads(e1_selection_path.read_text(encoding="utf-8"))
+        E1.bind_e1_contract(r7_contract)
         require(bool(torch.backends.mps.is_built()) and bool(torch.backends.mps.is_available()), MPS_BLOCK, "mps_unavailable")
         device = torch.device("mps:0")
         preflight = {"mps_built": True, "mps_available": True, "device": str(device), "cpu_fallback": 0}
