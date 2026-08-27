@@ -36,7 +36,7 @@ def _r14():
 def _probe_rows():
     rows = []
     for band in R17.TIME_BANDS:
-        rows.append({"cell_id": "BD-R1", "probe_seed": 0, "selected_is_no_assign": False, "time_band": band})
+        rows.append({"cell_id": "BD-R1", "probe_seed": 0, "selected_identity": "agent::candidate", "time_band": band})
     return rows
 
 

@@ -310,7 +310,8 @@ def select_minimal_envelope(*, r12_cells: Sequence[Mapping[str, Any]], r12_windo
             and int(bd_audit.get("actor_eligible_rows", -1)) == 0, NO_SAFE_BLOCK, "bd_deadlock_evidence")
     counts = {band: 0 for band in TIME_BANDS}
     for row in r16_probe_rows:
-        if str(row.get("cell_id")) == "BD-R1" and int(row.get("probe_seed", -1)) == 0 and not bool(row.get("selected_is_no_assign", True)):
+        selected_identity = str(row.get("selected_identity", "NO_ASSIGN"))
+        if str(row.get("cell_id")) == "BD-R1" and int(row.get("probe_seed", -1)) == 0 and selected_identity not in {"NO_ASSIGN", "NO_ASSIGN_KEEP_CURRENT_PLANS"}:
             band = str(row.get("time_band"))
             if band in counts:
                 counts[band] += 1
