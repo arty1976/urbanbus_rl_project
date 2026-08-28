@@ -74,6 +74,19 @@ REQUIRED_TRACE_FIELDS = [
     "per_row_gradient_vector_persisted",
 ]
 
+OPTIONAL_FACTORIZED_TRACE_FIELDS = [
+    "factorized_actor_contract_id",
+    "stage1_assign_log_prob",
+    "stage1_assign_probability",
+    "stage1_no_assign_log_prob",
+    "stage1_no_assign_probability",
+    "stage2_selected_candidate_log_prob",
+    "stage2_selected_candidate_probability",
+    "stage2_conditional_candidate_probability_sum",
+    "reconstructed_final_log_prob",
+    "reconstructed_final_probability",
+]
+
 STABLE_IDENTITY_FIELDS = [
     "arm_id",
     "environment_seed",
@@ -112,11 +125,13 @@ def trace_schema_payload() -> dict[str, Any]:
         "schema_version": 1,
         "stable_identity_fields": list(STABLE_IDENTITY_FIELDS),
         "required_trace_fields": list(REQUIRED_TRACE_FIELDS),
+        "optional_factorized_trace_fields": list(OPTIONAL_FACTORIZED_TRACE_FIELDS),
         "artifact_files": dict(TRACE_PARQUET_FILES),
         "serialization_notes": {
             "reward_ancestry_source_ids": "JSON array string, not recomputed",
             "per_row_gradient_vector_persisted": False,
             "probabilities": "observational detached forward quantities",
+            "factorized_fields": "optional R18-R16 observational ASSIGN gate / conditional candidate / reconstructed final log-probability quantities",
         },
         "invariants": {
             "instrumentation_only": True,
@@ -158,6 +173,7 @@ def contract_payload(*, source_commit: str | None = None, source_sha256: Mapping
         "new_source_commit": source_commit,
         "new_source_sha256": dict(source_sha256 or {}),
         "future_trace_artifacts": dict(TRACE_PARQUET_FILES),
+        "optional_factorized_trace_fields": list(OPTIONAL_FACTORIZED_TRACE_FIELDS),
     }
 
 
@@ -445,6 +461,10 @@ def build_epoch_trace_rows(*, model: Mapping[str, Any], prepared: Mapping[str, A
     actor_denominator = float(loss.get("actor_denominator", 1.0))
     _require(math.isfinite(actor_denominator) and actor_denominator >= 1.0, "TRACE_ACTOR_DENOMINATOR_INVALID", str(epoch_index))
     entropy_coef = float(loss.get("entropy_coef", 0.0))
+    optional_factorized = loss.get("factorized_trace", {})
+    if optional_factorized is None:
+        optional_factorized = {}
+    _require(isinstance(optional_factorized, Mapping), "TRACE_FACTORIZED_TRACE_INVALID", str(epoch_index))
 
     rows: list[dict[str, Any]] = []
     for index, base in enumerate(base_rows):
@@ -485,6 +505,19 @@ def build_epoch_trace_rows(*, model: Mapping[str, Any], prepared: Mapping[str, A
             "relative_logit_delta_vs_NO_ASSIGN": selected_logit_delta - no_assign_logit_delta,
             "relative_probability_delta_vs_NO_ASSIGN": selected_probability_delta - no_assign_probability_delta,
         }
+        for field in OPTIONAL_FACTORIZED_TRACE_FIELDS:
+            if field not in optional_factorized:
+                continue
+            value = optional_factorized[field]
+            if isinstance(value, torch.Tensor):
+                if value.ndim == 0:
+                    row[field] = _finite_float(value.detach().cpu(), f"TRACE_{field.upper()}_INVALID", base["decision_id"])
+                else:
+                    row[field] = _finite_float(value.detach().cpu()[index], f"TRACE_{field.upper()}_INVALID", base["decision_id"])
+            elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                row[field] = _finite_float(value[index], f"TRACE_{field.upper()}_INVALID", base["decision_id"])
+            else:
+                row[field] = str(value) if field == "factorized_actor_contract_id" else _finite_float(value, f"TRACE_{field.upper()}_INVALID", base["decision_id"])
         rows.append(row)
     return rows
 

@@ -53,6 +53,8 @@ HEAD_ID = "MULTI_AGENT_JOINT_ASSIGNMENT_HEAD_V1"
 HEAD_VERSION = "LS3_JA2_V1"
 CANDIDATE_SENSITIVE_HEAD_ID = "MULTI_AGENT_JOINT_ASSIGNMENT_HEAD_V2_CANDIDATE_CONTEXT"
 CANDIDATE_SENSITIVE_HEAD_VERSION = "LS3_BT8_R3_V2"
+FACTORIZED_ASSIGN_CANDIDATE_HEAD_ID = "MULTI_AGENT_JOINT_ASSIGNMENT_HEAD_V3_FACTORIZED_ASSIGN_THEN_CANDIDATE"
+FACTORIZED_ASSIGN_CANDIDATE_HEAD_VERSION = "LS3_BT8_R18_R16_V3"
 SELECTION_SEMANTICS = "SHADOW_UNTRAINED_ARCHITECTURE_VALIDATION_ONLY"
 NEG_INF = float("-inf")
 
@@ -90,6 +92,36 @@ CANDIDATE_SENSITIVE_HEAD_CONTRACT = {
     "candidate_rank_used": False,
     "legacy_actor_checkpoint_strict_compatible": False,
     "no_assign_scorer_changed": False,
+    "trained": False,
+}
+
+FACTORIZED_ASSIGN_THEN_CANDIDATE_HEAD_CONTRACT = {
+    **CANDIDATE_SENSITIVE_HEAD_CONTRACT,
+    "head_id": FACTORIZED_ASSIGN_CANDIDATE_HEAD_ID,
+    "version": FACTORIZED_ASSIGN_CANDIDATE_HEAD_VERSION,
+    "architecture": "FACTORIZED_ASSIGN_THEN_CANDIDATE",
+    "stage1": "BINARY_ASSIGN_VS_NO_ASSIGN_GATE",
+    "stage2": "CONDITIONAL_CANDIDATE_SOFTMAX",
+    "probability_model": {
+        "P(NO_ASSIGN)": "P_gate(NO_ASSIGN)",
+        "P(candidate_i)": "P_gate(ASSIGN) * P_candidate(candidate_i | ASSIGN)",
+    },
+    "no_assign_candidate_head_gradient": "ZERO",
+    "legacy_direct_no_assign_scorer_removed_from_action_softmax": True,
+    "no_assign_scorer_changed": True,
+    "candidate_selected_behavior": "gate + conditional candidate ranker both train",
+    "assign_vs_no_assign_gate_competition_preserved": True,
+    "shared_softmax_candidate_no_assign_coupling_removed": True,
+    "no_assign_remains_available": True,
+    "zero_feasible_candidates": "P(NO_ASSIGN)=1 without empty-softmax",
+    "one_feasible_candidate": "conditional candidate probability is 1",
+    "variable_candidate_count": True,
+    "variable_agent_count": True,
+    "reward_v2_changed": False,
+    "gae_changed": False,
+    "ppo_objective_changed": False,
+    "e1_sampling_rule_changed": False,
+    "zero_loss_changed": False,
     "trained": False,
 }
 
@@ -139,6 +171,42 @@ class AssignmentOutput:
             "policy_version": HEAD_VERSION,
             "non_selected_agents": "KEEP_CURRENT_PLAN",
         }
+
+
+@dataclass(frozen=True)
+class FactorizedAssignmentDistribution:
+    """A reconstructed action distribution for ASSIGN→candidate factorization.
+
+    ``candidate_action_log_probs`` and ``no_assign_action_log_prob`` are already
+    final action log-probabilities.  Passing them through the historical
+    ``masked_log_probs``/selector softmax is mathematically idempotent because
+    they reconstruct a normalized distribution.
+    """
+
+    candidate_logits: torch.Tensor
+    assign_logit: torch.Tensor
+    no_assign_logit: torch.Tensor
+    safe_mask: torch.Tensor
+    gate_log_probs: torch.Tensor
+    conditional_candidate_log_probs: torch.Tensor
+    candidate_action_log_probs: torch.Tensor
+    no_assign_action_log_prob: torch.Tensor
+
+    @property
+    def action_log_probs(self) -> torch.Tensor:
+        return torch.cat([self.candidate_action_log_probs, self.no_assign_action_log_prob], dim=-1)
+
+    @property
+    def action_probabilities(self) -> torch.Tensor:
+        return self.action_log_probs.exp()
+
+    @property
+    def gate_probabilities(self) -> torch.Tensor:
+        return self.gate_log_probs.exp()
+
+    @property
+    def conditional_candidate_probabilities(self) -> torch.Tensor:
+        return self.conditional_candidate_log_probs.exp()
 
 
 def _mlp(sizes: Sequence[int]) -> nn.Sequential:
@@ -335,6 +403,163 @@ class CandidateSensitiveMultiAgentCandidateAssignmentHead(MultiAgentCandidateAss
         logits = torch.where(safe_mask, logits, torch.full_like(logits, NEG_INF))
         no_assign = self.no_assign_scorer(torch.cat([global_ctx, fleet_ctx], dim=-1))
         return logits, no_assign
+
+
+def factorized_action_log_probs(*, candidate_logits: torch.Tensor, assign_logit: torch.Tensor,
+                                no_assign_logit: torch.Tensor, safe_mask: torch.Tensor
+                                ) -> FactorizedAssignmentDistribution:
+    """Return final action log-probabilities for ASSIGN→candidate factorization.
+
+    The stage-2 softmax only sees legal/Zero-Loss-feasible candidates.  If a row
+    has no feasible candidate, the distribution collapses to NO_ASSIGN with
+    probability one and no empty candidate softmax is evaluated.
+    """
+    if candidate_logits.ndim != 2 or safe_mask.ndim != 2:
+        raise ActorInputContractError("FACTORIZED_CANDIDATE_LOGIT_MASK_SHAPE_INVALID")
+    if candidate_logits.shape != safe_mask.shape:
+        raise ActorInputContractError("FACTORIZED_CANDIDATE_LOGIT_MASK_SHAPE_MISMATCH")
+    if safe_mask.dtype != torch.bool:
+        raise ActorInputContractError("FACTORIZED_SAFE_MASK_DTYPE_INVALID")
+    if assign_logit.ndim == 1:
+        assign_logit = assign_logit.reshape(-1, 1)
+    if no_assign_logit.ndim == 1:
+        no_assign_logit = no_assign_logit.reshape(-1, 1)
+    if assign_logit.shape != no_assign_logit.shape or assign_logit.shape != (candidate_logits.shape[0], 1):
+        raise ActorInputContractError("FACTORIZED_GATE_LOGIT_SHAPE_INVALID")
+    if candidate_logits.dtype != assign_logit.dtype or candidate_logits.dtype != no_assign_logit.dtype:
+        raise ActorInputContractError("FACTORIZED_LOGIT_DTYPE_MISMATCH")
+    if candidate_logits.device != assign_logit.device or candidate_logits.device != no_assign_logit.device:
+        raise ActorInputContractError("FACTORIZED_LOGIT_DEVICE_MISMATCH")
+
+    masked_candidates = torch.where(safe_mask, candidate_logits, torch.full_like(candidate_logits, NEG_INF))
+    conditional_rows: list[torch.Tensor] = []
+    action_rows: list[torch.Tensor] = []
+    gate_rows: list[torch.Tensor] = []
+    for index in range(candidate_logits.shape[0]):
+        safe = safe_mask[index]
+        if bool(safe.any().item()):
+            gate_log_probs = torch.log_softmax(torch.cat([assign_logit[index], no_assign_logit[index]], dim=0), dim=0)
+            conditional = torch.log_softmax(masked_candidates[index], dim=0)
+            candidate_action = torch.where(safe, gate_log_probs[0] + conditional,
+                                           torch.full_like(conditional, NEG_INF))
+            no_assign_action = gate_log_probs[1].reshape(1)
+            conditional_rows.append(conditional)
+            action_rows.append(torch.cat([candidate_action, no_assign_action], dim=0))
+            gate_rows.append(gate_log_probs)
+        else:
+            conditional = torch.full_like(masked_candidates[index], NEG_INF)
+            candidate_action = torch.full_like(masked_candidates[index], NEG_INF)
+            no_assign_action = torch.zeros((1,), dtype=candidate_logits.dtype, device=candidate_logits.device)
+            gate_log_probs = torch.stack([
+                torch.full((), NEG_INF, dtype=candidate_logits.dtype, device=candidate_logits.device),
+                torch.zeros((), dtype=candidate_logits.dtype, device=candidate_logits.device),
+            ])
+            conditional_rows.append(conditional)
+            action_rows.append(torch.cat([candidate_action, no_assign_action], dim=0))
+            gate_rows.append(gate_log_probs)
+
+    action_log_probs = torch.stack(action_rows, dim=0)
+    return FactorizedAssignmentDistribution(
+        candidate_logits=masked_candidates,
+        assign_logit=assign_logit,
+        no_assign_logit=no_assign_logit,
+        safe_mask=safe_mask,
+        gate_log_probs=torch.stack(gate_rows, dim=0),
+        conditional_candidate_log_probs=torch.stack(conditional_rows, dim=0),
+        candidate_action_log_probs=action_log_probs[:, :-1],
+        no_assign_action_log_prob=action_log_probs[:, -1:],
+    )
+
+
+def factorized_masked_distribution(*, candidate_logits: torch.Tensor, assign_logit: torch.Tensor,
+                                   no_assign_logit: torch.Tensor, safe_mask: torch.Tensor) -> torch.Tensor:
+    """Probability view for the factorized action distribution."""
+    return factorized_action_log_probs(candidate_logits=candidate_logits, assign_logit=assign_logit,
+                                       no_assign_logit=no_assign_logit, safe_mask=safe_mask).action_probabilities
+
+
+def factorized_log_probability(*, candidate_logits: torch.Tensor, assign_logit: torch.Tensor,
+                               no_assign_logit: torch.Tensor, safe_mask: torch.Tensor,
+                               action_index: torch.Tensor) -> torch.Tensor:
+    """Gather PPO-compatible log-probability from the reconstructed distribution."""
+    dist = factorized_action_log_probs(candidate_logits=candidate_logits, assign_logit=assign_logit,
+                                       no_assign_logit=no_assign_logit, safe_mask=safe_mask)
+    return dist.action_log_probs.gather(-1, action_index.unsqueeze(-1)).squeeze(-1)
+
+
+class FactorizedAssignThenCandidateAssignmentHead(CandidateSensitiveMultiAgentCandidateAssignmentHead):
+    """R18-R16 V3 actor: binary ASSIGN gate plus conditional candidate ranker.
+
+    The public ``forward`` remains compatible with existing selector/PPO call
+    sites by returning reconstructed final action log-probabilities in the old
+    ``(pair_logits, no_assign_logit)`` slots.  The historical
+    ``masked_distribution``/``masked_log_probs`` operations are idempotent on
+    those normalized log-probabilities, while gradients still flow through the
+    factorized computational graph.
+
+    Gate context is detached from the candidate-ranking encoders, so a
+    NO_ASSIGN-selected row trains the gate but cannot write a gradient into the
+    conditional candidate-ranking path.
+    """
+
+    def __init__(self, *, global_dim: int, agent_dim: int, candidate_dim: int,
+                 demand_dim: int, hidden: int = 128, heads: int = 4,
+                 detach_gate_context: bool = True) -> None:
+        super().__init__(global_dim=global_dim, agent_dim=agent_dim,
+                         candidate_dim=candidate_dim, demand_dim=demand_dim,
+                         hidden=hidden, heads=heads)
+        self.detach_gate_context = bool(detach_gate_context)
+        self.no_assign_scorer = nn.Identity()
+        self.gate_scorer = _mlp([hidden * 2, hidden, 2])
+
+    def forward_factorized(self, *, global_feats: torch.Tensor,
+                           demand_feats: torch.Tensor, agent_feats: torch.Tensor,
+                           agent_mask: torch.Tensor, candidate_feats: torch.Tensor,
+                           pair_agent_index: torch.Tensor,
+                           safe_mask: torch.Tensor) -> FactorizedAssignmentDistribution:
+        self._validate_inputs(global_feats=global_feats, demand_feats=demand_feats,
+                              agent_feats=agent_feats, agent_mask=agent_mask,
+                              candidate_feats=candidate_feats,
+                              pair_agent_index=pair_agent_index,
+                              safe_mask=safe_mask)
+        agent_ctx = self.agent_encoder(agent_feats, agent_mask)
+        global_ctx = self.global_encoder(global_feats)
+        demand_ctx = self.demand_encoder(demand_feats)
+        cand_ctx = self.candidate_encoder(candidate_feats)
+
+        _, pairs, _ = cand_ctx.shape
+        index = pair_agent_index.unsqueeze(-1).expand(-1, -1, self.hidden)
+        per_pair_agent = torch.gather(agent_ctx, 1, index) if pairs else cand_ctx.new_zeros(cand_ctx.shape)
+        mask_f = agent_mask.unsqueeze(-1).to(agent_ctx.dtype)
+        fleet_ctx = (agent_ctx * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
+        stacked = torch.cat([
+            global_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            demand_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            per_pair_agent,
+            fleet_ctx.unsqueeze(1).expand(-1, pairs, -1),
+            cand_ctx,
+        ], dim=-1)
+        candidate_logits = self.scorer(stacked).squeeze(-1)
+        candidate_logits = torch.where(safe_mask, candidate_logits, torch.full_like(candidate_logits, NEG_INF))
+        gate_context = torch.cat([global_ctx, fleet_ctx], dim=-1)
+        if self.detach_gate_context:
+            gate_context = gate_context.detach()
+        gate_logits = self.gate_scorer(gate_context)
+        return factorized_action_log_probs(candidate_logits=candidate_logits,
+                                           assign_logit=gate_logits[:, 0:1],
+                                           no_assign_logit=gate_logits[:, 1:2],
+                                           safe_mask=safe_mask)
+
+    def forward(self, *, global_feats: torch.Tensor, demand_feats: torch.Tensor,
+                agent_feats: torch.Tensor, agent_mask: torch.Tensor,
+                candidate_feats: torch.Tensor, pair_agent_index: torch.Tensor,
+                safe_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        dist = self.forward_factorized(global_feats=global_feats, demand_feats=demand_feats,
+                                       agent_feats=agent_feats, agent_mask=agent_mask,
+                                       candidate_feats=candidate_feats,
+                                       pair_agent_index=pair_agent_index,
+                                       safe_mask=safe_mask)
+        return dist.candidate_action_log_probs, dist.no_assign_action_log_prob
 
 
 def masked_distribution(pair_logits: torch.Tensor, no_assign_logit: torch.Tensor,

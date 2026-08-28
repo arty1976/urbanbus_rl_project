@@ -33,6 +33,7 @@ FROZEN_INFERENCE_T1 = "FROZEN_INFERENCE_T1"
 FROZEN_MASKED_CATEGORICAL_TRAINING = "FROZEN_MASKED_CATEGORICAL_TRAINING"
 R15_E1_CONTRACT_ID = "LS3_BT8_R15_E1_FROZEN_POLICY_MASKED_CATEGORICAL_SAMPLING_V1"
 R15_E1_REPAIR_LEVEL = "E1"
+R18_R16_FACTORIZED_DISTRIBUTION_CONTRACT_ID = "LS3_BT8_R18_R16_FACTORIZED_ASSIGN_THEN_CANDIDATE_DISTRIBUTION_VIEW_V1"
 
 
 class SelectionModeError(RuntimeError):
@@ -225,6 +226,31 @@ def make_frozen_masked_distribution_view(*, pair_keys: Sequence[tuple[str, str]]
                                         _probabilities=sealed_probabilities, _binding_sha256=binding)
     _ISSUED_DISTRIBUTION_VIEWS[view] = binding
     return view
+
+
+def make_factorized_frozen_masked_distribution_view(*, pair_keys: Sequence[tuple[str, str]],
+                                                    candidate_logits: torch.Tensor,
+                                                    assign_logit: torch.Tensor,
+                                                    no_assign_logit: torch.Tensor,
+                                                    safe_mask: torch.Tensor) -> FrozenMaskedDistributionView:
+    """Seal a selector-compatible view from a factorized reconstructed policy.
+
+    E1's RNG and semantic action identity remain unchanged.  The only
+    difference is where the probabilities come from: they are reconstructed as
+    P(NO_ASSIGN)=P_gate(NO_ASSIGN) and
+    P(candidate_i)=P_gate(ASSIGN) * P(candidate_i | ASSIGN), then passed through
+    the same factory-issued distribution view used by the historical selector.
+    """
+    factorized = H.factorized_action_log_probs(candidate_logits=candidate_logits,
+                                               assign_logit=assign_logit,
+                                               no_assign_logit=no_assign_logit,
+                                               safe_mask=safe_mask)
+    return make_frozen_masked_distribution_view(
+        pair_keys=pair_keys,
+        pair_logits=factorized.candidate_action_log_probs,
+        no_assign_logit=factorized.no_assign_action_log_prob,
+        safe_mask=safe_mask,
+    )
 
 
 def _bound_distribution_view(*, view: FrozenMaskedDistributionView) -> tuple[tuple[tuple[str, str], ...], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
