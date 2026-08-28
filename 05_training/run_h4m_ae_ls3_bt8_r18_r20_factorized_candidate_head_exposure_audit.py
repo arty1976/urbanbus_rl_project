@@ -475,7 +475,12 @@ def decomposition(classified: pd.DataFrame, epoch: pd.DataFrame, snapshots: Mapp
             if selected_no_assign:
                 no_assign_leakage += int(abs(float(record["stage2_loss_contribution"])) > 0.0 or abs(float(record["stage2_gradient_norm"])) > 0.0)
             if base["selected_action_family"] == "CANDIDATE_K1":
-                k1_leakage += int(abs(float(record["stage2_loss_contribution"])) > 0.0 or abs(float(record["stage2_gradient_norm"])) > 0.0 or abs(stage2_pre - 1.0) > 1e-7)
+                # The durable trace deliberately preserves the PPO policy-loss
+                # contribution for every candidate-selected row.  For K=1 it
+                # is a valid nonzero action loss while the conditional softmax
+                # is degenerate, so only a nonzero ranking gradient (or a
+                # conditional probability other than one) is a violation.
+                k1_leakage += int(abs(float(record["stage2_gradient_norm"])) > 0.0 or abs(stage2_pre - 1.0) > 1e-7)
             rows.append({
                 **{field: record[field] for field in ID_FIELDS}, "epoch_index": int(record["epoch_index"]), "K": int(base["K"]),
                 "selected_action_family": str(base["selected_action_family"]), "selected_is_no_assign": selected_no_assign,
