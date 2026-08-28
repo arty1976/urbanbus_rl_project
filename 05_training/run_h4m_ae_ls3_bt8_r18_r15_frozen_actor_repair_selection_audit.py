@@ -413,7 +413,7 @@ def factorized_distribution(pair_logits: torch.Tensor, no_assign_logit: torch.Te
         "assign_gate_score": assign_score,
         "no_assign_gate_score": no_assign_scalar,
         "conditional_candidate_probability_sum": log_prob_sum,
-        "total_probability_sum": float(action_probs.sum()),
+        "total_probability_sum": float(action_probs.detach().sum()),
         "safe_candidate_count": int(safe_indices.numel()),
     }
 
