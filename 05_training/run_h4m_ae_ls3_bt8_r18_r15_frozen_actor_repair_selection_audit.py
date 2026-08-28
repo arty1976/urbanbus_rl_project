@@ -405,7 +405,7 @@ def factorized_distribution(pair_logits: torch.Tensor, no_assign_logit: torch.Te
         conditional[safe_indices] = conditional_safe
         action_probs[:-1] = gate_probs[0] * conditional
         action_probs[-1] = gate_probs[1]
-        log_prob_sum = float(conditional_safe.sum())
+        log_prob_sum = float(conditional_safe.detach().sum())
     return {
         "action_probabilities": action_probs,
         "conditional_candidate_probabilities": conditional,
@@ -572,11 +572,16 @@ def factorized_gradient_decomposition(actor: torch.nn.Module, rows: pd.DataFrame
             "candidate_ranking_influence_norm": candidate_ranking_influence_norm,
             "selected_conditional_candidate_reinforcement_delta": selected_reinforcement_delta,
             "max_nonselected_conditional_candidate_delta": nonselected_max_delta,
+            "single_candidate_degenerate_conditional_softmax": (
+                (not selected_is_no_assign) and dist["safe_candidate_count"] == 1
+            ),
             "NO_ASSIGN_row_conditional_candidate_gradient_zero": (
                 (not selected_is_no_assign) or conditional_candidate_head_gradient_norm == 0.0
             ),
             "candidate_row_selected_conditional_candidate_reinforced": (
-                selected_is_no_assign or selected_reinforcement_delta > 0.0
+                selected_is_no_assign
+                or selected_reinforcement_delta > 0.0
+                or dist["safe_candidate_count"] == 1
             ),
             "gate_parameter_path_norms": {group: float(gate_groups.get(group, torch.zeros(0)).norm()) for group in all_groups},
             "conditional_parameter_path_norms": {group: float(cond_groups.get(group, torch.zeros(0)).norm()) for group in all_groups},
