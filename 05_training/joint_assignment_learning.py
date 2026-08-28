@@ -197,29 +197,19 @@ def assignment_entropy(log_probs: torch.Tensor) -> torch.Tensor:
     return -(p * safe_log).sum(-1)
 
 
-def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: torch.Tensor,
-                        safe_mask: torch.Tensor, action_index: torch.Tensor,
-                        old_log_prob: torch.Tensor, advantage: torch.Tensor,
-                        value_pred: torch.Tensor, value_target: torch.Tensor,
-                        forced_action: torch.Tensor,
-                        actor_eligibility_mask: Optional[torch.Tensor] = None,
-                        clip_epsilon: float = CC.PPO_CLIP_EPSILON,
-                        entropy_coef: float = 0.0) -> Dict[str, Any]:
-    """PPO objective over the frozen rollout support.  No parameter is updated.
-
-    Forced rows -- where NO_ASSIGN was the only legal action -- contribute zero to
-    the actor and entropy terms and are kept out of the actor denominator, so a
-    batch full of them cannot silently shrink the policy gradient. They still
-    train the critic.
-
-    ``actor_eligibility_mask`` is an optional, explicit actor-aggregation mask.
-    It is for a separately bound credit-eligibility contract only: it never
-    changes logits, legal support, old log-probabilities, PPO ratios, clipping,
-    advantages, values, targets, or critic loss.  An all-false mask is a valid
-    explicit actor skip (with a finite critic loss), rather than a divide-by-zero
-    or an implicit fallback to all rows.
-    """
-    log_probs = masked_log_probs(new_pair_logits, new_no_assign_logit, safe_mask)
+def _assignment_ppo_loss_from_log_probs(*, log_probs: torch.Tensor, action_index: torch.Tensor,
+                                        old_log_prob: torch.Tensor, advantage: torch.Tensor,
+                                        value_pred: torch.Tensor, value_target: torch.Tensor,
+                                        forced_action: torch.Tensor,
+                                        actor_eligibility_mask: Optional[torch.Tensor],
+                                        clip_epsilon: float, entropy_coef: float,
+                                        log_prob_source: str) -> Dict[str, Any]:
+    if log_probs.ndim != 2:
+        raise ValueError("ACTION_LOG_PROBS_MUST_BE_RANK_2")
+    if action_index.shape != forced_action.shape:
+        raise ValueError("ACTION_INDEX_FORCED_ACTION_SHAPE_MISMATCH")
+    if log_probs.shape[0] != action_index.shape[0]:
+        raise ValueError("ACTION_LOG_PROBS_BATCH_MISMATCH")
     new_log_prob = log_probs.gather(-1, action_index.unsqueeze(-1)).squeeze(-1)
     # Advantage is rollout evidence; detaching keeps the actor gradient from
     # leaking backwards into the critic.
@@ -269,7 +259,66 @@ def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: t
         "non_forced_rows": int((~forced_action).sum().item()),
         "advantage_detached": not adv.requires_grad,
         "optimizer_step_called": False,
+        "log_prob_source": log_prob_source,
     }
+
+
+def assignment_ppo_loss(*, new_pair_logits: torch.Tensor, new_no_assign_logit: torch.Tensor,
+                        safe_mask: torch.Tensor, action_index: torch.Tensor,
+                        old_log_prob: torch.Tensor, advantage: torch.Tensor,
+                        value_pred: torch.Tensor, value_target: torch.Tensor,
+                        forced_action: torch.Tensor,
+                        actor_eligibility_mask: Optional[torch.Tensor] = None,
+                        clip_epsilon: float = CC.PPO_CLIP_EPSILON,
+                        entropy_coef: float = 0.0) -> Dict[str, Any]:
+    """PPO objective over the frozen rollout support.  No parameter is updated.
+
+    Forced rows -- where NO_ASSIGN was the only legal action -- contribute zero to
+    the actor and entropy terms and are kept out of the actor denominator, so a
+    batch full of them cannot silently shrink the policy gradient. They still
+    train the critic.
+
+    ``actor_eligibility_mask`` is an optional, explicit actor-aggregation mask.
+    It is for a separately bound credit-eligibility contract only: it never
+    changes logits, legal support, old log-probabilities, PPO ratios, clipping,
+    advantages, values, targets, or critic loss.  An all-false mask is a valid
+    explicit actor skip (with a finite critic loss), rather than a divide-by-zero
+    or an implicit fallback to all rows.
+    """
+    log_probs = masked_log_probs(new_pair_logits, new_no_assign_logit, safe_mask)
+    return _assignment_ppo_loss_from_log_probs(
+        log_probs=log_probs, action_index=action_index, old_log_prob=old_log_prob,
+        advantage=advantage, value_pred=value_pred, value_target=value_target,
+        forced_action=forced_action, actor_eligibility_mask=actor_eligibility_mask,
+        clip_epsilon=clip_epsilon, entropy_coef=entropy_coef,
+        log_prob_source="masked_logits_single_softmax",
+    )
+
+
+def assignment_ppo_loss_from_action_log_probs(*, action_log_probs: torch.Tensor,
+                                              action_index: torch.Tensor,
+                                              old_log_prob: torch.Tensor,
+                                              advantage: torch.Tensor,
+                                              value_pred: torch.Tensor,
+                                              value_target: torch.Tensor,
+                                              forced_action: torch.Tensor,
+                                              actor_eligibility_mask: Optional[torch.Tensor] = None,
+                                              clip_epsilon: float = CC.PPO_CLIP_EPSILON,
+                                              entropy_coef: float = 0.0) -> Dict[str, Any]:
+    """PPO objective over an already-normalized action log-probability tensor.
+
+    This preserves the PPO surrogate formula while allowing a factorized Actor
+    to pass its reconstructed final action distribution directly.  It avoids
+    applying a second shared ``log_softmax`` on top of
+    ``log P(ASSIGN)+log P(candidate|ASSIGN)`` / ``log P(NO_ASSIGN)``.
+    """
+    return _assignment_ppo_loss_from_log_probs(
+        log_probs=action_log_probs, action_index=action_index, old_log_prob=old_log_prob,
+        advantage=advantage, value_pred=value_pred, value_target=value_target,
+        forced_action=forced_action, actor_eligibility_mask=actor_eligibility_mask,
+        clip_epsilon=clip_epsilon, entropy_coef=entropy_coef,
+        log_prob_source="direct_reconstructed_action_log_probs",
+    )
 
 
 def apply_assignment_update(*, loss: Dict[str, Any], actor: nn.Module, critic: nn.Module,

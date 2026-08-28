@@ -30,6 +30,9 @@ STAGE = "H4M-AE-R9.8-LS3-BT8-R18"
 PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_E1_MINIMAL_BOUNDED_TRAINING_AND_CAUSAL_LEARNING_PATH_EVIDENCE_COMPLETE"
 R18R10_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R10_EXACT_R18_R3_TRAJECTORY_DURABLE_TRACE_BOUNDED_RERUN_COMPLETE"
 R18R10_AUTHORIZATION = "R18R10_EXACT_R18R3_TRACE_REPLAY_ONE_SHOT_ONLY"
+R18R17_FACTORIZED_AUTHORIZATION = "R18R17_FACTORIZED_ACTOR_BOUNDED_TRAINING_ONE_SHOT_ONLY"
+R18R17_FACTORIZED_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R17_FACTORIZED_ACTOR_BOUNDED_TRAINING_AUTHORIZATION_READY"
+FACTORIZED_ACTOR_ARCHITECTURE = "FACTORIZED_ASSIGN_THEN_CANDIDATE"
 R18R3_SOURCE_COMMIT = "7bd0e2e223779455e6112584abd0b5cb6441c228"
 R18R3_EXACT_REPLAY_MODE = "R18_R3_EXACT_REPLAY_SAMPLING_IDENTITY"
 R18R10_SELECTOR_BINDING_MODE = "R18_R9_SELECTOR_SHA_REQUIRED"
@@ -48,6 +51,7 @@ R18R10_INTEGRITY_BLOCK = "BLOCKED_R18R10_EXECUTION_INTEGRITY_FAILURE"
 R18R10_REPRO_BLOCK = "BLOCKED_R18R10_TRAINING_UPDATE_REPRODUCIBILITY_FAILURE"
 EXPECTED_R17_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R17_E1_BOUNDED_TRAINING_EXECUTION_AUTHORIZATION_AND_ENVELOPE_FREEZE_COMPLETE"
 R16_SOURCE = "90a8a69227c1166c8d311d54f53fe9795dfeb7cd"
+R18R16_FACTORIZED_SOURCE = "ff2c4b008d42235926283748f408474dbbe65ba0"
 
 ROOT = Path(__file__).resolve().parent
 PROJECT = ROOT.parent
@@ -102,17 +106,21 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
     require(payload.get("authorization_sha256") == supplied_sha256 == actual, AUTH_BLOCK, "authorization_sha256")
     authorization = str(payload.get("authorization"))
     require(payload.get("authorized") is True and authorization in {
-            "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY", R18R10_AUTHORIZATION}, AUTH_BLOCK, "authorization_schema")
+            "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY", R18R10_AUTHORIZATION,
+            R18R17_FACTORIZED_AUTHORIZATION}, AUTH_BLOCK, "authorization_schema")
     require((authorization == "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY"
              and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R17")
             or (authorization == R18R10_AUTHORIZATION
-                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R10"),
+                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R10")
+            or (authorization == R18R17_FACTORIZED_AUTHORIZATION
+                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R17"),
             AUTH_BLOCK, "authorization_stage")
     upstream = dict(payload.get("upstream", {}))
     executor = dict(upstream.get("r18_executor", {}))
     require(executor.get("path") == str(Path(__file__).resolve()) and executor.get("sha256") == sha256(Path(__file__)),
             AUTH_BLOCK, "r18_executor_source_binding")
-    require(payload.get("r16_source_commit") == R16_SOURCE, AUTH_BLOCK, "r16_source")
+    expected_r16 = R18R16_FACTORIZED_SOURCE if authorization == R18R17_FACTORIZED_AUTHORIZATION else R16_SOURCE
+    require(payload.get("r16_source_commit") == expected_r16, AUTH_BLOCK, "r16_source")
     envelope = dict(payload.get("envelope", {}))
     aggregate = dict(envelope.get("aggregate", {}))
     require(aggregate == {"environment_seed_count": 1, "windows": 6, "visits": 12, "trajectories": 12,
@@ -136,6 +144,16 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
             and module.get("E1_only") is True and module.get("E2_rescue") is False and module.get("E3_temperature_or_floor") is False
             and module.get("sealed_distribution_view_required") is True
             and module.get("e1_contract_sha256") == "eb84543a9fc06dcf730e49aa3895d9fe26d2244a05ce340986b7449418205ad9", AUTH_BLOCK, "selector_freeze")
+    if authorization == R18R17_FACTORIZED_AUTHORIZATION:
+        require(module.get("actor_architecture") == FACTORIZED_ACTOR_ARCHITECTURE
+                and module.get("actor_class") == "FactorizedAssignThenCandidateAssignmentHead"
+                and module.get("factorized_ppo_loss_binding") == "DIRECT_RECONSTRUCTED_ACTION_LOG_PROBS_NO_SECOND_SHARED_SOFTMAX"
+                and module.get("NO_ASSIGN_candidate_head_gradient") == "ZERO"
+                and module.get("Reward_V2_changed") is False
+                and module.get("GAE_changed") is False
+                and module.get("PPO_objective_changed") is False
+                and module.get("Zero_Loss_changed") is False,
+                AUTH_BLOCK, "factorized_actor_contract")
     checkpoints = dict(dict(payload.get("checkpoint_contract", {})).get("initial_inputs", {}))
     require(set(checkpoints) == {"initial:AC-R1", "initial:AC-R2", "initial:BD-R1", "initial:BD-R2"}, AUTH_BLOCK, "checkpoint_set")
     for arm in arms:
@@ -167,8 +185,12 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
 
 def dry_run_report(auth: Mapping[str, Any]) -> dict[str, Any]:
     """Pure manifest/source verification; no MPS probe, models, or artifacts."""
+    module = dict(auth.get("module_freeze_contract", {}))
     return {
         "stage": STAGE, "authorization_valid": True, "r17_source_commit": auth["source_commit"],
+        "authorization": auth.get("authorization"),
+        "actor_architecture": module.get("actor_architecture", "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX"),
+        "factorized_ppo_loss_binding": module.get("factorized_ppo_loss_binding"),
         "r18_executor_sha256": sha256(Path(__file__)), "training": 0, "rollout": 0,
         "optimizer_step": 0, "checkpoint_write": 0, "policy_mutation": 0,
         "next_action_requires_explicit_execute_flag": True,
@@ -208,6 +230,10 @@ def _counters() -> dict[str, int]:
 
 def _is_exact_r18r3_replay(auth: Mapping[str, Any]) -> bool:
     return str(auth.get("authorization")) == R18R10_AUTHORIZATION
+
+
+def _is_factorized_r18r17(auth: Mapping[str, Any]) -> bool:
+    return str(auth.get("authorization")) == R18R17_FACTORIZED_AUTHORIZATION
 
 
 def _r16_source_hash_expected_actual(*, R17: Any, r16_path: Path) -> dict[str, dict[str, str]]:
@@ -257,6 +283,22 @@ def source_hash_binding_for_authorization(*, auth: Mapping[str, Any], R17: Any, 
     selector expectation from the old R16 selector SHA to the validated R18-R9
     selector SHA.  All other frozen hashes remain byte-for-byte R16/R17-bound.
     """
+    if _is_factorized_r18r17(auth):
+        bound = dict(dict(auth["module_freeze_contract"])["frozen_source_hashes"])
+        expected = {str(key): str(value) for key, value in dict(bound.get("expected", {})).items()}
+        actual = {rel: sha256(PROJECT / rel) for rel in expected}
+        mismatches = {key: {"expected": expected.get(key), "actual": actual.get(key)}
+                      for key in expected if actual.get(key) != expected.get(key)}
+        require(not mismatches, AUTH_BLOCK,
+                "r18r17_factorized_source_binding_guard=" + json.dumps(mismatches, sort_keys=True))
+        return {
+            "expected": expected,
+            "actual": actual,
+            "all_unchanged": True,
+            "actor_architecture": FACTORIZED_ACTOR_ARCHITECTURE,
+            "factorized_ppo_loss_binding": "DIRECT_RECONSTRUCTED_ACTION_LOG_PROBS_NO_SECOND_SHARED_SOFTMAX",
+        }
+
     if not _is_exact_r18r3_replay(auth):
         return R17._source_hash_binding(r16_path)
 
@@ -313,9 +355,11 @@ def _exact_reference_row(reference: Mapping[str, Any] | None, decision_id: str) 
 
 
 def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str, Any], config: Mapping[str, Any],
-                 H: Any, JL: Any, device: torch.device) -> dict[str, dict[str, Any]]:
+                 H: Any, JL: Any, device: torch.device,
+                 actor_architecture: str = "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX") -> dict[str, dict[str, Any]]:
     models: dict[str, dict[str, Any]] = {}
     identities: set[int] = set()
+    use_factorized = actor_architecture == FACTORIZED_ACTOR_ARCHITECTURE
     for arm in arms:
         key, arm_id = str(arm["initial_checkpoint_key"]), str(arm["arm_id"])
         checkpoint_path = Path(str(checkpoints[key]["path"]))
@@ -323,10 +367,21 @@ def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str,
         require(isinstance(payload, Mapping) and set(payload).issuperset({"actor", "critic", "meta"})
                 and not any("optimizer" in str(name).lower() for name in payload), AUTH_BLOCK, f"checkpoint_schema={arm_id}")
         torch.manual_seed(int(arm["actor_seed"]))
-        actor = H.CandidateSensitiveMultiAgentCandidateAssignmentHead(
-            global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]), agent_dim=int(config["agent_dim"]),
-            candidate_dim=int(config["candidate_dim"]), hidden=int(config["hidden"]), heads=int(config["heads"])).to(device)
-        actor.load_state_dict(payload["actor"], strict=True)
+        if use_factorized:
+            actor = H.FactorizedAssignThenCandidateAssignmentHead(
+                global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]), agent_dim=int(config["agent_dim"]),
+                candidate_dim=int(config["candidate_dim"]), hidden=int(config["hidden"]), heads=int(config["heads"]),
+                detach_gate_context=True).to(device)
+            load_result = actor.load_state_dict(payload["actor"], strict=False)
+            require(len(load_result.missing_keys) > 0 and len(load_result.unexpected_keys) > 0
+                    and all(str(name).startswith("gate_scorer.") for name in load_result.missing_keys)
+                    and all(str(name).startswith("no_assign_scorer.") for name in load_result.unexpected_keys),
+                    AUTH_BLOCK, f"factorized_actor_checkpoint_projection={arm_id}")
+        else:
+            actor = H.CandidateSensitiveMultiAgentCandidateAssignmentHead(
+                global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]), agent_dim=int(config["agent_dim"]),
+                candidate_dim=int(config["candidate_dim"]), hidden=int(config["hidden"]), heads=int(config["heads"])).to(device)
+            actor.load_state_dict(payload["actor"], strict=True)
         torch.manual_seed(int(arm["critic_seed"]))
         critic = JL.JointAssignmentCritic(global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]),
                                            agent_dim=int(config["agent_dim"]), safe_summary_dim=1 + 2 * int(config["candidate_dim"])).to(device)
@@ -338,6 +393,7 @@ def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str,
         require(not identities.intersection(parameter_ids), AUTH_BLOCK, f"parameter_aliasing={arm_id}")
         identities.update(parameter_ids)
         models[arm_id] = {**dict(arm), "actor": actor, "critic": critic, "actor_opt": actor_opt, "critic_opt": critic_opt,
+                          "actor_architecture": actor_architecture,
                           "actor_initial_digest": _module_digest(actor), "critic_initial_digest": _module_digest(critic),
                           "behavior_checkpoint_sha256": str(checkpoints[key]["sha256"]), "checkpoint_path": str(checkpoint_path)}
     return models
@@ -380,13 +436,24 @@ def _rollout_arm(*, model: Mapping[str, Any], frozen: Mapping[str, str], root: P
                     INTEGRITY_BLOCK, f"rollout_snapshot_roundtrip={decision_id}")
             model["actor"].eval(); model["critic"].eval()
             with torch.no_grad():
-                raw, no_assign = model["actor"](global_feats=ready["global_feats"], demand_feats=ready["demand_feats"],
-                                                   agent_feats=ready["agent_feats"], agent_mask=ready["agent_mask"],
-                                                   candidate_feats=ready["candidate_feats"], pair_agent_index=ready["pair_agent_index"],
-                                                   safe_mask=ready["safe_mask"])
-                logits, mask = raw[:, :len(packed["pair_keys"])], ready["safe_mask"][:, :len(packed["pair_keys"])]
-                view = S.make_frozen_masked_distribution_view(pair_keys=packed["pair_keys"], pair_logits=logits,
-                                                               no_assign_logit=no_assign, safe_mask=mask)
+                mask = ready["safe_mask"][:, :len(packed["pair_keys"])]
+                if str(model.get("actor_architecture")) == FACTORIZED_ACTOR_ARCHITECTURE:
+                    dist = model["actor"].forward_factorized(
+                        global_feats=ready["global_feats"], demand_feats=ready["demand_feats"],
+                        agent_feats=ready["agent_feats"], agent_mask=ready["agent_mask"],
+                        candidate_feats=ready["candidate_feats"], pair_agent_index=ready["pair_agent_index"],
+                        safe_mask=ready["safe_mask"])
+                    view = S.make_factorized_frozen_masked_distribution_view(
+                        pair_keys=packed["pair_keys"], candidate_logits=dist.candidate_logits[:, :len(packed["pair_keys"])],
+                        assign_logit=dist.assign_logit, no_assign_logit=dist.no_assign_logit, safe_mask=mask)
+                else:
+                    raw, no_assign = model["actor"](global_feats=ready["global_feats"], demand_feats=ready["demand_feats"],
+                                                       agent_feats=ready["agent_feats"], agent_mask=ready["agent_mask"],
+                                                       candidate_feats=ready["candidate_feats"], pair_agent_index=ready["pair_agent_index"],
+                                                       safe_mask=ready["safe_mask"])
+                    logits = raw[:, :len(packed["pair_keys"])]
+                    view = S.make_frozen_masked_distribution_view(pair_keys=packed["pair_keys"], pair_logits=logits,
+                                                                   no_assign_logit=no_assign, safe_mask=mask)
                 policy_sampling_identity = str(loaded.get("policy_sampling_identity")
                                                or captured["payload"].get("policy_sampling_identity"))
                 reference_row = _exact_reference_row(exact_replay_reference, decision_id)
@@ -542,17 +609,34 @@ def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support
         for row in rows:
             row["snapshot"].replay_guard(support_digest=row["t"].provenance["candidate_support_digest"], regeneration_requested=False)
         actor.train(); critic.train()
-        logits, no_assign = actor(global_feats=batch["global_feats"], demand_feats=batch["demand_feats"], agent_feats=batch["agent_feats"],
-                                  agent_mask=batch["agent_mask"], candidate_feats=batch["candidate_feats"],
-                                  pair_agent_index=batch["pair_agent_index"], safe_mask=batch["safe_mask"])
+        factorized_update = str(model.get("actor_architecture")) == FACTORIZED_ACTOR_ARCHITECTURE
+        if factorized_update:
+            dist = actor.forward_factorized(global_feats=batch["global_feats"], demand_feats=batch["demand_feats"],
+                                            agent_feats=batch["agent_feats"], agent_mask=batch["agent_mask"],
+                                            candidate_feats=batch["candidate_feats"],
+                                            pair_agent_index=batch["pair_agent_index"], safe_mask=batch["safe_mask"])
+            logits, no_assign = dist.candidate_action_log_probs, dist.no_assign_action_log_prob
+        else:
+            logits, no_assign = actor(global_feats=batch["global_feats"], demand_feats=batch["demand_feats"], agent_feats=batch["agent_feats"],
+                                      agent_mask=batch["agent_mask"], candidate_feats=batch["candidate_feats"],
+                                      pair_agent_index=batch["pair_agent_index"], safe_mask=batch["safe_mask"])
         value = critic(global_feats=batch["global_feats"], demand_feats=batch["demand_feats"], agent_feats=batch["agent_feats"],
                        agent_mask=batch["agent_mask"], safe_summary=JL.safe_set_summary(batch["candidate_feats"], batch["safe_mask"]))
         require(bool(torch.isfinite(logits[batch["safe_mask"]]).all().item() and torch.isfinite(no_assign).all().item()
                      and torch.isfinite(value).all().item()), INTEGRITY_BLOCK, f"nonfinite_ppo_output={model['arm_id']}")
-        loss = JL.assignment_ppo_loss(new_pair_logits=logits, new_no_assign_logit=no_assign, safe_mask=batch["safe_mask"],
-                                      action_index=batch["action_index"], old_log_prob=batch["old_log_prob"], advantage=batch["advantage"],
-                                      value_pred=value, value_target=batch["value_target"], forced_action=batch["forced_action"],
-                                      actor_eligibility_mask=batch["actor_eligibility_mask"])
+        if factorized_update:
+            loss = JL.assignment_ppo_loss_from_action_log_probs(
+                action_log_probs=dist.action_log_probs, action_index=batch["action_index"],
+                old_log_prob=batch["old_log_prob"], advantage=batch["advantage"],
+                value_pred=value, value_target=batch["value_target"], forced_action=batch["forced_action"],
+                actor_eligibility_mask=batch["actor_eligibility_mask"])
+            require(loss.get("log_prob_source") == "direct_reconstructed_action_log_probs",
+                    INTEGRITY_BLOCK, f"factorized_ppo_logprob_path={model['arm_id']}")
+        else:
+            loss = JL.assignment_ppo_loss(new_pair_logits=logits, new_no_assign_logit=no_assign, safe_mask=batch["safe_mask"],
+                                          action_index=batch["action_index"], old_log_prob=batch["old_log_prob"], advantage=batch["advantage"],
+                                          value_pred=value, value_target=batch["value_target"], forced_action=batch["forced_action"],
+                                          actor_eligibility_mask=batch["actor_eligibility_mask"])
         require(int(loss["actor_eligible_rows"]) == active_count and not bool(loss["actor_update_skipped"]), INTEGRITY_BLOCK, "e1_actor_mask")
         logits.retain_grad(); no_assign.retain_grad()
         AUTH.require_capability(AUTH.TRAINING, site=f"{STAGE}:{model['arm_id']}:actor:{epoch + 1}")
@@ -743,7 +827,10 @@ def execute(auth: Mapping[str, Any]) -> None:
         require(int(config["candidate_dim"]) == 8 and int(config["global_dim"]) == 8 and int(config["demand_dim"]) == 6, AUTH_BLOCK, "v2_config")
         arms = list(dict(auth["envelope"])["selected_arms"])
         checkpoints = dict(checkpoint_contract["initial_inputs"])
-        models = _load_models(arms=arms, checkpoints=checkpoints, config=config, H=H, JL=JL, device=device)
+        actor_architecture = str(dict(auth.get("module_freeze_contract", {})).get("actor_architecture",
+                                 "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX"))
+        models = _load_models(arms=arms, checkpoints=checkpoints, config=config, H=H, JL=JL, device=device,
+                              actor_architecture=actor_architecture)
         review_binding = dict(dict(auth["upstream"])["review_snapshot_binding"])
         review_entries = [dict(row) for row in review_binding["entries"] if int(row["seed"]) == 20260822]
         require(review_binding.get("verified") is True and review_binding.get("collection_digest") == "6c811022a5df4b3966ac14fce750f8bdd840a65a50e48285fe0c97ce157b889e"
@@ -846,9 +933,12 @@ def execute(auth: Mapping[str, Any]) -> None:
             require(all(row["final_actor_digest_matches_r18r3"] and row["final_critic_digest_matches_r18r3"]
                         for row in parameter_delta_audit["arms"].values()),
                     R18R10_REPRO_BLOCK, "final_tensor_digest")
-        pass_gate = R18R10_PASS_GATE if exact_r18r3_replay else PASS_GATE
+        factorized_run = _is_factorized_r18r17(auth)
+        pass_gate = R18R10_PASS_GATE if exact_r18r3_replay else (R18R17_FACTORIZED_PASS_GATE if factorized_run else PASS_GATE)
         classification = ("A_R18_R3_EXACT_STOCHASTIC_TRAJECTORY_REPRODUCED_WITH_DURABLE_CREDIT_PPO_TRACE"
-                          if exact_r18r3_replay else "A_R18_E1_CAUSAL_LEARNING_PATH_OBSERVED")
+                          if exact_r18r3_replay else
+                          ("A_FACTORIZED_ACTOR_BOUNDED_TRAINING_WITH_DURABLE_TRACE_COMPLETE"
+                           if factorized_run else "A_R18_E1_CAUSAL_LEARNING_PATH_OBSERVED"))
         exact_trajectory_payload = {
             "mode": R18R3_EXACT_REPLAY_MODE if exact_r18r3_replay else "CANONICAL_POLICY_SAMPLING_IDENTITY_V1",
             "enabled": exact_r18r3_replay,
@@ -870,6 +960,8 @@ def execute(auth: Mapping[str, Any]) -> None:
             "r18_execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
                                              "preflight": preflight, "arms": arms, "counters": counters,
                                              "selector": "R16 sealed E1 only",
+                                             "actor_architecture": str(dict(auth.get("module_freeze_contract", {})).get("actor_architecture",
+                                                                       "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX")),
                                              "sampling_identity_mode": exact_trajectory_payload["mode"],
                                              "source_binding_guard": current_frozen},
             "r18_learning_path_audit.json": {"cells": learning, "initial_review_replay": initial_reviews,
@@ -883,6 +975,8 @@ def execute(auth: Mapping[str, Any]) -> None:
             "r18_durable_trace_artifact_manifest.json": trace_artifacts,
             "execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
                                         "preflight": preflight, "arms": arms, "counters": counters,
+                                        "actor_architecture": str(dict(auth.get("module_freeze_contract", {})).get("actor_architecture",
+                                                                  "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX")),
                                         "sampling_identity_mode": exact_trajectory_payload["mode"],
                                         "source_binding_guard": current_frozen},
             "exact_trajectory_replay_audit.json": exact_trajectory_payload,
