@@ -134,6 +134,33 @@ def flatten_grads(grads: Sequence[torch.Tensor | None], params: Sequence[torch.n
     ])
 
 
+def parameter_group(name: str) -> str:
+    if name.startswith("no_assign_scorer."):
+        return "no_assign_scorer_direct_path"
+    if name.startswith("scorer."):
+        return "candidate_pair_scorer_path"
+    if name.startswith("candidate_encoder."):
+        return "candidate_encoder_path"
+    if name.startswith("demand_encoder."):
+        return "demand_encoder_candidate_only_path"
+    if name.startswith("global_encoder."):
+        return "global_encoder_shared_path"
+    if name.startswith("agent_encoder."):
+        return "agent_fleet_encoder_shared_path"
+    return "other"
+
+
+def grouped_flat_grads(grads: Sequence[torch.Tensor | None],
+                       named_params: Sequence[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
+    grouped: dict[str, list[torch.Tensor]] = {}
+    for grad, (name, param) in zip(grads, named_params):
+        group = parameter_group(name)
+        grouped.setdefault(group, []).append(
+            (torch.zeros_like(param) if grad is None else grad).detach().reshape(-1).cpu()
+        )
+    return {group: torch.cat(parts) for group, parts in grouped.items()}
+
+
 def dot_cos(left: torch.Tensor, right: torch.Tensor) -> dict[str, float]:
     left_norm = float(left.norm())
     right_norm = float(right.norm())
@@ -163,11 +190,31 @@ def actor_forward_loss(*, actor: torch.nn.Module, row: Mapping[str, Any], snapsh
     unclipped = ratio * advantage
     clipped = torch.clamp(ratio, 0.8, 1.2) * advantage
     selected_policy_loss = -torch.min(unclipped, clipped).squeeze()
+    probabilities = log_probs.detach().exp()[0].cpu()
+    selected_index = int(row["selected_source_index"])
+    no_assign_index = int(tensors["safe_mask"].shape[1])
+    selected_probability = float(probabilities[selected_index])
+    no_assign_probability = float(probabilities[no_assign_index])
+    candidate_probability_mass = float(probabilities[:no_assign_index].sum())
+    selected_is_no_assign = selected_index == no_assign_index
     return selected_policy_loss / denominator, {
         "new_log_prob": float(new_log_prob.detach().cpu()[0]),
         "old_log_prob": float(old_log_prob.detach().cpu()[0]),
         "ppo_ratio": float(ratio.detach().cpu()[0]),
         "selected_policy_loss_unweighted": float(selected_policy_loss.detach().cpu()),
+        "selected_probability": selected_probability,
+        "no_assign_probability": no_assign_probability,
+        "candidate_probability_mass": candidate_probability_mass,
+        "safe_pair_count": int(tensors["safe_mask"][0].sum().detach().cpu().item()),
+        "support_size_including_no_assign": int(tensors["safe_mask"][0].sum().detach().cpu().item()) + 1,
+        "softmax_selected_self_factor": 1.0 - selected_probability,
+        "softmax_no_assign_coupling_factor": (
+            1.0 - no_assign_probability if selected_is_no_assign else no_assign_probability
+        ),
+        "softmax_candidate_mass_coupling_factor": (
+            candidate_probability_mass if selected_is_no_assign
+            else max(0.0, candidate_probability_mass - selected_probability)
+        ),
     }
 
 
@@ -240,10 +287,12 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
     initial_digest = module_digest(actor)
     expected_initial = str(parameter_delta["arms"]["BD_E1_R1"]["initial_actor_digest"])
     require(initial_digest == expected_initial, "BD_initial_actor_digest")
-    params = [param for param in actor.parameters() if param.requires_grad]
+    named_params = [(name, param) for name, param in actor.named_parameters() if param.requires_grad]
+    params = [param for _, param in named_params]
     denominator = float(len(bd_rows))
     row_records: list[dict[str, Any]] = []
     row_update_vectors: dict[str, torch.Tensor] = {}
+    row_update_group_vectors: dict[str, dict[str, torch.Tensor]] = {}
     trace_epoch1 = epoch_rows[(epoch_rows.arm_id == "BD_E1_R1") & (epoch_rows.actor_eligible)
                               & (epoch_rows.epoch_index == 1)].copy()
     trace_epoch1_by_id = {str(row.decision_id): row for row in trace_epoch1.itertuples()}
@@ -255,11 +304,15 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
         grads = torch.autograd.grad(loss, params, retain_graph=False, allow_unused=True)
         loss_grad = flatten_grads(grads, params)
         update = -loss_grad
+        group_update = {group: -vector for group, vector in grouped_flat_grads(grads, named_params).items()}
         trace_row = trace_epoch1_by_id[decision_id]
         new_log_delta = forward["new_log_prob"] - float(trace_row.new_log_prob)
         ratio_delta = forward["ppo_ratio"] - float(trace_row.ppo_ratio)
         require(abs(new_log_delta) <= 5e-7 and abs(ratio_delta) <= 5e-7, f"epoch1_forward_trace_delta={decision_id}")
         row_update_vectors[decision_id] = update
+        row_update_group_vectors[decision_id] = group_update
+        surrogate_scale = float(row["advantage_normalized"]) / denominator
+        row_norm = float(update.norm())
         row_records.append({
             "decision_id": decision_id,
             "transition_index": int(row["transition_index"]),
@@ -272,7 +325,17 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
             "normalized_advantage": float(row["advantage_normalized"]),
             "normalized_advantage_sign": sign(float(row["advantage_normalized"])),
             "normalization_changed_sign": sign(float(row["gae_advantage_raw"])) != sign(float(row["advantage_normalized"])),
-            "row_update_vector_norm": float(update.norm()),
+            "row_update_vector_norm": row_norm,
+            "surrogate_scale_advantage_over_denominator": surrogate_scale,
+            "action_logprob_gradient_leverage_norm": row_norm / abs(surrogate_scale),
+            "selected_action_probability": forward["selected_probability"],
+            "NO_ASSIGN_probability": forward["no_assign_probability"],
+            "candidate_probability_mass": forward["candidate_probability_mass"],
+            "safe_pair_count": forward["safe_pair_count"],
+            "support_size_including_NO_ASSIGN": forward["support_size_including_no_assign"],
+            "softmax_selected_self_factor": forward["softmax_selected_self_factor"],
+            "softmax_NO_ASSIGN_coupling_factor": forward["softmax_no_assign_coupling_factor"],
+            "softmax_candidate_mass_coupling_factor": forward["softmax_candidate_mass_coupling_factor"],
             "epoch1_forward_new_log_prob_delta_vs_trace": new_log_delta,
             "epoch1_forward_ppo_ratio_delta_vs_trace": ratio_delta,
             "policy_loss_contribution_denominator": denominator,
@@ -288,6 +351,7 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
     require(total_loss is not None, "total_loss_missing")
     full_loss_grads = torch.autograd.grad(total_loss, params, retain_graph=False, allow_unused=True)
     full_update = -flatten_grads(full_loss_grads, params)
+    full_group_updates = {group: -vector for group, vector in grouped_flat_grads(full_loss_grads, named_params).items()}
     summed_update = sum(row_update_vectors.values(), torch.zeros_like(full_update))
     additive_delta = float((summed_update - full_update).abs().max())
     require(additive_delta <= 2e-6, f"gradient_additivity_delta={additive_delta}")
@@ -295,10 +359,17 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
     for record in row_records:
         vector = row_update_vectors[record["decision_id"]]
         geom = dot_cos(vector, full_update)
+        group_vectors = row_update_group_vectors[record["decision_id"]]
+        row_norm_sq = max(float(vector.norm() ** 2), 1e-30)
+        group_norms = {group: float(group_vector.norm()) for group, group_vector in sorted(group_vectors.items())}
+        group_energy = {group: (norm * norm) / row_norm_sq for group, norm in group_norms.items()}
         record["dot_with_full_batch_update"] = geom["dot"]
         record["cosine_with_full_batch_update"] = geom["cosine"]
         record["full_batch_update_alignment"] = alignment_label(geom["cosine"])
         record["full_batch_interference"] = geom["cosine"] < -0.25
+        record["parameter_path_gradient_norms"] = group_norms
+        record["parameter_path_energy_share"] = group_energy
+        record["dominant_parameter_path"] = max(group_energy.items(), key=lambda item: item[1])[0]
         record["attribution_result"] = (
             "NO_ASSIGN 강화" if record["selected_is_no_assign"] and geom["cosine"] > 0.25
             else "candidate 억제" if (not record["selected_is_no_assign"]) and geom["cosine"] < -0.25
@@ -330,6 +401,58 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
     by_type: dict[str, list[float]] = {}
     for row in pairwise:
         by_type.setdefault(str(row["pair_type"]), []).append(float(row["cosine"]))
+    candidate_ids = [row["decision_id"] for row in row_records if row["selected_action_type"] == "CANDIDATE"]
+    no_assign_ids = [row["decision_id"] for row in row_records if row["selected_is_no_assign"]]
+    candidate_update = sum((row_update_vectors[decision_id] for decision_id in candidate_ids), torch.zeros_like(full_update))
+    no_assign_update = sum((row_update_vectors[decision_id] for decision_id in no_assign_ids), torch.zeros_like(full_update))
+    candidate_vs_no_assign_update = dot_cos(candidate_update, no_assign_update)
+    group_names = sorted(full_group_updates)
+    parameter_path_decomposition: dict[str, dict[str, Any]] = {}
+    full_norm_sq = max(float(full_update.norm() ** 2), 1e-30)
+    for group in group_names:
+        template = torch.zeros_like(full_group_updates[group])
+        candidate_group = sum(
+            (row_update_group_vectors[decision_id].get(group, torch.zeros_like(template)) for decision_id in candidate_ids),
+            template.clone(),
+        )
+        no_assign_group = sum(
+            (row_update_group_vectors[decision_id].get(group, torch.zeros_like(template)) for decision_id in no_assign_ids),
+            template.clone(),
+        )
+        full_group = full_group_updates[group]
+        group_geom = dot_cos(candidate_group, no_assign_group)
+        parameter_path_decomposition[group] = {
+            "candidate_sum_update_norm": float(candidate_group.norm()),
+            "NO_ASSIGN_sum_update_norm": float(no_assign_group.norm()),
+            "full_batch_update_norm": float(full_group.norm()),
+            "NO_ASSIGN_to_candidate_sum_norm_ratio": (
+                float(no_assign_group.norm()) / float(candidate_group.norm())
+                if float(candidate_group.norm()) > 0.0 else math.inf
+            ),
+            "candidate_vs_NO_ASSIGN_dot": group_geom["dot"],
+            "candidate_vs_NO_ASSIGN_cosine": group_geom["cosine"],
+            "candidate_vs_NO_ASSIGN_alignment": alignment_label(group_geom["cosine"]),
+            "full_batch_energy_share": float(full_group.norm() ** 2) / full_norm_sq,
+        }
+    by_action: dict[str, dict[str, float]] = {}
+    for action_type in ("CANDIDATE", "NO_ASSIGN"):
+        action_rows = [row for row in row_records if row["selected_action_type"] == action_type]
+        by_action[action_type] = {
+            "row_count": float(len(action_rows)),
+            "sum_normalized_advantage": sum(float(row["normalized_advantage"]) for row in action_rows),
+            "mean_normalized_advantage": sum(float(row["normalized_advantage"]) for row in action_rows) / len(action_rows),
+            "sum_row_update_norm": sum(float(row["row_update_vector_norm"]) for row in action_rows),
+            "mean_row_update_norm": sum(float(row["row_update_vector_norm"]) for row in action_rows) / len(action_rows),
+            "mean_action_logprob_gradient_leverage_norm": (
+                sum(float(row["action_logprob_gradient_leverage_norm"]) for row in action_rows) / len(action_rows)
+            ),
+            "mean_selected_action_probability": (
+                sum(float(row["selected_action_probability"]) for row in action_rows) / len(action_rows)
+            ),
+            "mean_support_size_including_NO_ASSIGN": (
+                sum(float(row["support_size_including_NO_ASSIGN"]) for row in action_rows) / len(action_rows)
+            ),
+        }
     aggregate = {
         "full_batch_update_norm": float(full_update.norm()),
         "gradient_vector_dimension": int(full_update.numel()),
@@ -344,6 +467,16 @@ def build_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[
         "gradient_additivity_max_abs_delta": additive_delta,
         "candidate_row_count": sum(row["selected_action_type"] == "CANDIDATE" for row in row_records),
         "no_assign_row_count": sum(row["selected_is_no_assign"] for row in row_records),
+        "candidate_update_sum_norm": float(candidate_update.norm()),
+        "NO_ASSIGN_update_sum_norm": float(no_assign_update.norm()),
+        "NO_ASSIGN_to_candidate_update_sum_norm_ratio": (
+            float(no_assign_update.norm()) / float(candidate_update.norm())
+            if float(candidate_update.norm()) > 0.0 else math.inf
+        ),
+        "candidate_sum_vs_NO_ASSIGN_sum_dot": candidate_vs_no_assign_update["dot"],
+        "candidate_sum_vs_NO_ASSIGN_sum_cosine": candidate_vs_no_assign_update["cosine"],
+        "by_selected_action_type": by_action,
+        "parameter_path_decomposition": parameter_path_decomposition,
         "candidate_rows_conflict_with_full_batch": [
             row["decision_id"] for row in row_records
             if row["selected_action_type"] == "CANDIDATE" and row["full_batch_interference"]
@@ -412,25 +545,54 @@ def final_markdown(*, evidence: Mapping[str, Any], row_audit: Mapping[str, Any],
         "- training/rollout/simulator/optimizer/backward/checkpoint: `0`",
         f"- autograd.grad calls: `{aggregate['autograd_grad_calls']}`",
         f"- full batch update norm: `{aggregate['full_batch_update_norm']:.6f}`",
+        f"- candidate summed update norm: `{aggregate['candidate_update_sum_norm']:.6f}`",
+        f"- NO_ASSIGN summed update norm: `{aggregate['NO_ASSIGN_update_sum_norm']:.6f}`",
+        f"- NO_ASSIGN / candidate summed norm ratio: `{aggregate['NO_ASSIGN_to_candidate_update_sum_norm_ratio']:.6f}`",
         f"- shared-batch interference confirmed: `{str(aggregate['shared_batch_interference_confirmed']).lower()}`",
         "",
-        "| row | 선택 | norm adv | dot(row, batch) | cosine | 정렬 | 결과 |",
-        "|---:|---|---:|---:|---:|---|---|",
+        "| row | 선택 | norm adv | prob | support | leverage ||∇logπ|| | row norm | dot(row,batch) | cosine | 결과 |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
             f"| {row['transition_index']} | {row['selected_action_type']} | "
-            f"{row['normalized_advantage']:+.6f} | {row['dot_with_full_batch_update']:+.6f} | "
-            f"{row['cosine_with_full_batch_update']:+.6f} | {row['full_batch_update_alignment']} | "
+            f"{row['normalized_advantage']:+.6f} | {row['selected_action_probability']:.6f} | "
+            f"{row['support_size_including_NO_ASSIGN']} | "
+            f"{row['action_logprob_gradient_leverage_norm']:.6f} | "
+            f"{row['row_update_vector_norm']:.6f} | "
+            f"{row['dot_with_full_batch_update']:+.6f} | "
+            f"{row['cosine_with_full_batch_update']:+.6f} | "
             f"{row['attribution_result']} |"
         )
     lines.extend([
+        "",
+        "## Magnitude decomposition",
+        "",
+        f"- candidate total normalized advantage: `{aggregate['by_selected_action_type']['CANDIDATE']['sum_normalized_advantage']:+.6f}`",
+        f"- NO_ASSIGN total normalized advantage: `{aggregate['by_selected_action_type']['NO_ASSIGN']['sum_normalized_advantage']:+.6f}`",
+        f"- candidate mean action-logprob leverage: `{aggregate['by_selected_action_type']['CANDIDATE']['mean_action_logprob_gradient_leverage_norm']:.6f}`",
+        f"- NO_ASSIGN mean action-logprob leverage: `{aggregate['by_selected_action_type']['NO_ASSIGN']['mean_action_logprob_gradient_leverage_norm']:.6f}`",
         "",
         "## Pairwise alignment summary",
         "",
         f"- candidate-candidate mean cosine: `{aggregate['mean_cosine_by_pair_type']['candidate_candidate']:+.6f}`",
         f"- NO_ASSIGN-NO_ASSIGN mean cosine: `{aggregate['mean_cosine_by_pair_type']['no_assign_no_assign']:+.6f}`",
         f"- candidate-vs-NO_ASSIGN mean cosine: `{aggregate['mean_cosine_by_pair_type']['candidate_vs_no_assign']:+.6f}`",
+        "",
+        "## Parameter-path dominance",
+        "",
+        "| path | candidate norm | NO_ASSIGN norm | NO_ASSIGN/candidate | conflict cosine | full energy share |",
+        "|---|---:|---:|---:|---:|---:|",
+    ])
+    for group, payload in sorted(aggregate["parameter_path_decomposition"].items()):
+        lines.append(
+            f"| {group} | {payload['candidate_sum_update_norm']:.6f} | "
+            f"{payload['NO_ASSIGN_sum_update_norm']:.6f} | "
+            f"{payload['NO_ASSIGN_to_candidate_sum_norm_ratio']:.6f} | "
+            f"{payload['candidate_vs_NO_ASSIGN_cosine']:+.6f} | "
+            f"{payload['full_batch_energy_share']:.6f} |"
+        )
+    lines.extend([
         "",
         "## Interpretation",
         "",
