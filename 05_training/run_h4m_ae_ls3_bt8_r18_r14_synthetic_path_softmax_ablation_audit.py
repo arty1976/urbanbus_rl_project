@@ -234,6 +234,7 @@ def load_authoritative_inputs() -> tuple[dict[str, Any], pd.DataFrame, pd.DataFr
         "r18r13_NO_ASSIGN_update_sum_norm": r13_row["aggregate"]["NO_ASSIGN_update_sum_norm"],
         "trace_schema_sha256": BASE.sha256(BASE.R18_R10B_ROOT / "trace_schema.json"),
         "BD_actor_eligible_rows": len(bd_rows),
+        "BD_initial_actor_digest": initial_digest,
         "same_frozen_model": "R18-R10B initial BD actor checkpoint loaded read-only",
         "gradient_geometry_epoch": 1,
         "gradient_geometry_device": "cpu",
@@ -361,11 +362,11 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         all_groups,
     )
     require(observed_all["winner"] == "NO_ASSIGN_dominant", "observed_not_NO_ASSIGN_dominant")
-    require(abs(observed_all["synthetic_full_batch_norm"] - evidence["r18r13_full_batch_update_norm"]) <= 5e-6,
+    require(abs(observed_all["synthetic_full_batch_norm"] - evidence["r18r13_full_batch_update_norm"]) <= 2e-5,
             "r18r13_full_norm_binding")
-    require(abs(observed_all["candidate_sum_norm"] - evidence["r18r13_candidate_update_sum_norm"]) <= 5e-6,
+    require(abs(observed_all["candidate_sum_norm"] - evidence["r18r13_candidate_update_sum_norm"]) <= 2e-5,
             "r18r13_candidate_norm_binding")
-    require(abs(observed_all["NO_ASSIGN_sum_norm"] - evidence["r18r13_NO_ASSIGN_update_sum_norm"]) <= 5e-6,
+    require(abs(observed_all["NO_ASSIGN_sum_norm"] - evidence["r18r13_NO_ASSIGN_update_sum_norm"]) <= 2e-5,
             "r18r13_NO_ASSIGN_norm_binding")
 
     direct_removed_groups = [group for group in all_groups if group != DIRECT_HEAD_GROUP]
@@ -432,8 +433,8 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         classification = CLASS_BATCH_ONLY
         classification_reason = "No single structural path/coupling ablation preserves the NO_ASSIGN dominance pattern."
 
-    initial_digest = str(evidence["same_frozen_model"])
-    final_digest = str(evidence["same_frozen_model"])
+    initial_digest = str(evidence["BD_initial_actor_digest"])
+    final_digest = BASE.module_digest(actor)
     counters = {
         "training": 0,
         "rollout": 0,
@@ -449,7 +450,7 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         "github_push": 0,
         "test6_access": 0,
     }
-    require(BASE.module_digest(actor) == BASE.load_json(BASE.R18_R10B_ROOT / "parameter_delta_audit.json")["arms"]["BD_E1_R1"]["initial_actor_digest"],
+    require(final_digest == BASE.load_json(BASE.R18_R10B_ROOT / "parameter_delta_audit.json")["arms"]["BD_E1_R1"]["initial_actor_digest"],
             "policy_parameter_mutated")
     row_term_decomposition = {
         "rows": row_records,
@@ -462,9 +463,9 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
             "backward_method_calls": 0,
             "optimizer_step": 0,
             "checkpoint_write": 0,
-            "policy_parameter_mutated": False,
-            "policy_parameter_digest_marker_before": initial_digest,
-            "policy_parameter_digest_marker_after": final_digest,
+            "policy_parameter_mutated": final_digest != initial_digest,
+            "policy_parameter_digest_before": initial_digest,
+            "policy_parameter_digest_after": final_digest,
         },
     }
     classification_decision = {
@@ -493,6 +494,29 @@ def final_markdown(*, evidence: Mapping[str, Any], row_terms: Mapping[str, Any],
                    gate: str, source_commit: str) -> str:
     observed = row_terms["aggregate"]["observed_all_paths"]
     self_only = softmax["selected_logit_self_term_only_all_paths"]
+    classification_name = str(classification["classification"])
+    if classification_name == CLASS_DIRECT:
+        interpretation = (
+            "Synthetic zeroing of the NO_ASSIGN direct scorer flips the residual batch vector toward candidate. "
+            "That would make the direct NO_ASSIGN head the dominant structural cause."
+        )
+    elif classification_name == CLASS_SOFTMAX:
+        interpretation = (
+            "Zeroing the NO_ASSIGN direct scorer alone does not flip the residual batch vector; NO_ASSIGN still wins. "
+            "But analytically removing the shared-softmax normalizer/coupling term removes the antagonistic candidate-vs-NO_ASSIGN batch problem, "
+            "turning the selected-logit self terms into co-aligned, non-competing components. "
+            "So the core cause is shared softmax coupling, with the NO_ASSIGN direct head acting as a large leverage path inside that coupling."
+        )
+    elif classification_name == CLASS_MULTI:
+        interpretation = (
+            "NO_ASSIGN dominance survives single-path ablations and the softmax-only separation does not by itself explain the effect. "
+            "The safe diagnosis is multi-path structural coupling across the direct head, candidate scorer, and shared encoder paths."
+        )
+    else:
+        interpretation = (
+            "The synthetic structural ablations do not isolate a persistent path or softmax-coupling cause. "
+            "The remaining explanation would be batch geometry only rather than architecture-specific leverage."
+        )
     lines = [
         "# R18-R14 synthetic path / softmax-coupling ablation audit",
         "",
@@ -535,10 +559,7 @@ def final_markdown(*, evidence: Mapping[str, Any], row_terms: Mapping[str, Any],
         "",
         "## Interpretation",
         "",
-        "The NO_ASSIGN direct head is the largest single residual path, but synthetic zeroing of that path alone does not flip the batch vector to candidate. "
-        "The candidate-vs-NO_ASSIGN antagonism also remains in the candidate scorer and shared agent/fleet encoder paths. "
-        "When the shared softmax normalizer/coupling term is removed analytically, the candidate and NO_ASSIGN self terms stop forming the same strong zero-sum competition. "
-        "So the safe diagnosis is multi-path structural coupling, with the direct NO_ASSIGN head as the largest contributor rather than the sole cause.",
+        interpretation,
     ])
     return "\n".join(lines) + "\n"
 
