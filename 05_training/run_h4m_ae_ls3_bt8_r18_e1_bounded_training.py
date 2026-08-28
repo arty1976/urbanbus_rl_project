@@ -31,7 +31,13 @@ PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_E1_MINIMAL_BOUNDED_TRAINING_AN
 R18R10_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R10_EXACT_R18_R3_TRAJECTORY_DURABLE_TRACE_BOUNDED_RERUN_COMPLETE"
 R18R10_AUTHORIZATION = "R18R10_EXACT_R18R3_TRACE_REPLAY_ONE_SHOT_ONLY"
 R18R17_FACTORIZED_AUTHORIZATION = "R18R17_FACTORIZED_ACTOR_BOUNDED_TRAINING_ONE_SHOT_ONLY"
+R18R18B_FACTORIZED_AUTHORIZATION = "R18R18B_FACTORIZED_ACTOR_EXTERNAL_MPS_BOUNDED_TRAINING_ONE_SHOT_ONLY"
+FACTORIZED_AUTHORIZATIONS = frozenset({R18R17_FACTORIZED_AUTHORIZATION, R18R18B_FACTORIZED_AUTHORIZATION})
 R18R17_FACTORIZED_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R17_FACTORIZED_ACTOR_BOUNDED_TRAINING_AUTHORIZATION_READY"
+R18R18B_FACTORIZED_PASS_GATE = (
+    "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R18B_"
+    "FACTORIZED_ACTOR_BOUNDED_TRAINING_DURABLE_GATE_CANDIDATE_HEAD_TRACE_COMPLETE"
+)
 FACTORIZED_ACTOR_ARCHITECTURE = "FACTORIZED_ASSIGN_THEN_CANDIDATE"
 R18R3_SOURCE_COMMIT = "7bd0e2e223779455e6112584abd0b5cb6441c228"
 R18R3_EXACT_REPLAY_MODE = "R18_R3_EXACT_REPLAY_SAMPLING_IDENTITY"
@@ -96,6 +102,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--execute-exact-r17-envelope", action="store_true")
+    mode.add_argument("--execute-exact-r18-envelope", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -107,19 +114,21 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
     authorization = str(payload.get("authorization"))
     require(payload.get("authorized") is True and authorization in {
             "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY", R18R10_AUTHORIZATION,
-            R18R17_FACTORIZED_AUTHORIZATION}, AUTH_BLOCK, "authorization_schema")
+            *FACTORIZED_AUTHORIZATIONS}, AUTH_BLOCK, "authorization_schema")
     require((authorization == "R18_EXACT_ONE_SHOT_E1_BOUNDED_TRAINING_ONLY"
              and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R17")
             or (authorization == R18R10_AUTHORIZATION
                 and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R10")
             or (authorization == R18R17_FACTORIZED_AUTHORIZATION
-                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R17"),
+                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R17")
+            or (authorization == R18R18B_FACTORIZED_AUTHORIZATION
+                and payload.get("stage") == "H4M-AE-R9.8-LS3-BT8-R18-R18B"),
             AUTH_BLOCK, "authorization_stage")
     upstream = dict(payload.get("upstream", {}))
     executor = dict(upstream.get("r18_executor", {}))
     require(executor.get("path") == str(Path(__file__).resolve()) and executor.get("sha256") == sha256(Path(__file__)),
             AUTH_BLOCK, "r18_executor_source_binding")
-    expected_r16 = R18R16_FACTORIZED_SOURCE if authorization == R18R17_FACTORIZED_AUTHORIZATION else R16_SOURCE
+    expected_r16 = R18R16_FACTORIZED_SOURCE if authorization in FACTORIZED_AUTHORIZATIONS else R16_SOURCE
     require(payload.get("r16_source_commit") == expected_r16, AUTH_BLOCK, "r16_source")
     envelope = dict(payload.get("envelope", {}))
     aggregate = dict(envelope.get("aggregate", {}))
@@ -131,7 +140,7 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
             AUTH_BLOCK, "aggregate_envelope")
     arms = list(envelope.get("selected_arms", []))
     expected_arm_order = (["AC_FACTOR_CONTROL_R1", "BD_FACTOR_R1"]
-                          if authorization == R18R17_FACTORIZED_AUTHORIZATION
+                          if authorization in FACTORIZED_AUTHORIZATIONS
                           else ["AC_CONTROL_R1", "BD_E1_R1"])
     require([str(row.get("arm_id")) for row in arms] == expected_arm_order, AUTH_BLOCK, "arm_order")
     for arm in arms:
@@ -141,7 +150,7 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
                 AUTH_BLOCK, f"arm_scope={arm.get('arm_id')}")
         seeds = dict(arm.get("categorical_probe_seed_by_decision", {}))
         require(len(seeds) == 24 and set(seeds.values()) == {0}, AUTH_BLOCK, f"categorical_seed_map={arm.get('arm_id')}")
-        if authorization == R18R17_FACTORIZED_AUTHORIZATION:
+        if authorization in FACTORIZED_AUTHORIZATIONS:
             require(isinstance(arm.get("factorized_gate_initialization_seed"), int),
                     AUTH_BLOCK, f"factorized_gate_initialization_seed={arm.get('arm_id')}")
     module = dict(payload.get("module_freeze_contract", {}))
@@ -150,7 +159,7 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
             and module.get("E1_only") is True and module.get("E2_rescue") is False and module.get("E3_temperature_or_floor") is False
             and module.get("sealed_distribution_view_required") is True
             and module.get("e1_contract_sha256") == "eb84543a9fc06dcf730e49aa3895d9fe26d2244a05ce340986b7449418205ad9", AUTH_BLOCK, "selector_freeze")
-    if authorization == R18R17_FACTORIZED_AUTHORIZATION:
+    if authorization in FACTORIZED_AUTHORIZATIONS:
         require(module.get("actor_architecture") == FACTORIZED_ACTOR_ARCHITECTURE
                 and module.get("actor_class") == "FactorizedAssignThenCandidateAssignmentHead"
                 and module.get("factorized_ppo_loss_binding") == "DIRECT_RECONSTRUCTED_ACTION_LOG_PROBS_NO_SECOND_SHARED_SOFTMAX"
@@ -239,7 +248,11 @@ def _is_exact_r18r3_replay(auth: Mapping[str, Any]) -> bool:
 
 
 def _is_factorized_r18r17(auth: Mapping[str, Any]) -> bool:
-    return str(auth.get("authorization")) == R18R17_FACTORIZED_AUTHORIZATION
+    return str(auth.get("authorization")) in FACTORIZED_AUTHORIZATIONS
+
+
+def _is_r18r18b_factorized(auth: Mapping[str, Any]) -> bool:
+    return str(auth.get("authorization")) == R18R18B_FACTORIZED_AUTHORIZATION
 
 
 def _factorized_role_arm_ids(arms: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
@@ -1047,7 +1060,9 @@ def execute(auth: Mapping[str, Any]) -> None:
                         for row in parameter_delta_audit["arms"].values()),
                     R18R10_REPRO_BLOCK, "final_tensor_digest")
         factorized_run = _is_factorized_r18r17(auth)
-        pass_gate = R18R10_PASS_GATE if exact_r18r3_replay else (R18R17_FACTORIZED_PASS_GATE if factorized_run else PASS_GATE)
+        pass_gate = (R18R10_PASS_GATE if exact_r18r3_replay else
+                     (R18R18B_FACTORIZED_PASS_GATE if _is_r18r18b_factorized(auth)
+                      else (R18R17_FACTORIZED_PASS_GATE if factorized_run else PASS_GATE)))
         classification = ("A_R18_R3_EXACT_STOCHASTIC_TRAJECTORY_REPRODUCED_WITH_DURABLE_CREDIT_PPO_TRACE"
                           if exact_r18r3_replay else
                           ("A_FACTORIZED_ACTOR_BOUNDED_TRAINING_WITH_DURABLE_TRACE_COMPLETE"
@@ -1062,8 +1077,8 @@ def execute(auth: Mapping[str, Any]) -> None:
             "rows": exact_replay_audit,
         }
         optimizer_step_audit = {
-            "AC_CONTROL_R1": {"actor_steps": 3, "critic_steps": 3},
-            "BD_E1_R1": {"actor_steps": 3, "critic_steps": 3},
+            ac_arm_id: {"actor_steps": 3, "critic_steps": 3},
+            bd_arm_id: {"actor_steps": 3, "critic_steps": 3},
             "aggregate": {"actor_optimizer_step": counters["actor_optimizer_step"],
                           "critic_optimizer_step": counters["critic_optimizer_step"],
                           "raw_optimizer_step": counters["raw_optimizer_step"],
@@ -1123,6 +1138,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.dry_run:
         print(json.dumps(dry_run_report(auth), ensure_ascii=False, sort_keys=True))
         return
+    require(
+        (args.execute_exact_r17_envelope and not _is_r18r18b_factorized(auth))
+        or (args.execute_exact_r18_envelope and _is_r18r18b_factorized(auth)),
+        AUTH_BLOCK,
+        "execute_flag_does_not_match_authorization",
+    )
     execute(auth)
 
 
