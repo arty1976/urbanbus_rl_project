@@ -189,7 +189,7 @@ def main() -> None:
         instrumentation = R9.instrumentation_equivalence_fixture(FPS, H, TIE, TRACE)
         equivalence = {
             "source_commit_no_longer_changes_policy_sampling_identity": not source_commit_fixture["policy_sampling_identity_differs"],
-            "source_commit_still_changes_evidence_digest": source_commit_fixture["evidence_snapshot_digest_differs"],
+            "source_commit_still_changes_evidence_digest": source_commit_fixture["evidence_digest_differs"],
             "real_state_mutation_changes_sampling_identity": semantic_fixture[
                 "real_state_mutation_changes_policy_sampling_identity"],
             "support_mutation_changes_sampling_identity": semantic_fixture[
