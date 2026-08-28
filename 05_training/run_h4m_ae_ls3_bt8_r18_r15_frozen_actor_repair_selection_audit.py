@@ -154,11 +154,13 @@ def dot_cos_safe(left: torch.Tensor, right: torch.Tensor) -> dict[str, Any]:
     left_norm = float(left.norm())
     right_norm = float(right.norm())
     dot = float(torch.dot(left, right)) if left.numel() and right.numel() else 0.0
-    cosine = dot / (left_norm * right_norm) if left_norm > 0.0 and right_norm > 0.0 else None
+    raw_cosine = dot / (left_norm * right_norm) if left_norm > 0.0 and right_norm > 0.0 else None
+    cosine = None if raw_cosine is None else max(-1.0, min(1.0, float(raw_cosine)))
     alignment = "zero_vector" if cosine is None else BASE.alignment_label(float(cosine))
     return {
         "dot": dot,
         "cosine": cosine,
+        "raw_cosine": raw_cosine,
         "left_norm": left_norm,
         "right_norm": right_norm,
         "alignment": alignment,
