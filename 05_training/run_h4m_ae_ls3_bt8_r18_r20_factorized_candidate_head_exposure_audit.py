@@ -498,6 +498,7 @@ def decomposition(classified: pd.DataFrame, epoch: pd.DataFrame, snapshots: Mapp
             before = selected_metrics(initials[decision], int(base["selected_source_index"]))
             after = selected_metrics(finals[decision], int(base["selected_source_index"]))
             direct_rows.append({**{field: base[field] for field in ID_FIELDS}, "window_id": base["window_id"], "time_band": base["time_band"],
+                                "candidate_support_digest": base["candidate_support_digest"], "action_support_digest": base["action_support_digest"],
                                 "K": int(base["K"]), "selected_semantic_candidate": base["selected_semantic_candidate"],
                                 "candidate_semantic_identities": list(base["candidate_semantic_identities"]),
                                 "normalized_advantage": float(base["advantage_normalized"]), "initial": before, "final": after,
