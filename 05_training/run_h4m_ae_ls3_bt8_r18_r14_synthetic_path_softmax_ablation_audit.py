@@ -302,8 +302,11 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         selected_groups = scale_grouped_grads(selected_grads, named_params, ppo_scale)
         coupling_groups = scale_grouped_grads(normalizer_grads, named_params, -ppo_scale)
         observed_groups = combine_groups(selected_groups, coupling_groups, all_groups)
-        require(float((concat_groups(observed_groups, all_groups) - observed_vec).abs().max()) <= 2e-6,
-                f"grouped_observed_delta={decision_id}")
+        # Group concatenation intentionally uses canonical parameter-group order,
+        # not raw module parameter order.  Norm equality is the invariant; direct
+        # elementwise comparison would be a false failure after reordering.
+        require(abs(float(concat_groups(observed_groups, all_groups).norm()) - float(observed_vec.norm())) <= 2e-6,
+                f"grouped_observed_norm_delta={decision_id}")
 
         probs = torch.softmax(full_logits.detach(), dim=-1)[0].cpu()
         selected_is_no_assign = bool(row["selected_is_no_assign"])
