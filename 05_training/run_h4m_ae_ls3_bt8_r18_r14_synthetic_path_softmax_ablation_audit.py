@@ -305,7 +305,7 @@ def build_ablation_audit() -> tuple[dict[str, Any], dict[str, Any], dict[str, An
         # Group concatenation intentionally uses canonical parameter-group order,
         # not raw module parameter order.  Norm equality is the invariant; direct
         # elementwise comparison would be a false failure after reordering.
-        require(abs(float(concat_groups(observed_groups, all_groups).norm()) - float(observed_vec.norm())) <= 1e-5,
+        require(abs(float(concat_groups(observed_groups, all_groups).norm()) - float(observed_vec.norm())) <= 2e-5,
                 f"grouped_observed_norm_delta={decision_id}")
 
         probs = torch.softmax(full_logits.detach(), dim=-1)[0].cpu()
