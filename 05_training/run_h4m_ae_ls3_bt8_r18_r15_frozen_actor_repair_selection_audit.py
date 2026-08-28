@@ -541,7 +541,7 @@ def factorized_gradient_decomposition(actor: torch.nn.Module, rows: pd.DataFrame
                 group: vector * ppo_scale
                 for group, vector in BASE.grouped_flat_grads(cond_grads, named_params).items()
             }
-            cond_probs = dist["conditional_candidate_probabilities"]
+            cond_probs = dist["conditional_candidate_probabilities"].detach()
             delta = torch.zeros_like(cond_probs)
             selected_pos_full = selected_index
             delta[safe_indices] = -ppo_scale * cond_probs[safe_indices]
