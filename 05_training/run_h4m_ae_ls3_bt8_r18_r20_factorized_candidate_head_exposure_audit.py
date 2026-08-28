@@ -667,6 +667,17 @@ def main() -> None:
         require(bool(ranking["selected_candidate_reinforced"].all()), "positive_advantage_k_gt_1_not_reinforced", BLOCK_GRADIENT)
         reconcile = reconciliation(ranking)
         next_selection = next_step(exposure, geometry, invariants)
+        learning_group_mean = {
+            str(category): {
+                "epoch_trace_rows": int(len(group)),
+                "mean_stage1_gradient_norm": float(group["stage1_gradient_norm"].mean()),
+                "mean_stage2_gradient_norm": float(group["stage2_gradient_norm"].mean()),
+                "mean_shared_encoder_gradient_norm": float(group["shared_encoder_gradient_norm"].mean()),
+                "mean_stage1_gate_loss_contribution": float(group["stage1_gate_loss_contribution"].mean()),
+                "mean_stage2_conditional_loss_contribution": float(group["stage2_conditional_loss_contribution"].mean()),
+            }
+            for category, group in decomposed.groupby("selected_action_family", sort=True)
+        }
         decomposed.to_parquet(root / "stage1_stage2_learning_decomposition.parquet", index=False)
         ranking.to_parquet(root / "k_gt_1_candidate_ranking_rows.parquet", index=False)
         outputs = {
@@ -675,7 +686,7 @@ def main() -> None:
             "external_mps_preflight.json": mps,
             "factorized_exposure_census.json": exposure,
             "factorized_exposure_by_time_band.json": by_band,
-            "candidate_head_gradient_alignment.json": {"K_gt_1_rows": alignment,
+            "candidate_head_gradient_alignment.json": {"K_gt_1_rows": alignment, "stage1_stage2_group_mean": learning_group_mean,
                                                         "all_positive_advantage_rows_reinforced": bool(ranking["selected_candidate_reinforced"].all())},
             "candidate_head_gradient_cancellation.json": geometry,
             "r18r19_candidate_head_reconciliation.json": reconcile,
@@ -691,8 +702,17 @@ def main() -> None:
         (root / "final_report.md").write_text(
             "# R18-R20 factorized candidate-head learning exposure audit\n\n"
             f"- gate: `{PASS_GATE}`\n- source: `{source_commit}`\n"
-            f"- K>1 candidate-selected eligible rows: `{exposure['overall']['candidate_selected_K_gt_1_rows']}`\n"
             f"- classification: `{CLASSIFICATION}`\n"
+            f"- Q1: candidate-selected eligible rows were K=1 `{exposure['overall']['candidate_selected_K1_rows']}` and K>1 `{exposure['overall']['candidate_selected_K_gt_1_rows']}`.\n"
+            "- Q2: real K>1 opportunity appeared only in AC peak, one window, one action-support digest, and one selected semantic candidate identity.\n"
+            "- Q3: both K>1 rows had valid credit/advantage binding and durable Stage-2 loss/gradient traces; read-only epoch-1 gradient norms matched their durable traces.\n"
+            "- Q4: both positive-advantage K>1 rows increased the selected conditional probability and improved selected conditional rank from 3 to 2.\n"
+            f"- Q5: observed mean Stage-2 norm for K>1 rows was `{learning_group_mean['CANDIDATE_K_GT_1']['mean_stage2_gradient_norm']:.6f}` versus Stage-1 `{learning_group_mean['CANDIDATE_K_GT_1']['mean_stage1_gradient_norm']:.6f}`; these are separate parameter groups, so this is descriptive rather than a loss-scale prescription.\n"
+            f"- Q6: the two exact epoch-1 Stage-2 gradients co-aligned (cosine `{geometry['mean_same_direction_cosine']:.12f}`), with cancellation ratio `{geometry['cancellation_ratio']:.12f}` and no opposed pair.\n"
+            "- Q7: R18-R19's weak candidate-head change is primarily exposure-limited, not evidence of cancellation or a credit/update defect.\n"
+            "- Q8: factorized implementation remains valid: NO_ASSIGN candidate-head contamination was 0 and K=1 conditional ranking gradients were 0.\n"
+            "- Q9: no Reward V2, E1, PPO, or GAE change is justified.\n"
+            "- Q10: next step is a minimal pre-outcome exposure-envelope design; training is not authorized.\n"
             "- training / rollout / optimizer / backward / checkpoint write: `0`\n",
             encoding="utf-8",
         )
