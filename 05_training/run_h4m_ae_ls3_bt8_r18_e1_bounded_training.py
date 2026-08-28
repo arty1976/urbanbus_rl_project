@@ -32,6 +32,9 @@ R18R10_PASS_GATE = "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R10_EXACT_R18_R3_TRAJEC
 R18R10_AUTHORIZATION = "R18R10_EXACT_R18R3_TRACE_REPLAY_ONE_SHOT_ONLY"
 R18R3_SOURCE_COMMIT = "7bd0e2e223779455e6112584abd0b5cb6441c228"
 R18R3_EXACT_REPLAY_MODE = "R18_R3_EXACT_REPLAY_SAMPLING_IDENTITY"
+R18R10_SELECTOR_BINDING_MODE = "R18_R9_SELECTOR_SHA_REQUIRED"
+R16_SELECTOR_SOURCE_SHA256 = "72ebffd78db3d193ab4643c040090cecbacd23d9478d9b2a6fb54f124da65fc6"
+R18R9_SELECTOR_SOURCE_SHA256 = "d88998f22d8990e4e5ee60c4b6594d82cac7db6aabfcc36f49ed9f37c3f7b474"
 AUTH_BLOCK = "BLOCKED_R18_AUTHORIZATION_OR_BINDING_FAILURE"
 INTEGRITY_BLOCK = "BLOCKED_R18_EXECUTION_INTEGRITY_FAILURE"
 MPS_BLOCK = "BLOCKED_MPS_EXECUTION_ENVIRONMENT_UNAVAILABLE"
@@ -152,6 +155,13 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
                 and sha256(reference_path) == reference.get("sha256"), AUTH_BLOCK, "exact_replay_reference")
         require(dict(payload.get("module_freeze_contract", {})).get("training_sampling_identity_mode") == R18R3_EXACT_REPLAY_MODE,
                 AUTH_BLOCK, "r18r10_sampling_identity_mode")
+        selector_binding = dict(payload.get("selector_source_binding", {}))
+        require(selector_binding.get("mode") == R18R10_SELECTOR_BINDING_MODE
+                and selector_binding.get("r18_r9_selector_sha256") == R18R9_SELECTOR_SOURCE_SHA256
+                and selector_binding.get("old_r16_selector_sha256") == R16_SELECTOR_SOURCE_SHA256
+                and selector_binding.get("require_old_r16_selector_as_current") is False
+                and selector_binding.get("reject_selector_mutation") is True,
+                AUTH_BLOCK, "selector_source_binding")
     return payload
 
 
@@ -198,6 +208,86 @@ def _counters() -> dict[str, int]:
 
 def _is_exact_r18r3_replay(auth: Mapping[str, Any]) -> bool:
     return str(auth.get("authorization")) == R18R10_AUTHORIZATION
+
+
+def _r16_source_hash_expected_actual(*, R17: Any, r16_path: Path) -> dict[str, dict[str, str]]:
+    """Return R17's source-binding map without requiring the R16 selector as current.
+
+    R18-R10 exact replay intentionally keeps all frozen R16/R17 authority hashes
+    unchanged except the selector implementation file, whose current source must
+    be the already-validated R18-R9 provenance/sampling repair selector.
+    """
+    r16_hashes = R17._file_hashes_from_r16(r16_path)
+    required = {
+        "implementation:selector": ROOT / "joint_assignment_frozen_policy_selector.py",
+        "implementation:r16_runner": ROOT / "run_h4m_ae_ls3_bt8_r16_frozen_policy_masked_categorical_exploration_validation.py",
+        "implementation:selector_test": ROOT / "test_joint_assignment_frozen_policy_selector.py",
+        "frozen:gatv2_operational_actor_critic": ROOT / "run_prompt5_e01_dl1_suseong_gatv2_mappo_critic_joint_learning_validation.py",
+        "frozen:reward_v2": ROOT / "rewards" / "mappo_reward_v1.py",
+        "frozen:zero_loss": ROOT / "simulator" / "zero_loss_admission_adapter.py",
+        "frozen:local_search_authority": ROOT / "local_search_contract.py",
+        "frozen:candidate_support_deconfounding": ROOT / "joint_candidate_support_snapshot.py",
+        "frozen:causal_bridge": ROOT / "causal_kpi_bridge.py",
+        "frozen:r9_8_authorization": ROOT / "simulator_authorization.py",
+        "frozen:credit_contract": ROOT / "joint_assignment_credit_contract.py",
+        "frozen:joint_assignment_learning": ROOT / "joint_assignment_learning.py",
+        "frozen:r9_7_gate": ROOT / "run_h4m_ae_r9_7_gate.py",
+        "frozen:r9_8_gate": ROOT / "run_h4m_ae_r9_8_gate.py",
+        "frozen:joint_actor_head": ROOT / "multi_agent_candidate_assignment_head.py",
+        "frozen:t1_selector": ROOT / "joint_assignment_frozen_tie_break.py",
+        "extra:candidate_plan_bridge": ROOT / "joint_candidate_plan_causal_bridge.py",
+        "extra:e1_eligibility": ROOT / "joint_assignment_e1_eligibility.py",
+        "extra:t1_selector": ROOT / "joint_assignment_frozen_tie_break.py",
+    }
+    expected = {
+        "implementation:selector": str(r16_hashes["05_training/joint_assignment_frozen_policy_selector.py"]["after_sha256"]),
+        "implementation:r16_runner": str(r16_hashes["05_training/run_h4m_ae_ls3_bt8_r16_frozen_policy_masked_categorical_exploration_validation.py"]["after_sha256"]),
+        "implementation:selector_test": str(r16_hashes["05_training/test_joint_assignment_frozen_policy_selector.py"]["after_sha256"]),
+        **{key: str(value) for key, value in r16_hashes.items() if key.startswith(("frozen:", "extra:"))},
+    }
+    actual = {key: sha256(path) for key, path in required.items()}
+    return {"expected": expected, "actual": actual}
+
+
+def source_hash_binding_for_authorization(*, auth: Mapping[str, Any], R17: Any, r16_path: Path) -> dict[str, Any]:
+    """Bind frozen source hashes for the active authorization.
+
+    Historical R18 authorizations keep the original R17 source guard untouched.
+    R18-R10 exact replay uses the same guard surface but swaps only the current
+    selector expectation from the old R16 selector SHA to the validated R18-R9
+    selector SHA.  All other frozen hashes remain byte-for-byte R16/R17-bound.
+    """
+    if not _is_exact_r18r3_replay(auth):
+        return R17._source_hash_binding(r16_path)
+
+    base = _r16_source_hash_expected_actual(R17=R17, r16_path=r16_path)
+    expected = dict(base["expected"])
+    actual = dict(base["actual"])
+    old_r16_selector = str(expected["implementation:selector"])
+    selector_binding = dict(auth.get("selector_source_binding", {}))
+    require(selector_binding.get("mode") == R18R10_SELECTOR_BINDING_MODE,
+            AUTH_BLOCK, "selector_source_binding_mode")
+    require(old_r16_selector == R16_SELECTOR_SOURCE_SHA256
+            and selector_binding.get("old_r16_selector_sha256") == old_r16_selector
+            and selector_binding.get("require_old_r16_selector_as_current") is False,
+            AUTH_BLOCK, "old_r16_selector_not_current")
+    require(selector_binding.get("r18_r9_selector_sha256") == R18R9_SELECTOR_SOURCE_SHA256,
+            AUTH_BLOCK, "r18r9_selector_binding")
+    expected["implementation:selector"] = R18R9_SELECTOR_SOURCE_SHA256
+    mismatches = {key: {"expected": expected.get(key), "actual": actual.get(key)}
+                  for key in expected if actual.get(key) != expected.get(key)}
+    require(not mismatches, R18R10_INTEGRITY_BLOCK,
+            "r18r10_source_binding_guard=" + json.dumps(mismatches, sort_keys=True))
+    return {
+        "expected": expected,
+        "actual": actual,
+        "all_unchanged": True,
+        "selector_binding_mode": R18R10_SELECTOR_BINDING_MODE,
+        "old_r16_selector_sha256": old_r16_selector,
+        "old_r16_selector_required_as_current": False,
+        "r18_r9_selector_sha256": R18R9_SELECTOR_SOURCE_SHA256,
+        "other_frozen_source_sha_unchanged": True,
+    }
 
 
 def _load_exact_replay_reference(auth: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -619,7 +709,7 @@ def execute(auth: Mapping[str, Any]) -> None:
         require(git(["rev-parse", "HEAD"]) == str(auth["source_commit"]) and git(["status", "--porcelain=v1"]) == "",
                 AUTH_BLOCK, "unexpected_source_mutation")
         r16_path = Path(str(dict(auth["upstream"])["timestamped_artifacts"]["r16"]))
-        current_frozen = R17._source_hash_binding(r16_path)
+        current_frozen = source_hash_binding_for_authorization(auth=auth, R17=R17, r16_path=r16_path)
         bound_frozen = dict(dict(auth["module_freeze_contract"])["frozen_source_hashes"])
         require(current_frozen == bound_frozen, AUTH_BLOCK, "frozen_source_mutation")
         e1_contract_entry = dict(dict(auth["upstream"])["e1_contract"])
@@ -660,7 +750,7 @@ def execute(auth: Mapping[str, Any]) -> None:
                 and len(review_entries) == 3, AUTH_BLOCK, "review_binding")
         initial_reviews = {arm_id: _frozen_review_replay(actor=model["actor"], entries=review_entries, FPS=FPS, F1MOD=F1MOD,
                                                           H=H, TIE=TIE, device=device) for arm_id, model in models.items()}
-        frozen_before = dict(dict(auth["module_freeze_contract"])["frozen_source_hashes"]["actual"])
+        frozen_before = dict(current_frozen["actual"])
         root.mkdir(parents=True)
         snapshots: list[dict[str, Any]] = []
         rollouts: dict[str, Any] = {}
@@ -780,7 +870,8 @@ def execute(auth: Mapping[str, Any]) -> None:
             "r18_execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
                                              "preflight": preflight, "arms": arms, "counters": counters,
                                              "selector": "R16 sealed E1 only",
-                                             "sampling_identity_mode": exact_trajectory_payload["mode"]},
+                                             "sampling_identity_mode": exact_trajectory_payload["mode"],
+                                             "source_binding_guard": current_frozen},
             "r18_learning_path_audit.json": {"cells": learning, "initial_review_replay": initial_reviews,
                                                "final_review_replay": final_reviews, "review_optimizer_exposure": 0,
                                                "review_candidate_regeneration": 0, "interpretation_performed": False},
@@ -792,7 +883,8 @@ def execute(auth: Mapping[str, Any]) -> None:
             "r18_durable_trace_artifact_manifest.json": trace_artifacts,
             "execution_manifest.json": {"authorization_manifest_sha256": auth["authorization_sha256"], "source_commit": auth["source_commit"],
                                         "preflight": preflight, "arms": arms, "counters": counters,
-                                        "sampling_identity_mode": exact_trajectory_payload["mode"]},
+                                        "sampling_identity_mode": exact_trajectory_payload["mode"],
+                                        "source_binding_guard": current_frozen},
             "exact_trajectory_replay_audit.json": exact_trajectory_payload,
             "optimizer_step_audit.json": optimizer_step_audit,
             "parameter_delta_audit.json": parameter_delta_audit,

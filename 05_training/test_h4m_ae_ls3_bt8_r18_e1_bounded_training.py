@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import run_h4m_ae_ls3_bt8_r18_e1_bounded_training as R18  # noqa: E402
+import run_h4m_ae_ls3_bt8_r17_e1_bounded_training_authorization as R17  # noqa: E402
 import joint_assignment_credit_contract as CC  # noqa: E402
 
 
@@ -40,6 +41,19 @@ def _support_roundtrip_row() -> dict[str, object]:
         "no_assign_index": 2,
     }}
     return {"t": transition, "loaded": loaded}
+
+
+def _r18r10_selector_binding_auth(selector_sha: str | None = None) -> dict[str, object]:
+    return {
+        "authorization": R18.R18R10_AUTHORIZATION,
+        "selector_source_binding": {
+            "mode": R18.R18R10_SELECTOR_BINDING_MODE,
+            "r18_r9_selector_sha256": selector_sha or R18.R18R9_SELECTOR_SOURCE_SHA256,
+            "old_r16_selector_sha256": R18.R16_SELECTOR_SOURCE_SHA256,
+            "require_old_r16_selector_as_current": False,
+            "reject_selector_mutation": True,
+        },
+    }
 
 
 def test_r18_rollout_uses_sealed_r16_selector_and_not_historical_argmax() -> None:
@@ -121,3 +135,25 @@ def test_exact_execute_flag_is_required_by_parser(tmp_path: Path) -> None:
 def test_dry_run_is_zero_execution() -> None:
     report = R18.dry_run_report({"source_commit": "source"})
     assert report["training"] == report["rollout"] == report["optimizer_step"] == report["checkpoint_write"] == 0
+
+
+def test_r18r10_source_binding_guard_requires_r18r9_selector_not_old_r16_selector() -> None:
+    r16_path = R17.ARTIFACTS / R17.R16_NAME
+    binding = R18.source_hash_binding_for_authorization(
+        auth=_r18r10_selector_binding_auth(), R17=R17, r16_path=r16_path)
+    assert binding["old_r16_selector_sha256"] == R18.R16_SELECTOR_SOURCE_SHA256
+    assert binding["old_r16_selector_required_as_current"] is False
+    assert binding["r18_r9_selector_sha256"] == R18.R18R9_SELECTOR_SOURCE_SHA256
+    assert binding["expected"]["implementation:selector"] == R18.R18R9_SELECTOR_SOURCE_SHA256
+    assert binding["actual"]["implementation:selector"] == R18.R18R9_SELECTOR_SOURCE_SHA256
+    assert binding["actual"]["implementation:selector"] != R18.R16_SELECTOR_SOURCE_SHA256
+    assert binding["other_frozen_source_sha_unchanged"] is True
+    other_keys = [key for key in binding["expected"] if key != "implementation:selector"]
+    assert all(binding["actual"][key] == binding["expected"][key] for key in other_keys)
+
+
+def test_r18r10_source_binding_guard_fails_closed_on_selector_sha_mutation() -> None:
+    r16_path = R17.ARTIFACTS / R17.R16_NAME
+    with pytest.raises(R18.R18Error, match="r18r9_selector_binding"):
+        R18.source_hash_binding_for_authorization(
+            auth=_r18r10_selector_binding_auth(selector_sha="0" * 64), R17=R17, r16_path=r16_path)
