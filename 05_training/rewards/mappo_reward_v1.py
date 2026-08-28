@@ -17,11 +17,13 @@ Important:
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, Mapping, Optional
+from math import isfinite
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "artifact_version": "mappo_reward_v1",
+    "reward_mode": "LEGACY_LINEAGE_REPLAY",
     "weights": {
         "service_rate_weight": 3.0,
         "avg_wait_weight": 2.0,
@@ -44,6 +46,317 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "energy_proxy_per_passenger": 10.0,
     },
 }
+
+PV8_REWARD_SEMANTICS_VERSION = "PV8_REWARD_SEMANTICS_V2"
+PV8_REWARD_V2_MODE = "PV8_REWARD_V2"
+PV8_REWARD_V2_FREEZE_SHA256 = "966d3d8b091b87b033d2203cfb721983a5e66f77fe247e42885153a3b7fc3161"
+PV8_REWARD_V2_TRAINING_REFERENCE_VERSION = "PV8_REPRESENTATIVE_B1_TRAINING_REFERENCE_FROZEN_V1"
+PV8_REWARD_V2_FORMULA = (
+    "+ 3.0 * local_service_component "
+    "+ 2.0 * local_affected_avg_wait_component "
+    "- 0.25 * explicit_forced_external_intervention"
+)
+PV8_REWARD_V2_SERVICE_REFERENCE = 1.0
+PV8_REWARD_V2_AVG_WAIT_REFERENCE_SECONDS = 297.7850241545894
+PV8_REWARD_V2_P95_EVALUATION_REFERENCE_SECONDS = 576.6999999999999
+PV8_REWARD_V2_NUMERIC_TOLERANCE = 1e-12
+
+
+class RewardV2BindingError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class RewardV2DuplicateOwnershipError(RewardV2BindingError):
+    pass
+
+
+class RewardV2TransitionBindingError(RewardV2BindingError):
+    pass
+
+
+def validate_reward_v2_freeze_hash(reward_freeze_sha256: Any) -> None:
+    if str(reward_freeze_sha256) != PV8_REWARD_V2_FREEZE_SHA256:
+        raise RewardV2BindingError(
+            "RUNTIME_REWARD_FREEZE_HASH_MISMATCH",
+            "Reward V2 runtime result must carry the immutable H4F freeze SHA.",
+        )
+
+
+def _finite_float(value: Any, key: str, default: float = 0.0) -> float:
+    if value is None:
+        value = default
+    try:
+        out = float(value)
+    except Exception as exc:
+        raise RewardV2BindingError("RUNTIME_REWARD_NON_NUMERIC_INPUT", f"{key} must be numeric") from exc
+    if not isfinite(out):
+        raise RewardV2BindingError("RUNTIME_REWARD_NON_FINITE_INPUT", f"{key} must be finite")
+    return out
+
+
+def _nonnegative_int(metrics: Mapping[str, Any], key: str) -> int:
+    value = int(_finite_float(metrics.get(key, 0), key, default=0.0))
+    if value < 0:
+        raise RewardV2BindingError("RUNTIME_REWARD_NEGATIVE_COUNT", f"{key} must be non-negative")
+    return value
+
+
+def _transition_identity(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    required = [
+        "transition_id",
+        "vehicle_slot_id",
+        "route_id",
+        "direction_id",
+        "occurrence_id",
+        "local_decision_ts",
+        "action",
+    ]
+    missing = [key for key in required if metrics.get(key) in (None, "")]
+    if missing:
+        raise RewardV2TransitionBindingError(
+            "RUNTIME_REWARD_TRANSITION_IDENTITY_MISSING",
+            f"Reward V2 transition identity is incomplete: {missing}",
+        )
+    return {key: metrics[key] for key in required}
+
+
+def validate_reward_v2_transition_binding(
+    metrics: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> None:
+    observed = _transition_identity(metrics)
+    compare_keys = [
+        "transition_id",
+        "vehicle_slot_id",
+        "route_id",
+        "direction_id",
+        "occurrence_id",
+        "local_decision_ts",
+        "action",
+    ]
+    for key in compare_keys:
+        if str(observed.get(key)) != str(expected_identity.get(key)):
+            code = {
+                "transition_id": "WRONG_TRANSITION_OWNERSHIP_REJECTED",
+                "vehicle_slot_id": "WRONG_VEHICLE_OWNERSHIP_REJECTED",
+                "occurrence_id": "WRONG_OCCURRENCE_OWNERSHIP_REJECTED",
+            }.get(key, "RUNTIME_REWARD_TRANSITION_BINDING_REJECTED")
+            raise RewardV2TransitionBindingError(
+                code,
+                f"Reward V2 transition binding mismatch for {key}: {observed.get(key)!r} != {expected_identity.get(key)!r}",
+            )
+
+
+def compute_local_service_component(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    pickup = _nonnegative_int(metrics, "pickup_obligation_count")
+    dropoff = _nonnegative_int(metrics, "dropoff_obligation_count")
+    mandatory = _nonnegative_int(metrics, "approved_static_mandatory_obligation_count")
+    completed_pickup = _nonnegative_int(metrics, "completed_pickup_obligation_count")
+    completed_dropoff = _nonnegative_int(metrics, "completed_dropoff_obligation_count")
+    completed_mandatory = _nonnegative_int(metrics, "completed_static_mandatory_obligation_count")
+    required = pickup + dropoff + mandatory
+    completed = completed_pickup + completed_dropoff + completed_mandatory
+    if required == 0:
+        return {
+            "status": "NOT_APPLICABLE",
+            "raw": 0.0,
+            "weighted": 0.0,
+            "required_obligation_count": 0,
+            "completed_obligation_count": completed,
+            "service_success_denominator_increment": 0,
+            "positive_service_reward": 0.0,
+        }
+    if completed > required:
+        raise RewardV2BindingError(
+            "RUNTIME_REWARD_SERVICE_COMPLETION_EXCEEDS_REQUIRED",
+            "Completed local obligations cannot exceed required obligations.",
+        )
+    raw = 1.0 if completed == required else 0.0
+    return {
+        "status": "SUCCESS" if raw == 1.0 else "INCOMPLETE",
+        "raw": raw,
+        "weighted": 3.0 * raw,
+        "required_obligation_count": required,
+        "completed_obligation_count": completed,
+        "service_success_denominator_increment": 1,
+        "positive_service_reward": 3.0 * raw,
+    }
+
+
+def _normalize_wait_rows(rows: Sequence[Mapping[str, Any]], transition_id: str) -> List[Dict[str, Any]]:
+    seen_passengers: set[str] = set()
+    seen_ownership_keys: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        passenger_id = str(row.get("passenger_id") or "")
+        if not passenger_id:
+            raise RewardV2DuplicateOwnershipError("WAIT_OWNER_IDENTITY_MISSING", "affected wait row lacks passenger_id")
+        if passenger_id in seen_passengers:
+            raise RewardV2DuplicateOwnershipError(
+                "DUPLICATE_WAIT_REWARD_OWNERSHIP_REJECTED",
+                f"passenger wait is duplicated: {passenger_id}",
+            )
+        seen_passengers.add(passenger_id)
+        owner = str(row.get("originating_transition_id") or transition_id)
+        if owner != transition_id:
+            raise RewardV2TransitionBindingError(
+                "WAIT_REWARD_WRONG_TRANSITION_REJECTED",
+                f"wait row belongs to {owner}, not {transition_id}",
+            )
+        ownership_key = str(row.get("wait_ownership_key") or f"{owner}:{passenger_id}")
+        if ownership_key in seen_ownership_keys:
+            raise RewardV2DuplicateOwnershipError(
+                "DUPLICATE_WAIT_REWARD_OWNERSHIP_REJECTED",
+                f"wait ownership key is duplicated: {ownership_key}",
+            )
+        seen_ownership_keys.add(ownership_key)
+        request_ts = _finite_float(row.get("request_ts"), f"affected_wait_rows[{index}].request_ts")
+        first_eligible = _finite_float(row.get("first_eligible_service_ts"), f"affected_wait_rows[{index}].first_eligible_service_ts")
+        actual_board = _finite_float(row.get("actual_board_ts"), f"affected_wait_rows[{index}].actual_board_ts")
+        local_decision_ts = _finite_float(row.get("local_decision_ts"), f"affected_wait_rows[{index}].local_decision_ts")
+        if request_ts > local_decision_ts:
+            raise RewardV2TransitionBindingError(
+                "FUTURE_REQUEST_IN_REWARD_SET_REJECTED",
+                "affected wait set cannot include future passenger requests",
+            )
+        if first_eligible < request_ts or actual_board < first_eligible:
+            raise RewardV2BindingError("WAIT_DECOMPOSITION_INVALID", "wait timestamps violate frozen decomposition")
+        schedule_wait = first_eligible - request_ts
+        alignment_excess = actual_board - first_eligible
+        total_wait = schedule_wait + alignment_excess
+        out.append(
+            {
+                "passenger_id": passenger_id,
+                "originating_transition_id": owner,
+                "wait_ownership_key": ownership_key,
+                "request_ts": request_ts,
+                "local_decision_ts": local_decision_ts,
+                "first_eligible_service_ts": first_eligible,
+                "actual_board_ts": actual_board,
+                "schedule_wait_seconds": schedule_wait,
+                "alignment_excess_wait_seconds": alignment_excess,
+                "total_wait_seconds": total_wait,
+            }
+        )
+    return out
+
+
+def compute_local_avg_wait_component(
+    metrics: Mapping[str, Any],
+    *,
+    transition_id: str,
+    local_service_raw: float,
+) -> Dict[str, Any]:
+    rows = _normalize_wait_rows(metrics.get("affected_wait_rows") or (), transition_id)
+    if not rows:
+        return {
+            "status": "NOT_APPLICABLE",
+            "raw": 0.0,
+            "weighted": 0.0,
+            "affected_wait_count": 0,
+            "current_local_avg_wait_seconds": None,
+            "positive_avg_wait_reward_blocked_by_service_gate": False,
+            "duplicate_wait_ownership": 0,
+        }
+    waits = [float(row["total_wait_seconds"]) for row in rows]
+    avg_wait = float(sum(waits) / len(waits))
+    centered = 1.0 - avg_wait / PV8_REWARD_V2_AVG_WAIT_REFERENCE_SECONDS
+    blocked = centered > 0.0 and float(local_service_raw) < 1.0
+    raw = 0.0 if blocked else centered
+    return {
+        "status": "BOUND" if not blocked else "POSITIVE_IMPROVEMENT_BLOCKED_BY_SERVICE_GATE",
+        "raw": float(raw),
+        "weighted": float(2.0 * raw),
+        "affected_wait_count": len(rows),
+        "current_local_avg_wait_seconds": avg_wait,
+        "affected_wait_rows": rows,
+        "positive_avg_wait_reward_blocked_by_service_gate": blocked,
+        "duplicate_wait_ownership": 0,
+    }
+
+
+def compute_intervention_component(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    explicit = _nonnegative_int(metrics, "explicit_forced_external_intervention_count")
+    forced = _nonnegative_int(metrics, "forced_safety_override_count")
+    external = _nonnegative_int(metrics, "external_policy_intervention_count")
+    count = explicit if explicit else forced + external
+    if bool(metrics.get("ordinary_k_mask_restriction_counted", False)):
+        raise RewardV2BindingError(
+            "ORDINARY_K_MASK_RESTRICTION_NOT_INTERVENTION",
+            "ordinary K-mask availability restriction must not trigger intervention penalty",
+        )
+    return {
+        "status": "BOUND",
+        "raw": float(count),
+        "weighted_penalty_magnitude": float(0.25 * count),
+        "explicit_forced_external_intervention_count": int(count),
+        "ordinary_k_mask_restriction_counted": False,
+    }
+
+
+def compute_reward_v2(
+    metrics: Mapping[str, Any],
+    *,
+    expected_freeze_sha256: str = PV8_REWARD_V2_FREEZE_SHA256,
+) -> Dict[str, Any]:
+    if expected_freeze_sha256 != PV8_REWARD_V2_FREEZE_SHA256:
+        raise RewardV2BindingError("RUNTIME_REWARD_EXPECTED_FREEZE_HASH_INVALID", "expected freeze hash is not H4F")
+    validate_reward_v2_freeze_hash(metrics.get("reward_freeze_sha256"))
+    if str(metrics.get("reward_semantics_version")) != PV8_REWARD_SEMANTICS_VERSION:
+        raise RewardV2BindingError(
+            "RUNTIME_REWARD_SEMANTICS_VERSION_MISMATCH",
+            "Reward V2 runtime result must report PV8_REWARD_SEMANTICS_V2.",
+        )
+    identity = _transition_identity(metrics)
+    if bool(metrics.get("p95_training_reward_enabled", False)) or bool(metrics.get("p95_training_normalization_active", False)):
+        raise RewardV2BindingError("P95_TRAINING_REWARD_FORBIDDEN", "p95 is evaluation-only in Reward V2")
+    service = compute_local_service_component(metrics)
+    avg_wait = compute_local_avg_wait_component(
+        metrics,
+        transition_id=str(identity["transition_id"]),
+        local_service_raw=float(service["raw"]),
+    )
+    intervention = compute_intervention_component(metrics)
+    reward_total = float(service["weighted"] + avg_wait["weighted"] - intervention["weighted_penalty_magnitude"])
+    if not isfinite(reward_total):
+        raise RewardV2BindingError("RUNTIME_REWARD_NON_FINITE_TOTAL", "Reward V2 total must be finite")
+    return {
+        "reward_semantics_version": PV8_REWARD_SEMANTICS_VERSION,
+        "reward_mode": PV8_REWARD_V2_MODE,
+        "reward_freeze_sha256": PV8_REWARD_V2_FREEZE_SHA256,
+        "reward_formula": PV8_REWARD_V2_FORMULA,
+        "training_reference_version": PV8_REWARD_V2_TRAINING_REFERENCE_VERSION,
+        "service_reference": PV8_REWARD_V2_SERVICE_REFERENCE,
+        "avg_wait_reference_seconds": PV8_REWARD_V2_AVG_WAIT_REFERENCE_SECONDS,
+        "p95_evaluation_reference_seconds": PV8_REWARD_V2_P95_EVALUATION_REFERENCE_SECONDS,
+        "p95_semantics": "P95_EVALUATION_ONLY",
+        "p95_training_reward_enabled": False,
+        "p95_training_normalization_active": False,
+        "p95_local_transition_owner": None,
+        "old_p95_weight_status": "INACTIVE_NOT_REDISTRIBUTED",
+        "missed_eligible_service_role": "SAFETY_INTEGRITY_AND_EVALUATION_GATE",
+        "alignment_excess_wait_role": "SAFETY_INTEGRITY_AND_EVALUATION_GATE",
+        "transition_identity": identity,
+        "transition_id": identity["transition_id"],
+        "reward_service_component": service,
+        "reward_avg_wait_component": avg_wait,
+        "reward_intervention_component": intervention,
+        "reward_service_component_raw": float(service["raw"]),
+        "reward_service_component_weighted": float(service["weighted"]),
+        "reward_avg_wait_component_raw": float(avg_wait["raw"]),
+        "reward_avg_wait_component_weighted": float(avg_wait["weighted"]),
+        "reward_intervention_component_raw": float(intervention["raw"]),
+        "reward_intervention_component_weighted": float(-intervention["weighted_penalty_magnitude"]),
+        "reward_total": reward_total,
+        "reward_value_materialized": True,
+        "representative_reward_rematerialization": False,
+        "blanket_SKIP_penalty_applied": False,
+        "direct_time_band_reward_term_applied": False,
+        "H240_active_reward_settlement": False,
+        "H660_active_reward_settlement": False,
+    }
 
 
 def merged_config(config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -225,6 +538,17 @@ def compute_reward_components(
     - constraint_violation_flags
     - reward_debug
     """
+    requested_mode = str(
+        metrics.get("reward_mode")
+        or metrics.get("reward_semantics_version")
+        or (config or {}).get("reward_mode", "")
+    )
+    if requested_mode in {PV8_REWARD_V2_MODE, PV8_REWARD_SEMANTICS_VERSION}:
+        return compute_reward_v2(
+            metrics,
+            expected_freeze_sha256=str((config or {}).get("reward_freeze_sha256", PV8_REWARD_V2_FREEZE_SHA256)),
+        )
+
     cfg = merged_config(config)
 
     w_service = _cfg_float(
@@ -435,6 +759,34 @@ def compute_total_reward(
 def reward_keys() -> Dict[str, Any]:
     """Return reward input/output key contract."""
     return {
+        "active_reward_semantics_version": PV8_REWARD_SEMANTICS_VERSION,
+        "pv8_reward_v2": {
+            "mode": PV8_REWARD_V2_MODE,
+            "freeze_sha256": PV8_REWARD_V2_FREEZE_SHA256,
+            "formula": PV8_REWARD_V2_FORMULA,
+            "required_transition_identity": [
+                "transition_id",
+                "vehicle_slot_id",
+                "route_id",
+                "direction_id",
+                "occurrence_id",
+                "local_decision_ts",
+                "action",
+            ],
+            "output_reward_columns": [
+                "reward_total",
+                "reward_service_component_raw",
+                "reward_service_component_weighted",
+                "reward_avg_wait_component_raw",
+                "reward_avg_wait_component_weighted",
+                "reward_intervention_component_raw",
+                "reward_intervention_component_weighted",
+                "reward_semantics_version",
+                "reward_freeze_sha256",
+                "transition_id",
+            ],
+        },
+        "legacy_reward_mode": "LEGACY_LINEAGE_REPLAY",
         "required_or_recommended_input_metrics": [
             "condition_id",
             "avg_wait_seconds",

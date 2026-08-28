@@ -15,6 +15,18 @@ from simulator_adapter_interface import (
 
 from rewards.mappo_reward_v1 import compute_total_reward
 
+# --- H4M-AE-R9.8 fail-closed simulator authorization -------------------------------
+import sys as _authz_sys
+from pathlib import Path as _AuthzPath
+
+for _authz_dir in (_AuthzPath(__file__).resolve().parent, _AuthzPath(__file__).resolve().parent.parent):
+    if (_authz_dir / "simulator_authorization.py").exists():
+        if str(_authz_dir) not in _authz_sys.path:
+            _authz_sys.path.insert(0, str(_authz_dir))
+        break
+import simulator_authorization as _authz  # noqa: E402
+# -----------------------------------------------------------------------------------
+
 
 ACTION_HOLD = 0
 ACTION_DISPATCH = 1
@@ -246,6 +258,7 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
         seed: Optional[int] = None,
         scenario_config: Optional[dict] = None,
     ) -> ObsDict:
+        _authz.require_capability("simulator_execution", site="adapters/causal_simulator_adapter.py::CausalSimulatorAdapter.reset")
         if seed is not None:
             self.seed = int(seed)
 
@@ -338,6 +351,7 @@ class CausalSimulatorAdapter(SimulatorAdapterInterface):
         self.state.last_arrival_seconds[node_idx] = current_seconds
 
     def step(self, actions: Dict[int, Any]) -> StepResult:
+        _authz.require_capability("simulator_execution", site="adapters/causal_simulator_adapter.py::CausalSimulatorAdapter.step")
         if self.state is None:
             raise RuntimeError("reset() must be called before step()")
         if self.rng is None:
