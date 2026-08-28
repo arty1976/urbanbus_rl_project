@@ -353,8 +353,14 @@ def vector(items: Sequence[torch.Tensor | None], params: Sequence[tuple[str, tor
 def cosine(left: torch.Tensor, right: torch.Tensor) -> float | None:
     if left.numel() == 0 or right.numel() == 0:
         return None
-    norm = float(left.norm() * right.norm())
-    return None if norm == 0.0 else float(torch.dot(left, right) / norm)
+    # Audit geometry must remain mathematically bounded even when the stored
+    # gradients are float32 MPS tensors.  Promote only the read-only vector
+    # arithmetic to float64 before computing dot products and norms.
+    left64, right64 = left.to(torch.float64), right.to(torch.float64)
+    norm = float(left64.norm() * right64.norm())
+    if norm == 0.0:
+        return None
+    return max(-1.0, min(1.0, float(torch.dot(left64, right64) / norm)))
 
 
 def forward_view(actor: torch.nn.Module, payload: Mapping[str, Any], device: torch.device) -> dict[str, Any]:
@@ -551,8 +557,8 @@ def gradient_geometry(kgt: pd.DataFrame, classified: pd.DataFrame, snapshots: Ma
                 cosines.append(float(value))
                 opposed += int(float(value) < 0.0)
         pairwise.append({"decision_id": str(left_row["decision_id"]), "cosines": line})
-    summed = torch.stack([value for _, value in vectors]).sum(dim=0)
-    individual_sum = sum(float(value.norm()) for _, value in vectors)
+    summed = torch.stack([value.to(torch.float64) for _, value in vectors]).sum(dim=0)
+    individual_sum = sum(float(value.to(torch.float64).norm()) for _, value in vectors)
     geometry = {
         "scope": "exact epoch-1 frozen-input Stage-2 candidate-head gradients; later epoch vector directions were not persisted and are not reconstructed by re-running optimization",
         "parameter_group": "candidate_encoder.* plus scorer.*",
@@ -560,7 +566,7 @@ def gradient_geometry(kgt: pd.DataFrame, classified: pd.DataFrame, snapshots: Ma
         "mean_same_direction_cosine": None if not cosines else sum(cosines) / len(cosines),
         "opposed_gradient_pair_count": opposed, "summed_stage2_gradient_norm": float(summed.norm()),
         "sum_individual_stage2_gradient_norms": individual_sum,
-        "cancellation_ratio": float(summed.norm()) / individual_sum if individual_sum else None,
+        "cancellation_ratio": min(1.0, float(summed.norm()) / individual_sum) if individual_sum else None,
         "cross_row_cancellation_dominant": bool(individual_sum and float(summed.norm()) / individual_sum < 0.5),
     }
     return geometry, alignments
