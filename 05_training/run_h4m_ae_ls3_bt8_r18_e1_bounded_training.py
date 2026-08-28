@@ -130,7 +130,10 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
                           "raw_optimizer_step_calls_maximum": 12, "supplemental_steps": 0},
             AUTH_BLOCK, "aggregate_envelope")
     arms = list(envelope.get("selected_arms", []))
-    require([str(row.get("arm_id")) for row in arms] == ["AC_CONTROL_R1", "BD_E1_R1"], AUTH_BLOCK, "arm_order")
+    expected_arm_order = (["AC_FACTOR_CONTROL_R1", "BD_FACTOR_R1"]
+                          if authorization == R18R17_FACTORIZED_AUTHORIZATION
+                          else ["AC_CONTROL_R1", "BD_E1_R1"])
+    require([str(row.get("arm_id")) for row in arms] == expected_arm_order, AUTH_BLOCK, "arm_order")
     for arm in arms:
         require(int(arm.get("assignment_decisions", -1)) == 24 and int(arm.get("trajectories", -1)) == 6
                 and int(arm.get("trajectory_length", -1)) == 4 and int(arm.get("ppo_epochs", -1)) == 3
@@ -138,6 +141,9 @@ def load_authorization(path: Path, supplied_sha256: str) -> dict[str, Any]:
                 AUTH_BLOCK, f"arm_scope={arm.get('arm_id')}")
         seeds = dict(arm.get("categorical_probe_seed_by_decision", {}))
         require(len(seeds) == 24 and set(seeds.values()) == {0}, AUTH_BLOCK, f"categorical_seed_map={arm.get('arm_id')}")
+        if authorization == R18R17_FACTORIZED_AUTHORIZATION:
+            require(isinstance(arm.get("factorized_gate_initialization_seed"), int),
+                    AUTH_BLOCK, f"factorized_gate_initialization_seed={arm.get('arm_id')}")
     module = dict(payload.get("module_freeze_contract", {}))
     require(module.get("training_selection_mode") == "FROZEN_MASKED_CATEGORICAL_TRAINING"
             and module.get("inference_evaluation_mode") == "FROZEN_INFERENCE_T1"
@@ -234,6 +240,17 @@ def _is_exact_r18r3_replay(auth: Mapping[str, Any]) -> bool:
 
 def _is_factorized_r18r17(auth: Mapping[str, Any]) -> bool:
     return str(auth.get("authorization")) == R18R17_FACTORIZED_AUTHORIZATION
+
+
+def _factorized_role_arm_ids(arms: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
+    ac = [str(row["arm_id"]) for row in arms if str(row.get("role", "")).startswith("AC_FACTOR")]
+    bd = [str(row["arm_id"]) for row in arms if str(row.get("role", "")).startswith("BD_FACTOR")]
+    if not ac:
+        ac = [str(row["arm_id"]) for row in arms if str(row["arm_id"]).startswith("AC_")]
+    if not bd:
+        bd = [str(row["arm_id"]) for row in arms if str(row["arm_id"]).startswith("BD_")]
+    require(len(ac) == 1 and len(bd) == 1, AUTH_BLOCK, f"factorized_role_arm_ids={ac},{bd}")
+    return ac[0], bd[0]
 
 
 def _r16_source_hash_expected_actual(*, R17: Any, r16_path: Path) -> dict[str, dict[str, str]]:
@@ -366,7 +383,8 @@ def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str,
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         require(isinstance(payload, Mapping) and set(payload).issuperset({"actor", "critic", "meta"})
                 and not any("optimizer" in str(name).lower() for name in payload), AUTH_BLOCK, f"checkpoint_schema={arm_id}")
-        torch.manual_seed(int(arm["actor_seed"]))
+        actor_initialization_seed = int(arm.get("factorized_gate_initialization_seed", arm["actor_seed"])) if use_factorized else int(arm["actor_seed"])
+        torch.manual_seed(actor_initialization_seed)
         if use_factorized:
             actor = H.FactorizedAssignThenCandidateAssignmentHead(
                 global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]), agent_dim=int(config["agent_dim"]),
@@ -394,6 +412,7 @@ def _load_models(*, arms: Sequence[Mapping[str, Any]], checkpoints: Mapping[str,
         identities.update(parameter_ids)
         models[arm_id] = {**dict(arm), "actor": actor, "critic": critic, "actor_opt": actor_opt, "critic_opt": critic_opt,
                           "actor_architecture": actor_architecture,
+                          "actor_initialization_seed_used": actor_initialization_seed,
                           "actor_initial_digest": _module_digest(actor), "critic_initial_digest": _module_digest(critic),
                           "behavior_checkpoint_sha256": str(checkpoints[key]["sha256"]), "checkpoint_path": str(checkpoint_path)}
     return models
@@ -591,13 +610,83 @@ def _assert_support_roundtrip(*, rows: Sequence[Mapping[str, Any]], CC: Any) -> 
             "action_support_digest_domain_checked": len(rows)}
 
 
+def _actor_param_groups_for_factorized_trace(actor: torch.nn.Module) -> dict[str, list[torch.nn.Parameter]]:
+    named = [(name, param) for name, param in actor.named_parameters() if param.requires_grad]
+    return {
+        "stage1": [param for name, param in named if name.startswith("gate_scorer.")],
+        "stage2": [param for name, param in named if name.startswith(("candidate_encoder.", "scorer."))],
+        "shared_encoder": [param for name, param in named if name.startswith(("agent_encoder.", "global_encoder.", "demand_encoder."))],
+    }
+
+
+def _grad_norm(output: torch.Tensor, params: Sequence[torch.nn.Parameter]) -> float:
+    if not params:
+        return 0.0
+    grads = torch.autograd.grad(output, params, retain_graph=True, allow_unused=True)
+    total = torch.zeros((), dtype=output.dtype, device=output.device)
+    for grad in grads:
+        if grad is not None:
+            total = total + (grad.detach() ** 2).sum()
+    return float(torch.sqrt(total).detach().cpu())
+
+
+def _factorized_trace_payload(*, actor: torch.nn.Module, dist: Any, loss: Mapping[str, Any],
+                              batch: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+    """Observational per-row factorized trace fields; does not write .grad."""
+    action_index = batch["action_index"]
+    row_index = torch.arange(action_index.shape[0], device=action_index.device)
+    no_assign_column = batch["safe_mask"].shape[1]
+    selected_is_no_assign = action_index == no_assign_column
+    stage1_selected = torch.where(selected_is_no_assign, dist.gate_log_probs[:, 1], dist.gate_log_probs[:, 0])
+    stage2_selected = torch.zeros_like(stage1_selected)
+    stage2_selected_probability = torch.zeros_like(stage1_selected)
+    candidate_rows = ~selected_is_no_assign
+    if bool(candidate_rows.any().item()):
+        stage2_selected[candidate_rows] = dist.conditional_candidate_log_probs[row_index[candidate_rows],
+                                                                               action_index[candidate_rows]]
+        stage2_selected_probability[candidate_rows] = stage2_selected[candidate_rows].exp()
+    actor_denominator = float(loss.get("actor_denominator", 1.0))
+    row_loss_contribution = loss["policy_loss_per_row"].detach() * loss["actor_row_weight"].detach() / actor_denominator
+    stage2_loss_contribution = torch.where(candidate_rows, row_loss_contribution, torch.zeros_like(row_loss_contribution))
+    groups = _actor_param_groups_for_factorized_trace(actor)
+    stage1_norms, stage2_norms, shared_norms = [], [], []
+    for index in range(action_index.shape[0]):
+        row_loss = loss["policy_loss_per_row"][index] * loss["actor_row_weight"][index] / actor_denominator
+        stage1_norms.append(_grad_norm(row_loss, groups["stage1"]))
+        stage2_norms.append(_grad_norm(row_loss, groups["stage2"]))
+        shared_norms.append(_grad_norm(row_loss, groups["shared_encoder"]))
+    final_selected_log_prob = dist.action_log_probs.gather(-1, action_index.unsqueeze(-1)).squeeze(-1)
+    return {
+        "factorized_actor_contract_id": FACTORIZED_ACTOR_ARCHITECTURE,
+        "stage1_assign_log_prob": dist.gate_log_probs[:, 0].detach(),
+        "stage1_assign_probability": dist.gate_log_probs[:, 0].detach().exp(),
+        "stage1_no_assign_log_prob": dist.gate_log_probs[:, 1].detach(),
+        "stage1_no_assign_probability": dist.gate_log_probs[:, 1].detach().exp(),
+        "stage1_selected_log_prob": stage1_selected.detach(),
+        "stage2_selected_candidate_log_prob": stage2_selected.detach(),
+        "stage2_selected_candidate_probability": stage2_selected_probability.detach(),
+        "stage2_candidate_probability": stage2_selected_probability.detach(),
+        "stage2_selected_log_prob": stage2_selected.detach(),
+        "stage2_conditional_candidate_probability_sum": dist.conditional_candidate_probabilities.detach().masked_fill(
+            ~batch["safe_mask"], 0.0).sum(-1),
+        "reconstructed_final_log_prob": final_selected_log_prob.detach(),
+        "reconstructed_final_probability": final_selected_log_prob.detach().exp(),
+        "stage1_loss_contribution": row_loss_contribution.detach(),
+        "stage2_loss_contribution": stage2_loss_contribution.detach(),
+        "stage1_gradient_norm": stage1_norms,
+        "stage2_gradient_norm": stage2_norms,
+        "shared_encoder_gradient_norm": shared_norms,
+    }
+
+
 def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support_guard: Mapping[str, Any],
                JL: Any, AUTH: Any, device: torch.device, counters: dict[str, int]) -> dict[str, Any]:
     """Three full-batch E1 PPO epochs with independent Actor/Critic steps."""
     batch, rows = prepared["batch"], list(prepared["rows"])
     active = batch["actor_eligibility_mask"] & ~batch["forced_action"]
     active_count = int(active.sum().item())
-    require(active_count >= 1, BD_CREDIT_BLOCK if str(model["arm_id"]) == "BD_E1_R1" else INTEGRITY_BLOCK,
+    bd_like = str(model.get("arm_id")) == "BD_E1_R1" or str(model.get("role", "")).startswith("BD_FACTOR")
+    require(active_count >= 1, BD_CREDIT_BLOCK if bd_like else INTEGRITY_BLOCK,
             f"actor_eligible={model['arm_id']}")
     actor, critic, actor_opt, critic_opt = model["actor"], model["critic"], model["actor_opt"], model["critic_opt"]
     updates: list[dict[str, Any]] = []
@@ -632,6 +721,7 @@ def _train_arm(*, model: Mapping[str, Any], prepared: Mapping[str, Any], support
                 actor_eligibility_mask=batch["actor_eligibility_mask"])
             require(loss.get("log_prob_source") == "direct_reconstructed_action_log_probs",
                     INTEGRITY_BLOCK, f"factorized_ppo_logprob_path={model['arm_id']}")
+            loss["factorized_trace"] = _factorized_trace_payload(actor=actor, dist=dist, loss=loss, batch=batch)
         else:
             loss = JL.assignment_ppo_loss(new_pair_logits=logits, new_no_assign_logit=no_assign, safe_mask=batch["safe_mask"],
                                           action_index=batch["action_index"], old_log_prob=batch["old_log_prob"], advantage=batch["advantage"],
@@ -677,11 +767,28 @@ def _write_final_checkpoint(path: Path, model: Mapping[str, Any], training: Mapp
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = {"kind": "r18_exact_e1_final_bounded_evidence", "arm_id": model["arm_id"], "test_only": True, "bounded": True,
             "non_promotable": True, "winner": False, "best_model": False, "promotion": False,
+            "actor_architecture": model.get("actor_architecture", "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX"),
+            "actor_initialization_seed_used": model.get("actor_initialization_seed_used"),
             "initial_actor_digest": model["actor_initial_digest"], "final_actor_digest": training["actor_final_digest"],
             "initial_critic_digest": model["critic_initial_digest"], "final_critic_digest": training["critic_final_digest"]}
     torch.save({"actor": {name: tensor.detach().cpu() for name, tensor in model["actor"].state_dict().items()},
                 "critic": {name: tensor.detach().cpu() for name, tensor in model["critic"].state_dict().items()}, "meta": meta}, path)
     return {"path": str(path), "sha256": sha256(path), **meta}
+
+
+def _strict_load_actor_from_checkpoint(path: Path, H: Any, JL: Any, MC: Any, device: torch.device) -> torch.nn.Module:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    adim, cdim = len(MC.AgentContext.FEATURE_NAMES), len(MC.LOCAL_SEARCH_FEATURE_NAMES)
+    meta = dict(payload.get("meta", {}))
+    architecture = str(meta.get("actor_architecture", "CANDIDATE_SENSITIVE_SINGLE_SOFTMAX"))
+    if architecture == FACTORIZED_ACTOR_ARCHITECTURE:
+        actor = H.FactorizedAssignThenCandidateAssignmentHead(global_dim=8, demand_dim=6, agent_dim=adim, candidate_dim=cdim)
+    else:
+        actor = H.CandidateSensitiveMultiAgentCandidateAssignmentHead(global_dim=8, demand_dim=6, agent_dim=adim, candidate_dim=cdim)
+    critic = JL.JointAssignmentCritic(global_dim=8, demand_dim=6, agent_dim=adim, safe_summary_dim=1 + 2 * cdim)
+    actor.load_state_dict(payload["actor"], strict=True)
+    critic.load_state_dict(payload["critic"], strict=True)
+    return actor.to(device).eval()
 
 
 def _frozen_review_replay(*, actor: torch.nn.Module, entries: Sequence[Mapping[str, Any]], FPS: Any, F1MOD: Any,
@@ -858,13 +965,19 @@ def execute(auth: Mapping[str, Any]) -> None:
                     BT6=BT6, device=device, adim=adim, cdim=cdim)
                 prepared_cell["support_guard"] = support_guard
                 rollouts[arm_id], prepared[arm_id] = rollout, prepared_cell
-            bd = prepared["BD_E1_R1"]
-            bd_rows = rollouts["BD_E1_R1"]["rows"]
+            if _is_factorized_r18r17(auth):
+                ac_arm_id, bd_arm_id = _factorized_role_arm_ids(arms)
+            else:
+                ac_arm_id, bd_arm_id = "AC_CONTROL_R1", "BD_E1_R1"
+            bd = prepared[bd_arm_id]
+            bd_rows = rollouts[bd_arm_id]["rows"]
             by_band = {band: [row for row in bd_rows if row["time_band"] == band] for band in ("night", "offpeak", "peak")}
             require(all(any(not row["selected_is_no_assign"] for row in rows) and any(row["categorical_triggered"] for row in rows) for rows in by_band.values()),
                     BD_CREDIT_BLOCK, "bd_time_band_non_no_assign_or_sampling")
             require(sum(not row["selected_is_no_assign"] for row in bd_rows) > 0 and any(float(row["t"].assignment_discounted_reward) != 0.0 for row in bd_rows)
                     and int(bd["active_actor_rows"]) >= 1, BD_CREDIT_BLOCK, "bd_candidate_reward_or_ancestry")
+            if _is_factorized_r18r17(auth):
+                require(int(prepared[ac_arm_id]["active_actor_rows"]) >= 1, INTEGRITY_BLOCK, "ac_factor_actor_eligible")
             if exact_r18r3_replay:
                 selection_ok = len(exact_replay_audit) == 48 and all(bool(row.get("matched")) for row in exact_replay_audit)
                 counters["selection_trajectory_mismatch"] += int(not selection_ok)
@@ -885,7 +998,7 @@ def execute(auth: Mapping[str, Any]) -> None:
                              for arm_id, model in models.items()}
         counters["checkpoint_write"] += len(final_checkpoints)
         require(counters["checkpoint_write"] == 2, INTEGRITY_BLOCK, "checkpoint_count")
-        final_reviews = {arm_id: _frozen_review_replay(actor=F1MOD.strict_load(Path(final_checkpoints[arm_id]["path"]), H, JL, MC, device),
+        final_reviews = {arm_id: _frozen_review_replay(actor=_strict_load_actor_from_checkpoint(Path(final_checkpoints[arm_id]["path"]), H, JL, MC, device),
                                                         entries=review_entries, FPS=FPS, F1MOD=F1MOD, H=H, TIE=TIE, device=device)
                          for arm_id in models}
         review_deltas = {arm_id: _review_delta(initial_reviews[arm_id], final_reviews[arm_id]) for arm_id in models}

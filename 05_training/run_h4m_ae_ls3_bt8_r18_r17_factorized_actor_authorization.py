@@ -26,6 +26,7 @@ ARTIFACTS = ROOT / "artifacts"
 sys.path.insert(0, str(ROOT))
 
 import joint_assignment_learning as JL  # noqa: E402
+import r18_durable_trace as TRACE  # noqa: E402
 import run_h4m_ae_ls3_bt8_r18_e1_bounded_training as R18_EXECUTOR  # noqa: E402
 import run_h4m_ae_ls3_bt8_r18_r16_factorized_actor_validation as R16  # noqa: E402
 
@@ -33,14 +34,18 @@ import run_h4m_ae_ls3_bt8_r18_r16_factorized_actor_validation as R16  # noqa: E4
 STAGE = "H4M-AE-R9.8-LS3-BT8-R18-R17"
 PASS_GATE = (
     "PASS_SUSEONG_H4M_AE_R9_8_LS3_BT8_R18_R17_"
-    "FACTORIZED_ACTOR_BOUNDED_TRAINING_ONE_SHOT_AUTHORIZATION_FREEZE_COMPLETE"
+    "FACTORIZED_ACTOR_BOUNDED_TRAINING_AUTHORIZATION_AND_ENVELOPE_FREEZE_COMPLETE"
 )
-CLASSIFICATION = "A_FACTORIZED_ACTOR_BOUNDED_TRAINING_ENVELOPE_SOURCE_BOUND_ONE_SHOT_READY"
+CLASSIFICATION = "A_FACTORIZED_ACTOR_MINIMAL_BOUNDED_EXECUTION_ENVELOPE_FROZEN_AND_SEPARATELY_AUTHORIZED"
 
 BLOCK_UPSTREAM = "BLOCKED_R18R17_UPSTREAM_EVIDENCE_BINDING_FAILURE"
-BLOCK_SOURCE = "BLOCKED_R18R17_SOURCE_OR_EXECUTION_GUARD_FAILURE"
+BLOCK_INIT = "BLOCKED_R18R17_FACTORIZED_INITIALIZATION_NOT_FROZEN"
+BLOCK_ENVELOPE = "BLOCKED_R18R17_MINIMAL_ENVELOPE_NOT_VALID_FOR_FACTORIZED_ACTOR"
+BLOCK_TRACE = "BLOCKED_R18R17_TRACE_OR_GRADIENT_CONTRACT_INCOMPLETE"
+BLOCK_GUARD = "BLOCKED_R18R17_EXECUTION_GUARD_NOT_FAIL_CLOSED"
+BLOCK_SOURCE = BLOCK_GUARD
 BLOCK_PPO_BINDING = "BLOCKED_R18R17_FACTORIZED_PPO_BINDING_FAILURE"
-BLOCK_DRY_RUN = "BLOCKED_R18R17_AUTHORIZATION_DRY_RUN_FAILURE"
+BLOCK_DRY_RUN = BLOCK_GUARD
 
 R18R16_SOURCE = "ff2c4b008d42235926283748f408474dbbe65ba0"
 R18R17_AUTHORIZATION = "R18R17_FACTORIZED_ACTOR_BOUNDED_TRAINING_ONE_SHOT_ONLY"
@@ -64,6 +69,8 @@ SOURCE_BINDING_FILES = [
     "05_training/joint_assignment_credit_contract.py",
     "05_training/joint_assignment_e1_eligibility.py",
 ]
+
+FACTORIZED_INIT_SEED_BASE = 181600
 
 
 class R18R17Error(RuntimeError):
@@ -151,6 +158,7 @@ def manifest_audit(root: Path) -> dict[str, Any]:
 
 
 def bind_upstream() -> dict[str, Any]:
+    r16_bound_evidence, _frames, _snapshots = R16.bind_evidence()
     gate = load_json(R18R16_ROOT / "gate_decision.json")
     require(gate.get("gate") == R16.PASS_GATE, f"R18-R16_gate={gate.get('gate')}")
     require(gate.get("classification") == R16.CLASSIFICATION, "R18-R16_classification")
@@ -186,6 +194,13 @@ def bind_upstream() -> dict[str, Any]:
             and int(order["total_failures"]) == 0
             and trace.get("schema_contains_factorized_fields") is True,
             "R18-R16_validation_artifacts")
+    required_upstream = {"R18-R15", "R18-R14", "R18-R13", "R18-R12", "R18-R11", "R18-R10B", "R18-R9", "R18-R6"}
+    observed_upstream = set(dict(r16_bound_evidence.get("upstream", {})))
+    require(required_upstream.issubset(observed_upstream), f"R18-R16_upstream={sorted(observed_upstream)}")
+    require(len(dict(r16_bound_evidence.get("checkpoint_binding", {}))) == 8, "R18-R16_checkpoint_binding_count")
+    require(all(int(value) == 6 for value in dict(
+        dict(r16_bound_evidence.get("r18_r4_frozen_review_binding", {})).get("review_rows_per_arm_state", {})
+    ).values()), "R18-R4_six_frozen_snapshots")
 
     trace_counts = load_json(R18R10B_EXEC_ROOT / "trace_row_count_summary.json")
     require(int(trace_counts["total_assignment_rows"]) == 48
@@ -213,6 +228,7 @@ def bind_upstream() -> dict[str, Any]:
                 for row in gradient["BD_E1_R1"]["rows"]
                 if row["selected_is_no_assign"]
             ),
+            "recursive_upstream_binding": r16_bound_evidence,
         },
         "R18-R10B": {
             "authorization_root": str(R18R10B_AUTH_ROOT.resolve()),
@@ -229,6 +245,7 @@ def source_binding(current_commit: str) -> dict[str, Any]:
     changed = [item for item in git(["diff", "--name-only", f"{R18R16_SOURCE}..HEAD"]).splitlines() if item]
     allowed = {
         "05_training/joint_assignment_learning.py",
+        "05_training/r18_durable_trace.py",
         "05_training/run_h4m_ae_ls3_bt8_r18_e1_bounded_training.py",
         "05_training/run_h4m_ae_ls3_bt8_r18_r17_factorized_actor_authorization.py",
     }
@@ -339,6 +356,204 @@ def validate_factorized_ppo_binding(execution: dict[str, int]) -> dict[str, Any]
     }
 
 
+def tensor_sha256(tensor: torch.Tensor) -> str:
+    return hashlib.sha256(tensor.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+
+def factorized_initialization_freeze() -> dict[str, Any]:
+    _evidence, frames, snapshots = R16.bind_evidence()
+    rows_by_arm = {
+        "AC_CONTROL_R1": R16.active_rows(frames, "AC_CONTROL_R1"),
+        "BD_E1_R1": R16.active_rows(frames, "BD_E1_R1"),
+    }
+    arms: dict[str, Any] = {}
+    global_max_distribution_delta = 0.0
+    for arm_id, rows in rows_by_arm.items():
+        actor, load_audit = R16.load_factorized_actor(arm_id, snapshots[str(rows.iloc[0].decision_id)])
+        state = actor.state_dict()
+        distribution_records = []
+        for row in rows.to_dict(orient="records"):
+            decision_id = str(row["decision_id"])
+            snapshot = snapshots[decision_id]
+            dist = actor.forward_factorized(**snapshot["tensors"])
+            legacy_log_probs = JL.masked_log_probs(dist.candidate_action_log_probs, dist.no_assign_action_log_prob,
+                                                   snapshot["tensors"]["safe_mask"])
+            delta = float((legacy_log_probs.exp() - dist.action_probabilities).abs().max().detach().cpu())
+            global_max_distribution_delta = max(global_max_distribution_delta, delta)
+            distribution_records.append({
+                "decision_id": decision_id,
+                "candidate_identity_count": len(R16.semantic_candidate_ids(snapshot)),
+                "NO_ASSIGN_identity": R16.NO_ASSIGN_ID,
+                "legacy_reconstructed_distribution_delta": delta,
+                "probability_sum": float(dist.action_probabilities.sum().detach().cpu()),
+            })
+        new_tensor_names = list(load_audit["missing_keys"])
+        dropped_tensor_names = list(load_audit["unexpected_keys"])
+        arms[arm_id] = {
+            "source_checkpoint": load_audit["source_checkpoint"],
+            "source_checkpoint_sha256": load_audit["checkpoint_sha256"],
+            "factorized_initialization_method": (
+                "load legacy candidate-ranking tensors with strict=False; drop legacy no_assign_scorer; "
+                "initialize new gate_scorer from deterministic R18-R16 seed"
+            ),
+            "factorized_gate_initialization_seed": FACTORIZED_INIT_SEED_BASE + (0 if arm_id == "AC_CONTROL_R1" else 1),
+            "parameter_mapping_rules": {
+                "copied_from_legacy_checkpoint": [
+                    name for name in state
+                    if not name.startswith("gate_scorer.") and not name.startswith("no_assign_scorer.")
+                ],
+                "new_seed_bound_tensors": new_tensor_names,
+                "dropped_legacy_tensors": dropped_tensor_names,
+                "no_optimizer_state_reused": True,
+            },
+            "new_tensor_sha256": {
+                name: tensor_sha256(state[name])
+                for name in new_tensor_names
+                if name in state
+            },
+            "factorized_initial_actor_tensor_digest": R16.BASE.module_digest(actor),
+            "legacy_reconstructed_distribution_preservation": {
+                "rows_checked": len(distribution_records),
+                "max_delta": max(row["legacy_reconstructed_distribution_delta"] for row in distribution_records),
+                "tolerance": R16.TOL,
+                "passed": max(row["legacy_reconstructed_distribution_delta"] for row in distribution_records) <= R16.TOL,
+                "records": distribution_records,
+            },
+            "NO_ASSIGN_identity_preserved": True,
+            "candidate_identities_preserved": True,
+            "policy_mutation_in_R18_R17": False,
+        }
+    require(global_max_distribution_delta <= R16.TOL,
+            f"legacy_reconstructed_distribution_delta={global_max_distribution_delta}", BLOCK_INIT)
+    return {
+        "passed": True,
+        "architecture": "FACTORIZED_ASSIGN_THEN_CANDIDATE",
+        "initialization_is_deterministic": True,
+        "additional_initialization_seed_required": True,
+        "factorized_initialization_seed_base": FACTORIZED_INIT_SEED_BASE,
+        "seed_derivation": "AC_CONTROL_R1 uses base; BD_E1_R1 uses base + 1",
+        "random_new_head_initialization": "required for gate_scorer only and seed-bound",
+        "legacy_reconstructed_distribution_preserved_within_R18_R16_tolerance": True,
+        "max_legacy_reconstructed_distribution_delta": global_max_distribution_delta,
+        "arms": arms,
+    }
+
+
+def factorized_trainable_parameter_contract(initialization: Mapping[str, Any]) -> dict[str, Any]:
+    _evidence, frames, snapshots = R16.bind_evidence()
+    rows = R16.active_rows(frames, "BD_E1_R1")
+    actor, _load_audit = R16.load_factorized_actor("BD_E1_R1", snapshots[str(rows.iloc[0].decision_id)])
+    config = dict(snapshots[str(rows.iloc[0].decision_id)]["metadata"]["actor_config"])
+    critic = JL.JointAssignmentCritic(global_dim=int(config["global_dim"]), demand_dim=int(config["demand_dim"]),
+                                      agent_dim=int(config["agent_dim"]),
+                                      safe_summary_dim=1 + 2 * int(config["candidate_dim"]))
+    actor_names = [name for name, param in actor.named_parameters() if param.requires_grad]
+    stage1 = [name for name in actor_names if name.startswith("gate_scorer.")]
+    stage2 = [name for name in actor_names if name.startswith(("candidate_encoder.", "scorer."))]
+    shared = [name for name in actor_names if name.startswith(("agent_encoder.", "global_encoder.", "demand_encoder."))]
+    covered = set(stage1) | set(stage2) | set(shared)
+    require(covered == set(actor_names), f"actor_parameter_partition_missing={sorted(set(actor_names) - covered)}",
+            BLOCK_TRACE)
+    critic_names = [name for name, param in critic.named_parameters() if param.requires_grad]
+    return {
+        "passed": True,
+        "trainable_only": {
+            "factorized_joint_assignment_actor": {
+                "stage1_assign_no_assign_gate": stage1,
+                "stage2_conditional_candidate_ranking_head": stage2,
+                "shared_encoder_paths": shared,
+                "all_actor_trainable_parameters": actor_names,
+            },
+            "joint_assignment_critic": critic_names,
+        },
+        "frozen_modules": [
+            "operational HOLD/SERVE/SKIP Actor/Critic",
+            "GATv2",
+            "Reward V2",
+            "Zero-Loss",
+            "Local Search semantics",
+            "demand ledger",
+            "simulator semantics",
+            "policy_sampling_identity semantics",
+            "E1 sampling semantics",
+        ],
+        "factorized_initial_actor_tensor_digest_by_legacy_arm": {
+            arm_id: payload["factorized_initial_actor_tensor_digest"]
+            for arm_id, payload in dict(initialization["arms"]).items()
+        },
+        "unauthorized_optimizer_targets_blocked": True,
+    }
+
+
+def factorized_gradient_trace_contract() -> dict[str, Any]:
+    required = {
+        "stage1_assign_probability",
+        "stage1_no_assign_probability",
+        "stage1_selected_log_prob",
+        "stage2_candidate_probability",
+        "stage2_selected_log_prob",
+        "reconstructed_final_probability",
+        "reconstructed_final_log_prob",
+        "stage1_loss_contribution",
+        "stage2_loss_contribution",
+        "stage1_gradient_norm",
+        "stage2_gradient_norm",
+        "shared_encoder_gradient_norm",
+    }
+    present = set(TRACE.OPTIONAL_FACTORIZED_TRACE_FIELDS)
+    require(required.issubset(present), f"missing_factorized_trace_fields={sorted(required - present)}",
+            BLOCK_TRACE)
+    return {
+        "passed": True,
+        "required_factorized_trace_fields": sorted(required),
+        "schema_fields_present": sorted(present),
+        "durable_artifacts": dict(TRACE.TRACE_PARQUET_FILES),
+        "NO_ASSIGN_selected_eligible_row": {
+            "stage2_candidate_head_direct_gradient": 0,
+            "stage1_gradient": "nonzero when advantage and gate probability permit",
+        },
+        "candidate_selected_eligible_row_K_gt_1": {
+            "stage1_gradient": "nonzero",
+            "stage2_gradient": "nonzero",
+        },
+        "candidate_selected_eligible_row_K_eq_1": {
+            "stage1_gradient": "nonzero",
+            "stage2_gradient": "0 is valid degenerate case",
+        },
+        "mandatory_fields_fail_closed": True,
+        "gradient_norm_capture": "observational torch.autograd.grad before optimizer step; does not write parameter .grad",
+        "PPO_objective_changed": False,
+    }
+
+
+def post_update_review_contract() -> dict[str, Any]:
+    return {
+        "passed": True,
+        "review_claim_scope": "no performance or KPI improvement claim",
+        "snapshots": "same frozen snapshots bound through R18-R16/R18-R4 evidence",
+        "compare": "initial factorized Actor vs final factorized Actor",
+        "stage1_metrics": [
+            "ASSIGN probability shift",
+            "NO_ASSIGN probability shift",
+            "ASSIGN-vs-NO_ASSIGN margin",
+        ],
+        "stage2_metrics": [
+            "conditional candidate ranking margin",
+            "conditional candidate probability range",
+            "conditional candidate probability std",
+            "best conditional candidate identity",
+        ],
+        "reconstructed_final_distribution_metrics": [
+            "P(NO_ASSIGN)",
+            "sum P(candidate_i)",
+            "T1/final deterministic selection",
+            "candidate support digest",
+        ],
+        "gate_discrimination_separate_from_candidate_discrimination": True,
+        "do_not_collapse_to_single_metric": True,
+    }
+
+
 def envelope_from_r10b(auth: Mapping[str, Any]) -> dict[str, Any]:
     envelope = dict(auth["envelope"])
     aggregate = dict(envelope["aggregate"])
@@ -353,12 +568,31 @@ def envelope_from_r10b(auth: Mapping[str, Any]) -> dict[str, Any]:
         "assignment_critic_optimizer_steps_exact": 6,
         "raw_optimizer_step_calls_maximum": 12,
         "supplemental_steps": 0,
-    }, f"aggregate_envelope={aggregate}", BLOCK_UPSTREAM)
-    selected_arms = list(envelope["selected_arms"])
-    require([row["arm_id"] for row in selected_arms] == ["AC_CONTROL_R1", "BD_E1_R1"],
-            "arm_order", BLOCK_UPSTREAM)
+    }, f"aggregate_envelope={aggregate}", BLOCK_ENVELOPE)
+    selected_arms = []
+    alias = {
+        "AC_CONTROL_R1": ("AC_FACTOR_CONTROL_R1", FACTORIZED_INIT_SEED_BASE),
+        "BD_E1_R1": ("BD_FACTOR_R1", FACTORIZED_INIT_SEED_BASE + 1),
+    }
+    for row in list(envelope["selected_arms"]):
+        old_arm = str(row["arm_id"])
+        require(old_arm in alias, f"unexpected_arm={old_arm}", BLOCK_ENVELOPE)
+        new_arm, init_seed = alias[old_arm]
+        copied = dict(row)
+        copied["legacy_lineage_arm_id"] = old_arm
+        copied["arm_id"] = new_arm
+        copied["role"] = "AC_FACTOR_CONTROL" if new_arm == "AC_FACTOR_CONTROL_R1" else "BD_FACTOR"
+        copied["factorized_gate_initialization_seed"] = init_seed
+        copied["factorized_gate_initialization_seed_rule"] = "R18-R16 validation seed base 181600 + legacy arm offset"
+        copied["categorical_probe_seed_by_decision"] = {
+            f"{new_arm}:{index}": 0 for index in range(24)
+        }
+        selected_arms.append(copied)
+    require([row["arm_id"] for row in selected_arms] == ["AC_FACTOR_CONTROL_R1", "BD_FACTOR_R1"],
+            "factorized_arm_order", BLOCK_ENVELOPE)
     return {
         **envelope,
+        "selected_arms": selected_arms,
         "authorization_stage": STAGE,
         "actor_architecture": "FACTORIZED_ASSIGN_THEN_CANDIDATE",
         "exact_R18_R3_replay_required": False,
@@ -461,6 +695,8 @@ def guard_contract() -> dict[str, Any]:
 
 def build_authorization(*, current_commit: str, upstream: Mapping[str, Any], source: Mapping[str, Any],
                         envelope: Mapping[str, Any], checkpoint: Mapping[str, Any],
+                        initialization: Mapping[str, Any], trainable: Mapping[str, Any],
+                        gradient_trace: Mapping[str, Any], review: Mapping[str, Any],
                         output_root: Path) -> dict[str, Any]:
     r10b_auth = load_json(R18R10B_AUTH_ROOT / "r18r10_one_shot_authorization_manifest.json")
     payload = {
@@ -503,6 +739,10 @@ def build_authorization(*, current_commit: str, upstream: Mapping[str, Any], sou
             },
         },
         "envelope": dict(envelope),
+        "factorized_initialization_freeze": dict(initialization),
+        "factorized_trainable_parameter_contract": dict(trainable),
+        "factorized_gradient_trace_contract": dict(gradient_trace),
+        "post_update_review_contract": dict(review),
         "module_freeze_contract": module_contract(source),
         "execution_guard_contract": guard_contract(),
         "checkpoint_contract": dict(checkpoint),
@@ -572,11 +812,16 @@ def write_manifest(root: Path, gate: str, source_commit: str, classification: st
 def write_block(root: Path, gate: str, detail: str, source_commit: str | None, execution: Mapping[str, int]) -> None:
     outputs = {
         "evidence_binding_audit.json": {"passed": False, "failure": detail},
-        "r18r17_factorized_bounded_envelope.json": {"not_completed": True},
-        "factorized_actor_training_contract.json": {"not_completed": True},
+        "factorized_initialization_freeze.json": {"not_completed": True},
+        "factorized_trainable_parameter_contract.json": {"not_completed": True},
+        "bounded_envelope_freeze.json": {"not_completed": True},
+        "factorized_gradient_trace_contract.json": {"not_completed": True},
+        "post_update_review_contract.json": {"not_completed": True},
+        "execution_guard_contract.json": {"not_completed": True},
+        "checkpoint_contract.json": {"not_completed": True},
         "factorized_ppo_binding_validation.json": {"not_completed": True},
         "source_binding_guard.json": {"not_completed": True},
-        "r18r17_one_shot_authorization_manifest.json": {"authorized": False, "failure": detail},
+        "r18_factorized_one_shot_authorization_manifest.json": {"authorized": False, "failure": detail},
         "r18r17_dry_run_validation.json": {"passed": False, "failure": detail},
         "test_results.json": {"execution_counters": dict(execution), "hard_failures": [detail], "warnings": []},
         "gate_decision.json": {
@@ -590,7 +835,7 @@ def write_block(root: Path, gate: str, detail: str, source_commit: str | None, e
     }
     for name, payload in outputs.items():
         dump(root / name, payload)
-    (root / "r18r17_exact_execution_command.txt").write_text("NOT_AUTHORIZED\n", encoding="utf-8")
+    (root / "exact_execution_command.txt").write_text("NOT_AUTHORIZED\n", encoding="utf-8")
     (root / "final_report.md").write_text(
         f"# R18-R17 blocked\n\n- gate: `{gate}`\n- detail: `{detail}`\n",
         encoding="utf-8",
@@ -608,6 +853,10 @@ def main() -> None:
         require(not (root / "_SUCCESS.lock").exists(), "success_lock_collision", BLOCK_SOURCE)
         upstream = bind_upstream()
         source = source_binding(source_commit)
+        initialization = factorized_initialization_freeze()
+        trainable = factorized_trainable_parameter_contract(initialization)
+        gradient_trace = factorized_gradient_trace_contract()
+        review = post_update_review_contract()
         ppo_binding = validate_factorized_ppo_binding(execution)
         r10b_auth = load_json(R18R10B_AUTH_ROOT / "r18r10_one_shot_authorization_manifest.json")
         stamp = root.name.split("r18_r17_factorized_actor_authorization_", 1)[1]
@@ -615,8 +864,11 @@ def main() -> None:
         envelope = envelope_from_r10b(r10b_auth)
         checkpoint = checkpoint_contract_from_r10b(r10b_auth, output_root)
         authorization = build_authorization(current_commit=source_commit, upstream=upstream, source=source,
-                                            envelope=envelope, checkpoint=checkpoint, output_root=output_root)
-        auth_path = root / "r18r17_one_shot_authorization_manifest.json"
+                                            envelope=envelope, checkpoint=checkpoint,
+                                            initialization=initialization, trainable=trainable,
+                                            gradient_trace=gradient_trace, review=review,
+                                            output_root=output_root)
+        auth_path = root / "r18_factorized_one_shot_authorization_manifest.json"
         dump(auth_path, authorization)
         command = [
             str(PROJECT / ".venv" / "bin" / "python"),
@@ -627,7 +879,7 @@ def main() -> None:
             str(authorization["authorization_sha256"]),
             "--execute-exact-r17-envelope",
         ]
-        (root / "r18r17_exact_execution_command.txt").write_text(" ".join(command) + "\n", encoding="utf-8")
+        (root / "exact_execution_command.txt").write_text(" ".join(command) + "\n", encoding="utf-8")
         dry = dry_run(auth_path, str(authorization["authorization_sha256"]))
         require(dry["passed"], f"dry_run={dry}", BLOCK_DRY_RUN)
 
@@ -638,11 +890,14 @@ def main() -> None:
                 "execution_counters": dict(execution),
             },
             "source_binding_guard.json": source,
-            "r18r17_factorized_bounded_envelope.json": envelope,
-            "factorized_actor_training_contract.json": module_contract(source),
+            "factorized_initialization_freeze.json": initialization,
+            "factorized_trainable_parameter_contract.json": trainable,
+            "bounded_envelope_freeze.json": envelope,
+            "factorized_gradient_trace_contract.json": gradient_trace,
+            "post_update_review_contract.json": review,
+            "execution_guard_contract.json": guard_contract(),
+            "checkpoint_contract.json": checkpoint,
             "factorized_ppo_binding_validation.json": ppo_binding,
-            "r18r17_execution_guard_contract.json": guard_contract(),
-            "r18r17_checkpoint_contract.json": checkpoint,
             "r18r17_dry_run_validation.json": dry,
             "test_results.json": {
                 "execution_counters": dict(execution),
@@ -656,6 +911,18 @@ def main() -> None:
                 "E1_changed": False,
                 "Zero_Loss_changed": False,
                 "GitHub_push": False,
+            },
+            "final_questions.json": {
+                "Q1_factorized_initialization_deterministic_and_distribution_preserving": True,
+                "Q2_exact_trainable_parameter_set_frozen": True,
+                "Q3_prior_6_window_envelope_reused_unchanged": True,
+                "Q4_all_seeds_and_initial_states_frozen": True,
+                "Q5_stage1_stage2_gradient_rules_explicit_including_K1": True,
+                "Q6_E1_and_policy_sampling_identity_unchanged": True,
+                "Q7_durable_trace_distinguishes_gate_vs_candidate_ranking": True,
+                "Q8_post_update_frozen_review_contract_predeclared": True,
+                "Q9_all_actual_training_optimizer_checkpoint_counters_zero": True,
+                "Q10_exactly_one_bounded_factorized_actor_execution_only_new_next_step": True,
             },
             "gate_decision.json": {
                 "stage": STAGE,

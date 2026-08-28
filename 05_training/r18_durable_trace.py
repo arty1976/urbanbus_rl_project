@@ -80,11 +80,19 @@ OPTIONAL_FACTORIZED_TRACE_FIELDS = [
     "stage1_assign_probability",
     "stage1_no_assign_log_prob",
     "stage1_no_assign_probability",
+    "stage1_selected_log_prob",
     "stage2_selected_candidate_log_prob",
     "stage2_selected_candidate_probability",
+    "stage2_candidate_probability",
+    "stage2_selected_log_prob",
     "stage2_conditional_candidate_probability_sum",
     "reconstructed_final_log_prob",
     "reconstructed_final_probability",
+    "stage1_loss_contribution",
+    "stage2_loss_contribution",
+    "stage1_gradient_norm",
+    "stage2_gradient_norm",
+    "shared_encoder_gradient_norm",
 ]
 
 STABLE_IDENTITY_FIELDS = [
